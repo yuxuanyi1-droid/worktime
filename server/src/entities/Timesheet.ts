@@ -1,0 +1,70 @@
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, OneToMany } from 'typeorm';
+import { User } from './User';
+import { Project } from './Project';
+import { ApprovalRecord } from './ApprovalRecord';
+import { ApprovalFlow } from './ApprovalFlow';
+
+@Entity('timesheets')
+export class Timesheet {
+  @PrimaryGeneratedColumn()
+  id!: number;
+
+  @ManyToOne(() => User, user => user.timesheets)
+  user!: User;
+
+  @Column({ type: 'integer' })
+  userId!: number;
+
+  @ManyToOne(() => Project, project => project.timesheets)
+  project!: Project;
+
+  @Column({ type: 'integer' })
+  projectId!: number;
+
+  @Column({ type: 'varchar', length: 20 })
+  date!: string; // YYYY-MM-DD
+
+  @Column({ type: 'float' })
+  hours!: number;
+
+  @Column({ type: 'text', nullable: true })
+  description!: string;
+
+  @Column({ type: 'varchar', length: 20, default: 'draft' })
+  status!: 'draft' | 'submitted' | 'approved' | 'rejected' | 'deprecated';
+
+  /** 当前审批步骤（0=未提交，1+=审批中第N步） */
+  @Column({ type: 'integer', default: 0 })
+  currentStep!: number;
+
+  /** 使用的审批流程ID */
+  @ManyToOne(() => ApprovalFlow, { nullable: true })
+  approvalFlow!: ApprovalFlow | null;
+
+  @Column({ type: 'integer', nullable: true })
+  approvalFlowId!: number | null;
+
+  @Column({ type: 'integer', nullable: true })
+  approvalInstanceId!: number | null;
+
+  /** 总审批步骤数 */
+  @Column({ type: 'integer', default: 0 })
+  totalSteps!: number;
+
+  /** 提交分组ID：同一行（项目+周）的所有天共享此ID */
+  @Column({ type: 'integer', nullable: true })
+  submissionGroupId!: number | null;
+
+  /** 修改前的原始提交分组ID（用于追溯修改链，关联原审批记录） */
+  @Column({ type: 'integer', nullable: true })
+  previousGroupId!: number | null;
+
+  @OneToMany(() => ApprovalRecord, record => record.timesheet)
+  approvalRecords!: ApprovalRecord[];
+
+  @CreateDateColumn()
+  createdAt!: Date;
+
+  @UpdateDateColumn()
+  updatedAt!: Date;
+}

@@ -1,0 +1,92 @@
+type QueryValue = string | string[] | undefined;
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function parsePositiveInt(value: unknown, field: string, options: { defaultValue?: number; max?: number } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (options.defaultValue !== undefined) return options.defaultValue;
+    throw new Error(`${field}不能为空`);
+  }
+  const num = Number(value);
+  if (!Number.isInteger(num) || num <= 0) throw new Error(`${field}必须是正整数`);
+  if (options.max !== undefined && num > options.max) throw new Error(`${field}不能超过${options.max}`);
+  return num;
+}
+
+export function parseOptionalPositiveInt(value: unknown, field: string, options: { max?: number } = {}) {
+  if (value === undefined || value === null || value === '') return undefined;
+  return parsePositiveInt(value, field, options);
+}
+
+export function parsePagination(query: { page?: QueryValue; pageSize?: QueryValue }, defaultPageSize = 20) {
+  return {
+    page: parsePositiveInt(firstQueryValue(query.page), 'page', { defaultValue: 1, max: 100000 }),
+    pageSize: parsePositiveInt(firstQueryValue(query.pageSize), 'pageSize', { defaultValue: defaultPageSize, max: 200 }),
+  };
+}
+
+export function parseDateString(value: unknown, field: string) {
+  if (typeof value !== 'string' || !DATE_RE.test(value)) throw new Error(`${field}必须是YYYY-MM-DD格式`);
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    throw new Error(`${field}不是有效日期`);
+  }
+  return value;
+}
+
+export function parseOptionalDateString(value: unknown, field: string) {
+  if (value === undefined || value === null || value === '') return undefined;
+  return parseDateString(value, field);
+}
+
+export function parseEnum<T extends string>(value: unknown, field: string, allowed: readonly T[]) {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new Error(`${field}取值无效`);
+  }
+  return value as T;
+}
+
+export function parseOptionalEnum<T extends string>(value: unknown, field: string, allowed: readonly T[]) {
+  if (value === undefined || value === null || value === '') return undefined;
+  return parseEnum(value, field, allowed);
+}
+
+export function parseBooleanQuery(value: unknown) {
+  return value === true || value === 'true';
+}
+
+export function parseString(value: unknown, field: string, options: { required?: boolean; max?: number } = {}) {
+  if (value === undefined || value === null) {
+    if (options.required) throw new Error(`${field}不能为空`);
+    return undefined;
+  }
+  if (typeof value !== 'string') throw new Error(`${field}必须是字符串`);
+  const trimmed = value.trim();
+  if (options.required && !trimmed) throw new Error(`${field}不能为空`);
+  if (options.max !== undefined && trimmed.length > options.max) throw new Error(`${field}不能超过${options.max}个字符`);
+  return trimmed;
+}
+
+export function parseHours(value: unknown, field = 'hours') {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0 || num > 24) throw new Error(`${field}必须大于0且不超过24`);
+  return num;
+}
+
+export function parseNonNegativeNumber(value: unknown, field: string, options: { max?: number } = {}) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) throw new Error(`${field}必须是非负数字`);
+  if (options.max !== undefined && num > options.max) throw new Error(`${field}不能超过${options.max}`);
+  return num;
+}
+
+export function parseArray<T>(value: unknown, field: string, parser: (item: unknown, index: number) => T, options: { min?: number; max?: number } = {}) {
+  if (!Array.isArray(value)) throw new Error(`${field}必须是数组`);
+  if (options.min !== undefined && value.length < options.min) throw new Error(`${field}至少需要${options.min}项`);
+  if (options.max !== undefined && value.length > options.max) throw new Error(`${field}不能超过${options.max}项`);
+  return value.map(parser);
+}
+
+export function firstQueryValue(value: unknown) {
+  return Array.isArray(value) ? value[0] : value;
+}
