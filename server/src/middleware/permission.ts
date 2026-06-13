@@ -2,24 +2,15 @@ import { Response, NextFunction } from 'express';
 import { AuthRequest } from './auth';
 import { AppDataSource } from '../config/database';
 import { User } from '../entities/User';
+import { AccessPolicyService } from '../services/accessPolicyService';
+
+const accessPolicy = new AccessPolicyService();
 
 /**
  * 获取用户完整权限集合
  */
 async function getUserPermissions(userId: number): Promise<Set<string>> {
-  const userRepo = AppDataSource.getRepository(User);
-  const user = await userRepo.findOne({
-    where: { id: userId },
-    relations: ['roles', 'roles.permissions'],
-  });
-  if (!user) return new Set();
-
-  const perms = new Set<string>();
-  user.roles.forEach(role => {
-    if (role.name === 'admin') perms.add('__admin__');
-    (role.permissions || []).forEach(p => perms.add(p.code));
-  });
-  return perms;
+  return accessPolicy.getPermissionCodes(userId);
 }
 
 /**

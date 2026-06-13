@@ -343,11 +343,11 @@ export default function Report() {
     .filter((group) => !selectedProjDept || group.departmentId === selectedProjDept);
 
   const tabItems = useMemo(() => [
-    { key: 'personal', label: '个人报表' },
+    ...(scope?.canViewPersonal ? [{ key: 'personal', label: '个人报表' }] : []),
     ...(scope?.canViewGroup ? [{ key: 'group', label: '组别报表' }] : []),
     ...(scope?.canViewDepartment ? [{ key: 'department', label: '部门报表' }] : []),
     ...(scope?.canViewProject ? [{ key: 'project', label: '项目报表' }] : []),
-    ...((scope?.canViewGroup || scope?.canViewDepartment) ? [{ key: 'overtime', label: '加班统计' }] : []),
+    ...(scope?.canViewOvertime ? [{ key: 'overtime', label: '加班统计' }] : []),
   ] as { key: ReportTabKey; label: string }[], [scope]);
 
   const getErrorMessage = (err: any, fallback: string) => err?.response?.data?.message || err?.message || fallback;
@@ -371,7 +371,8 @@ export default function Report() {
   useEffect(() => {
     if (!scope) return;
     if (!tabItems.some((item) => item.key === tabKey)) {
-      setTabKey('personal');
+      const nextKey = tabItems[0]?.key;
+      if (nextKey) setTabKey(nextKey);
     }
   }, [scope, tabItems, tabKey]);
 
@@ -623,6 +624,7 @@ export default function Report() {
         />
 
         <Spin spinning={loading}>
+          {tabItems.length === 0 && <Empty description="暂无可查看的报表" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
           {tabKey === 'personal' && <PersonalView data={personalData} />}
           {tabKey === 'group' && <GroupView data={groupData} />}
           {tabKey === 'department' && <DepartmentView data={deptData} />}

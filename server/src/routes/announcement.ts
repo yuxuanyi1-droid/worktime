@@ -11,7 +11,7 @@ router.use(authMiddleware);
 // ========== 管理端接口 ==========
 
 // 获取公告列表（管理端）
-router.get('/admin/list', requirePermission('system:read'), async (req: AuthRequest, res) => {
+router.get('/admin/list', requirePermission('system:announcement:view'), async (req: AuthRequest, res) => {
   try {
     const data = await announcementService.getList({
       page: req.query.page ? Number(req.query.page) : 1,
@@ -24,7 +24,7 @@ router.get('/admin/list', requirePermission('system:read'), async (req: AuthRequ
 });
 
 // 创建公告
-router.post('/admin', requirePermission('system:create'), async (req: AuthRequest, res) => {
+router.post('/admin', requirePermission('system:announcement:create'), async (req: AuthRequest, res) => {
   try {
     const data = await announcementService.create({
       ...req.body,
@@ -37,7 +37,7 @@ router.post('/admin', requirePermission('system:create'), async (req: AuthReques
 });
 
 // 更新公告
-router.put('/admin/:id', requirePermission('system:update'), async (req: AuthRequest, res) => {
+router.put('/admin/:id', requirePermission('system:announcement:update'), async (req: AuthRequest, res) => {
   try {
     const data = await announcementService.update(Number(req.params.id), req.body);
     res.json({ code: 0, data });
@@ -47,7 +47,7 @@ router.put('/admin/:id', requirePermission('system:update'), async (req: AuthReq
 });
 
 // 删除公告
-router.delete('/admin/:id', requirePermission('system:delete'), async (req: AuthRequest, res) => {
+router.delete('/admin/:id', requirePermission('system:announcement:delete'), async (req: AuthRequest, res) => {
   try {
     await announcementService.delete(Number(req.params.id));
     res.json({ code: 0, message: '删除成功' });
@@ -57,7 +57,7 @@ router.delete('/admin/:id', requirePermission('system:delete'), async (req: Auth
 });
 
 // 获取公告已读统计
-router.get('/admin/:id/stats', requirePermission('system:read'), async (req: AuthRequest, res) => {
+router.get('/admin/:id/stats', requirePermission('system:announcement:view'), async (req: AuthRequest, res) => {
   try {
     const data = await announcementService.getReadStats(Number(req.params.id));
     res.json({ code: 0, data });

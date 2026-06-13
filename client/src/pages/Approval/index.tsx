@@ -19,9 +19,25 @@ const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const typeLabels: Record<string, string> = {
+  permission_request: '权限申请',
   timesheet: '工时',
   overtime: '加班',
   weekly_report: '周报',
+};
+
+const approvalTypeOptions = [
+  { label: '工时', value: 'timesheet' },
+  { label: '加班', value: 'overtime' },
+  { label: '周报', value: 'weekly_report' },
+  { label: '权限申请', value: 'permission_request' },
+];
+
+const scopeLabels: Record<string, string> = {
+  self: '本人',
+  group: '组别',
+  department: '部门',
+  project: '项目',
+  global: '全局',
 };
 
 const overtimeTypeLabels: Record<string, string> = {
@@ -182,6 +198,20 @@ function ApprovalDetailView({
               <RichTextValue value={c.content} />
             </Descriptions.Item>
             <Descriptions.Item label="工作摘要" span={2}>{c.summary || '-'}</Descriptions.Item>
+          </>
+        )}
+
+        {c.targetType === 'permission_request' && (
+          <>
+            <Descriptions.Item label="申请权限">{c.permissionName || '-'}</Descriptions.Item>
+            <Descriptions.Item label="权限编码">{c.permissionCode || '-'}</Descriptions.Item>
+            <Descriptions.Item label="权限范围">
+              {scopeLabels[c.scopeType || ''] || c.scopeType || '-'}
+              {c.scopeName ? ` / ${c.scopeName}` : ''}
+            </Descriptions.Item>
+            <Descriptions.Item label="有效期至">{c.expiresAt ? dayjs(c.expiresAt).format('YYYY-MM-DD') : '长期'}</Descriptions.Item>
+            <Descriptions.Item label="申请原因" span={2}>{c.reason || '-'}</Descriptions.Item>
+            {c.grantId && <Descriptions.Item label="授权记录" span={2}>#{c.grantId}</Descriptions.Item>}
           </>
         )}
 
@@ -692,7 +722,7 @@ function MySubmissionsTab() {
     <>
       <div style={{ marginBottom: 16, display: 'flex', gap: 12 }}>
         <Select placeholder="类型筛选" allowClear style={{ width: 140 }}
-          options={[{ label: '工时', value: 'timesheet' }, { label: '加班', value: 'overtime' }, { label: '周报', value: 'weekly_report' }]}
+          options={approvalTypeOptions}
           onChange={(v) => setTypeFilter(v || '')} />
         <Select placeholder="状态筛选" allowClear style={{ width: 140 }}
           options={statusOptions}
@@ -883,7 +913,7 @@ function ApprovedByMeTab() {
     <>
       <div style={{ marginBottom: 16, display: 'flex', gap: 12 }}>
         <Select placeholder="类型筛选" allowClear style={{ width: 140 }}
-          options={[{ label: '工时', value: 'timesheet' }, { label: '加班', value: 'overtime' }, { label: '周报', value: 'weekly_report' }]}
+          options={approvalTypeOptions}
           onChange={(v) => setTypeFilter(v || '')} />
       </div>
       <Table

@@ -13,6 +13,7 @@ const WeeklyReportPage = lazy(() => import('../pages/WeeklyReport'));
 const Approval = lazy(() => import('../pages/Approval'));
 const ApprovalDetailPage = lazy(() => import('../pages/Approval').then((module) => ({ default: module.ApprovalDetailPage })));
 const Report = lazy(() => import('../pages/Report'));
+const PermissionRequestPage = lazy(() => import('../pages/PermissionRequest'));
 const System = lazy(() => import('../pages/System'));
 const ProjectPage = lazy(() => import('../pages/Project'));
 const ProfilePage = lazy(() => import('../pages/Profile'));
@@ -79,7 +80,8 @@ export default function AppRouter() {
         <Route path="weekly-report" element={<PermissionRoute permission="weekly_report:read"><WeeklyReportPage /></PermissionRoute>} />
         <Route path="approval" element={<Approval />} />
         <Route path="approval/detail/:targetType/:targetId" element={<ApprovalDetailPage />} />
-        <Route path="report" element={<PermissionRoute permission="report:read"><Report /></PermissionRoute>} />
+        <Route path="report" element={<PermissionRoute permission="report:access"><Report /></PermissionRoute>} />
+        <Route path="permission-request" element={<PermissionRoute permission="permission_request:access"><PermissionRequestPage /></PermissionRoute>} />
         <Route path="project" element={<ProjectPage />} />
         <Route path="system" element={<PermissionRoute permission="system:read"><System /></PermissionRoute>} />
         <Route path="profile" element={<ProfilePage />} />

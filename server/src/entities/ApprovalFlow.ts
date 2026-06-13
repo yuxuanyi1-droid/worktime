@@ -15,7 +15,7 @@ export class ApprovalFlow {
 
   /** 适用类型：timesheet / overtime / weekly_report */
   @Column({ type: 'varchar', length: 50 })
-  type!: 'timesheet' | 'overtime' | 'weekly_report';
+  type!: 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   description!: string;

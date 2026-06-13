@@ -13,9 +13,8 @@ import { usePermission } from '../../hooks/usePermission';
 const { Title } = Typography;
 
 export default function ProjectPage() {
-  const { isAdmin: storeIsAdmin } = usePermission();
+  const { isAdmin: storeIsAdmin, hasPermission } = usePermission();
   const [serverIsAdmin, setServerIsAdmin] = useState(storeIsAdmin);
-  const [isManager, setIsManager] = useState(false);
   const [data, setData] = useState<Project[]>([]);
   const [users, setUsers] = useState<SimpleUser[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -28,8 +27,7 @@ export default function ProjectPage() {
   const [seForm] = Form.useForm();
 
   const isAdmin = serverIsAdmin;
-  // canEdit: 系统管理员或项目管理员都可以编辑
-  const canEdit = isAdmin || isManager;
+  const canCreate = hasPermission('project:create');
 
   const load = async () => {
     try {
@@ -37,7 +35,6 @@ export default function ProjectPage() {
       const canViewRes = await systemApi.canViewProjects();
       if (canViewRes.data) {
         setServerIsAdmin(canViewRes.data.isAdmin);
-        setIsManager(canViewRes.data.isManager && !canViewRes.data.isAdmin);
       }
 
       let projRes;
@@ -46,10 +43,12 @@ export default function ProjectPage() {
       } else {
         projRes = await systemApi.getMyProjects();
       }
-      if (projRes.data) setData(projRes.data);
+      const projects = projRes.data || [];
+      setData(projects);
 
       // 管理员和项目管理员都需要加载用户和分组列表（用于编辑表单和SE配置）
-      if (canViewRes.data?.isAdmin || canViewRes.data?.isManager) {
+      const needsSelectors = canCreate || projects.some((project) => project.canUpdate || project.canAssignSE || project.canAssignManager);
+      if (needsSelectors) {
         try {
           const [userRes, groupRes] = await Promise.all([
             systemApi.getAllUsers(),
@@ -74,10 +73,12 @@ export default function ProjectPage() {
   };
 
   const handleSave = async (values: any) => {
+    const payload = { ...values };
+    if (editItem && !editItem.canAssignManager) delete payload.managerIds;
     if (editItem) {
-      await systemApi.updateProject(editItem.id, values);
+      await systemApi.updateProject(editItem.id, payload);
     } else {
-      await systemApi.createProject(values);
+      await systemApi.createProject(payload);
     }
     message.success('操作成功');
     setModalOpen(false);
@@ -118,47 +119,55 @@ export default function ProjectPage() {
         return <Tag color={info.color}>{info.label}</Tag>;
       },
     },
-    ...(canEdit ? [{
-      title: '操作', key: 'action', width: isAdmin ? 260 : 200,
-      render: (_: any, record: Project) => (
-        <Space>
-          <Button type="link" size="small" onClick={() => {
-            setEditItem(record);
-            form.setFieldsValue({
-              ...record,
-              managerIds: (record.managers || []).map((m: any) => m.id),
-            });
-            setModalOpen(true);
-          }}>编辑</Button>
-          <Button type="link" size="small" onClick={() => {
-            setSelectedProject(record);
-            loadProjectSEs(record.id);
-            seForm.resetFields();
-            setSeModalOpen(true);
-          }}>配置SE</Button>
-          {isAdmin && (
-            <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteProject(record.id); message.success('删除成功'); load(); }}>
-              <Button type="link" size="small" danger>删除</Button>
-            </Popconfirm>
-          )}
-        </Space>
-      ),
-    }] : []),
+    {
+      title: '\u64cd\u4f5c', key: 'action', width: 260,
+      render: (_: any, record: Project) => {
+        const hasActions = record.canUpdate || record.canAssignSE || record.canDelete;
+        if (!hasActions) return '-';
+        return (
+          <Space>
+            {record.canUpdate && (
+              <Button type="link" size="small" onClick={() => {
+                setEditItem(record);
+                form.setFieldsValue({
+                  ...record,
+                  managerIds: (record.managers || []).map((m: any) => m.id),
+                });
+                setModalOpen(true);
+              }}>{'\u7f16\u8f91'}</Button>
+            )}
+            {record.canAssignSE && (
+              <Button type="link" size="small" onClick={() => {
+                setSelectedProject(record);
+                loadProjectSEs(record.id);
+                seForm.resetFields();
+                setSeModalOpen(true);
+              }}>{'\u914d\u7f6eSE'}</Button>
+            )}
+            {record.canDelete && (
+              <Popconfirm title={'\u786e\u5b9a\u5220\u9664?'} onConfirm={async () => { await systemApi.deleteProject(record.id); message.success('\u5220\u9664\u6210\u529f'); load(); }}>
+                <Button type="link" size="small" danger>{'\u5220\u9664'}</Button>
+              </Popconfirm>
+            )}
+          </Space>
+        );
+      },
+    },
   ];
 
   const seColumns = [
     { title: 'SE', key: 'user', render: (_: any, r: ProjectSE) => r.user?.realName || '-' },
     { title: '负责组', key: 'group', render: (_: any, r: ProjectSE) => r.group?.name || '-' },
-    ...(canEdit ? [{
-      title: '操作', key: 'action', width: 80,
+    ...(selectedProject?.canAssignSE ? [{
+      title: '\u64cd\u4f5c', key: 'action', width: 80,
       render: (_: any, r: ProjectSE) => (
-        <Popconfirm title="确定删除?" onConfirm={async () => {
+        <Popconfirm title={'\u786e\u5b9a\u5220\u9664?'} onConfirm={async () => {
           await systemApi.removeProjectSE(r.id);
-          message.success('删除成功');
+          message.success('\u5220\u9664\u6210\u529f');
           if (selectedProject) loadProjectSEs(selectedProject.id);
           load();
         }}>
-          <Button type="link" size="small" danger>删除</Button>
+          <Button type="link" size="small" danger>{'\u5220\u9664'}</Button>
         </Popconfirm>
       ),
     }] : []),
@@ -171,7 +180,7 @@ export default function ProjectPage() {
         项目管理
       </Title>
       <Card style={{ borderRadius: 12 }}>
-        {isAdmin && (
+        {canCreate && (
           <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 16 }}
             onClick={() => { setEditItem(null); form.resetFields(); setModalOpen(true); }}>
             新增项目
@@ -190,10 +199,12 @@ export default function ProjectPage() {
             <Form.Item name="code" label="项目编码" rules={[{ required: true }]}>
               <Input disabled={!!editItem} placeholder="如: PROJ-001" />
             </Form.Item>
-            <Form.Item name="managerIds" label="管理员" rules={[{ required: true, message: '请选择至少一个管理员' }]}>
-              <Select mode="multiple" allowClear showSearch optionFilterProp="label" placeholder="选择项目管理员（可多选）"
-                options={users.map(u => ({ label: u.realName, value: u.id }))} />
-            </Form.Item>
+            {(!editItem || editItem.canAssignManager) && (
+              <Form.Item name="managerIds" label={'\u7ba1\u7406\u5458'} rules={[{ required: true, message: '\u8bf7\u9009\u62e9\u81f3\u5c11\u4e00\u4e2a\u7ba1\u7406\u5458' }]}>
+                <Select mode="multiple" allowClear showSearch optionFilterProp="label" placeholder={'\u9009\u62e9\u9879\u76ee\u7ba1\u7406\u5458\uff08\u53ef\u591a\u9009\uff09'}
+                  options={users.map(u => ({ label: u.realName, value: u.id }))} />
+              </Form.Item>
+            )}
             {editItem && (
               <Form.Item name="status" label="项目状态" rules={[{ required: true, message: '请选择项目状态' }]}>
                 <Select placeholder="请选择项目状态" options={[
@@ -217,21 +228,23 @@ export default function ProjectPage() {
             <Table rowKey="id" columns={seColumns} dataSource={projectSEs} pagination={false} size="small"
               locale={{ emptyText: '暂无SE配置' }} />
           </Card>
-          <Card size="small" title="添加SE">
-            <Form form={seForm} layout="inline" onFinish={handleAddSE}>
-              <Form.Item name="userId" label="SE" rules={[{ required: true }]}>
-                <Select showSearch optionFilterProp="label" style={{ width: 150 }}
-                  options={users.map(u => ({ label: u.realName, value: u.id }))} />
-              </Form.Item>
-              <Form.Item name="groupId" label="负责组" rules={[{ required: true }]}>
-                <Select showSearch optionFilterProp="label" style={{ width: 150 }}
-                  options={groups.map(g => ({ label: g.name, value: g.id }))} />
-              </Form.Item>
-              <Form.Item>
-                <Button type="primary" htmlType="submit">添加</Button>
-              </Form.Item>
-            </Form>
-          </Card>
+          {selectedProject?.canAssignSE && (
+            <Card size="small" title={'\u6dfb\u52a0SE'}>
+              <Form form={seForm} layout="inline" onFinish={handleAddSE}>
+                <Form.Item name="userId" label="SE" rules={[{ required: true }]}>
+                  <Select showSearch optionFilterProp="label" style={{ width: 150 }}
+                    options={users.map(u => ({ label: u.realName, value: u.id }))} />
+                </Form.Item>
+                <Form.Item name="groupId" label={'\u8d1f\u8d23\u7ec4'} rules={[{ required: true }]}>
+                  <Select showSearch optionFilterProp="label" style={{ width: 150 }}
+                    options={groups.map(g => ({ label: g.name, value: g.id }))} />
+                </Form.Item>
+                <Form.Item>
+                  <Button type="primary" htmlType="submit">{'\u6dfb\u52a0'}</Button>
+                </Form.Item>
+              </Form>
+            </Card>
+          )}
         </Modal>
       </Card>
     </div>

@@ -18,6 +18,12 @@ export class Permission {
   @Column({ type: 'varchar', length: 50 })
   action!: string;
 
+  @Column({ type: 'boolean', default: false })
+  grantable!: boolean;
+
+  @Column({ type: 'simple-json', nullable: true })
+  scopeTypes!: string[] | null;
+
   @ManyToMany(() => Role, role => role.permissions)
   roles!: Role[];
 

@@ -245,7 +245,7 @@ export default function Dashboard() {
               {[
                 { icon: '✏️', title: '填报工时', desc: '记录今天的工作', path: '/timesheet', perm: 'timesheet:create' },
                 { icon: '📤', title: '提交周工时', desc: '一键提交审批', path: '/timesheet', perm: 'timesheet:create' },
-                { icon: '📊', title: '月度统计', desc: '工时趋势分析', path: '/report', perm: 'report:read' },
+                { icon: '📊', title: '月度统计', desc: '工时趋势分析', path: '/report', perm: 'report:access' },
                 { icon: '✅', title: '审批中心', desc: `${data?.pendingCount || 0} 条待处理`, path: '/approval', perm: '', visible: (data?.pendingCount || 0) > 0 },
               ].filter(item => item.visible !== false && (!item.perm || hasPermission(item.perm))).map((item, i) => (
                 <div

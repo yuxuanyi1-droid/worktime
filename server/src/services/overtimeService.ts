@@ -4,16 +4,20 @@ import { Between, In } from 'typeorm';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationService } from './notificationService';
 import { User } from '../entities/User';
+import { AccessPolicyService } from './accessPolicyService';
 
 export class OvertimeService {
   private repo = AppDataSource.getRepository(OvertimeApplication);
   private approvalInstanceService = new ApprovalInstanceService();
   private notificationService = new NotificationService();
+  private accessPolicy = new AccessPolicyService();
   private userRepo = AppDataSource.getRepository(User);
 
   async create(data: { userId: number; date?: string; overtimeType?: string; hours?: number; reason?: string; projectId?: number }) {
+    const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
     const record = this.repo.create({
       userId: data.userId,
+      ...orgSnapshot,
       date: data.date!,
       overtimeType: data.overtimeType as OvertimeType,
       hours: data.hours!,
@@ -88,10 +92,13 @@ export class OvertimeService {
   async submit(ids: number[], userId: number) {
     if (!ids?.length) throw new Error('请选择要提交的记录');
     const records = await this.repo.findBy({ id: In(ids) });
+    const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
     for (const r of records) {
       if (r.userId !== userId) throw new Error('只能提交自己的加班记录');
       if (r.status !== 'draft') throw new Error(`记录 ${r.id} 不是草稿状态，无法提交`);
+      Object.assign(r, orgSnapshot);
     }
+    await this.repo.save(records);
 
     const submitter = await this.userRepo.findOneBy({ id: userId });
     for (const r of records) {

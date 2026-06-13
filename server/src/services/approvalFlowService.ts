@@ -37,7 +37,7 @@ export class ApprovalFlowEngine {
   /**
    * 获取某类型的默认审批流程
    */
-  async getDefaultFlow(type: 'timesheet' | 'overtime' | 'weekly_report'): Promise<(ApprovalFlow & { steps: ApprovalFlowStep[] }) | null> {
+  async getDefaultFlow(type: ApprovalTargetType): Promise<(ApprovalFlow & { steps: ApprovalFlowStep[] }) | null> {
     const flow = await this.flowRepo.findOne({
       where: { type, isDefault: true, enabled: true },
       relations: ['steps'],

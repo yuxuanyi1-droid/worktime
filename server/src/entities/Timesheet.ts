@@ -15,6 +15,18 @@ export class Timesheet {
   @Column({ type: 'integer' })
   userId!: number;
 
+  @Column({ type: 'integer', nullable: true })
+  departmentSnapshotId!: number | null;
+
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  departmentSnapshotName!: string | null;
+
+  @Column({ type: 'integer', nullable: true })
+  groupSnapshotId!: number | null;
+
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  groupSnapshotName!: string | null;
+
   @ManyToOne(() => Project, project => project.timesheets)
   project!: Project;
 

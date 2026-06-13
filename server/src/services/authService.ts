@@ -3,9 +3,11 @@ import jwt from 'jsonwebtoken';
 import { AppDataSource } from '../config/database';
 import { authConfig } from '../config/auth';
 import { User } from '../entities/User';
+import { AccessPolicyService } from './accessPolicyService';
 
 export class AuthService {
   private userRepo = AppDataSource.getRepository(User);
+  private accessPolicy = new AccessPolicyService();
 
   async login(username: string, password: string) {
     const user = await this.userRepo.findOne({
@@ -28,6 +30,8 @@ export class AuthService {
       { expiresIn: authConfig.jwtExpiresIn } as jwt.SignOptions
     );
 
+    const permissions = Array.from(await this.accessPolicy.getPermissionCodes(user.id));
+
     return {
       token,
       user: {
@@ -39,7 +43,7 @@ export class AuthService {
         department: user.department ? { id: user.department.id, name: user.department.name } : null,
         group: user.group ? { id: user.group.id, name: user.group.name } : null,
         roles: user.roles.map(r => ({ id: r.id, name: r.name, label: r.label })),
-        permissions: user.roles.flatMap(r => (r.permissions || []).map(p => p.code)),
+        permissions,
       },
     };
   }
@@ -54,6 +58,8 @@ export class AuthService {
       throw new Error('用户不存在');
     }
 
+    const permissions = Array.from(await this.accessPolicy.getPermissionCodes(user.id));
+
     return {
       id: user.id,
       username: user.username,
@@ -63,7 +69,7 @@ export class AuthService {
       department: user.department ? { id: user.department.id, name: user.department.name } : null,
       group: user.group ? { id: user.group.id, name: user.group.name } : null,
       roles: user.roles.map(r => ({ id: r.id, name: r.name, label: r.label })),
-      permissions: user.roles.flatMap(r => (r.permissions || []).map(p => p.code)),
+      permissions,
     };
   }
 

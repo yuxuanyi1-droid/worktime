@@ -1,7 +1,7 @@
 import { Column, CreateDateColumn, Entity, Index, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
 import { ApprovalFlow } from './ApprovalFlow';
 
-export type ApprovalTargetType = 'timesheet' | 'overtime' | 'weekly_report';
+export type ApprovalTargetType = 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
 export type ApprovalStepType = 'group_leader' | 'parent_leader' | 'dept_leader' | 'module_se' | 'project_manager' | 'custom';
 
 export interface ApprovalFlowStepSnapshot {

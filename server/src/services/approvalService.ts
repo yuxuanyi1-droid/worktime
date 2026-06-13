@@ -8,17 +8,21 @@ import { ApprovalTask } from '../entities/ApprovalTask';
 import { ApprovalInstance } from '../entities/ApprovalInstance';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationService } from './notificationService';
+import { PermissionRequest } from '../entities/PermissionRequest';
+import { PermissionGovernanceService } from './permissionGovernanceService';
 
-type TargetType = 'timesheet' | 'overtime' | 'weekly_report';
+type TargetType = 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
 
 export class ApprovalService {
   private recordRepo = AppDataSource.getRepository(ApprovalRecord);
   private timesheetRepo = AppDataSource.getRepository(Timesheet);
   private overtimeRepo = AppDataSource.getRepository(OvertimeApplication);
   private weeklyReportRepo = AppDataSource.getRepository(WeeklyReport);
+  private permissionRequestRepo = AppDataSource.getRepository(PermissionRequest);
   private userRepo = AppDataSource.getRepository(User);
   private approvalInstanceService = new ApprovalInstanceService();
   private notificationService = new NotificationService();
+  private permissionGovernanceService = new PermissionGovernanceService();
 
   private async isAdminUser(userId: number): Promise<boolean> {
     const user = await this.userRepo.findOne({ where: { id: userId }, relations: ['roles'] });
@@ -38,11 +42,14 @@ export class ApprovalService {
     } else if (targetType === 'weekly_report') {
       target = await this.weeklyReportRepo.findOne({ where: { id: targetId } });
       repo = this.weeklyReportRepo;
+    } else if (targetType === 'permission_request') {
+      target = await this.permissionRequestRepo.findOne({ where: { id: targetId } });
+      repo = this.permissionRequestRepo;
     }
 
     return {
       target,
-      applicantId: target?.userId ?? 0,
+      applicantId: target?.userId ?? target?.applicantId ?? 0,
       repo,
       projectId: target?.projectId,
     };
@@ -57,7 +64,7 @@ export class ApprovalService {
   }
 
   private async canViewApprovalTarget(targetType: string, target: any, targetId: number, viewerId: number, records?: ApprovalRecord[]) {
-    if (target.userId === viewerId) return true;
+    if ((target.userId ?? target.applicantId) === viewerId) return true;
     if (await this.isAdminUser(viewerId)) return true;
 
     const approvalRecords = records ?? await this.recordRepo.find({ where: { targetType: targetType as TargetType, targetId } });
@@ -123,12 +130,21 @@ export class ApprovalService {
       base.hours = target.hours;
       base.overtimeType = target.overtimeType;
       base.reason = target.reason;
-    } else {
+    } else if (targetType === 'weekly_report') {
       base.title = `${applicantPrefix}${target.weekStart}~${target.weekEnd} 周报`;
       base.weekStart = target.weekStart;
       base.weekEnd = target.weekEnd;
       base.totalHours = target.totalHours;
       base.summary = target.summary;
+    } else if (targetType === 'permission_request') {
+      base.title = `${applicantPrefix}申请开通 ${target.permissionName}`;
+      base.permissionCode = target.permissionCode;
+      base.permissionName = target.permissionName;
+      base.scopeType = target.scopeType;
+      base.scopeId = target.scopeId;
+      base.scopeName = target.scopeName;
+      base.reason = target.reason;
+      base.expiresAt = target.expiresAt;
     }
 
     const stepInfo = this.buildStepInfo(instance);
@@ -153,7 +169,7 @@ export class ApprovalService {
       if (!target || target.status !== 'submitted') continue;
 
       const applicant = await this.userRepo.findOne({
-        where: { id: target.userId },
+        where: { id: target.userId ?? target.applicantId },
         relations: ['department', 'group'],
       });
       const item = await this.buildListItem(task.targetType as TargetType, target, task.instance, applicant);
@@ -217,6 +233,18 @@ export class ApprovalService {
             { submissionGroupId: target.previousGroupId, userId: target.userId },
             { status: 'deprecated' },
           );
+        }
+      } else if (item.targetType === 'permission_request') {
+        if (result.status === 'approved') {
+          const grant = await this.permissionGovernanceService.activateGrant(item.targetId, result.instance.id, {
+            id: approverId,
+            name: approverName,
+          });
+          await this.permissionRequestRepo.update(item.targetId, { ...updateData, grantId: grant.id });
+        } else if (result.status === 'rejected') {
+          await this.permissionGovernanceService.markRejected(item.targetId);
+        } else {
+          await this.permissionGovernanceService.markSubmitted(item.targetId, result.instance.currentStepOrder || 0);
         }
       } else {
         await repo.update(item.targetId, updateData);
@@ -286,6 +314,17 @@ export class ApprovalService {
       }
     }
 
+    if (!targetType || targetType === 'permission_request') {
+      const where: any = { applicantId: userId };
+      if (status) where.status = status;
+      const items = await this.permissionRequestRepo.find({ where });
+      const applicant = await this.userRepo.findOne({ where: { id: userId }, relations: ['department', 'group'] });
+      for (const item of items) {
+        const instance = await this.getTargetInstance('permission_request', item, item.id);
+        results.push(await this.buildListItem('permission_request', item, instance, applicant));
+      }
+    }
+
     results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const total = results.length;
     const list = results.slice((page - 1) * pageSize, page * pageSize);
@@ -326,7 +365,7 @@ export class ApprovalService {
   async withdraw(userId: number, targetType: string, targetId: number) {
     const { target, repo } = await this.getTargetInfo(targetType, targetId);
     if (!target) throw new Error('记录不存在');
-    if (target.userId !== userId) throw new Error('只能撤回自己的申请');
+    if ((target.userId ?? target.applicantId) !== userId) throw new Error('只能撤回自己的申请');
     if (target.status !== 'submitted') throw new Error('只能撤回审批中的申请');
 
     const submitter = await this.userRepo.findOneBy({ id: userId });
@@ -345,7 +384,13 @@ export class ApprovalService {
       stepLabel: '撤回',
     }));
 
-    const updateData: any = { status: 'draft', currentStep: 0, approvalFlowId: null, approvalInstanceId: null, totalSteps: 0 };
+    const updateData: any = {
+      status: targetType === 'permission_request' ? 'withdrawn' : 'draft',
+      currentStep: 0,
+      approvalFlowId: null,
+      approvalInstanceId: null,
+      totalSteps: 0,
+    };
     if (targetType === 'timesheet' && target.submissionGroupId) {
       await this.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
     } else {
@@ -358,7 +403,7 @@ export class ApprovalService {
   async cc(fromUserId: number, fromUserName: string, targetType: string, targetId: number, recipientIds: number[]) {
     const { target } = await this.getTargetInfo(targetType, targetId);
     if (!target) throw new Error('记录不存在');
-    if (target.userId !== fromUserId) throw new Error('只能抄送自己的申请');
+    if ((target.userId ?? target.applicantId) !== fromUserId) throw new Error('只能抄送自己的申请');
     const instance = await this.getTargetInstance(targetType, target, targetId);
 
     for (const recipientId of recipientIds) {
@@ -397,7 +442,7 @@ export class ApprovalService {
     for (const record of records) {
       const { target } = await this.getTargetInfo(record.targetType, record.targetId);
       if (!target) continue;
-      const applicant = await this.userRepo.findOne({ where: { id: target.userId }, relations: ['department'] });
+      const applicant = await this.userRepo.findOne({ where: { id: target.userId ?? target.applicantId }, relations: ['department'] });
       const item = await this.buildListItem(record.targetType as TargetType, target, await this.getTargetInstance(record.targetType, target, record.targetId), applicant);
       item.status = target.status;
       item.ccFrom = record.comment?.replace(' 抄送给您传阅', '') || '未知';
@@ -410,7 +455,7 @@ export class ApprovalService {
 
   private async buildApprovalContent(targetType: string, targetId: number, target: any) {
     const applicant = await this.userRepo.findOne({
-      where: { id: target.userId },
+      where: { id: target.userId ?? target.applicantId },
       relations: ['department', 'group'],
     });
 
@@ -472,6 +517,15 @@ export class ApprovalService {
       content.totalHours = target.totalHours;
       content.content = target.content;
       content.summary = target.summary;
+    } else if (targetType === 'permission_request') {
+      content.permissionCode = target.permissionCode;
+      content.permissionName = target.permissionName;
+      content.scopeType = target.scopeType;
+      content.scopeId = target.scopeId;
+      content.scopeName = target.scopeName;
+      content.reason = target.reason;
+      content.expiresAt = target.expiresAt;
+      content.grantId = target.grantId;
     }
 
     return content;
@@ -538,7 +592,7 @@ export class ApprovalService {
         createdAt: record.createdAt,
       })),
       viewerContext: viewerId ? {
-        isApplicant: target.userId === viewerId,
+        isApplicant: (target.userId ?? target.applicantId) === viewerId,
         isCurrentApprover: target.status === 'submitted' && await this.approvalInstanceService.userHasPendingTask(targetType, targetId, viewerId),
         isAdmin: viewerIsAdmin,
         isCcRecipient: records.some(record => record.action === 'cc' && record.approverId === viewerId),

@@ -22,6 +22,8 @@ import { Notification } from '../entities/Notification';
 import { AuditLog } from '../entities/AuditLog';
 import { Announcement } from '../entities/Announcement';
 import { AnnouncementRead } from '../entities/AnnouncementRead';
+import { PermissionRequest } from '../entities/PermissionRequest';
+import { UserPermissionGrant } from '../entities/UserPermissionGrant';
 
 const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db');
 const shouldSynchronize = process.env.NODE_ENV !== 'production' && process.env.TYPEORM_SYNCHRONIZE !== 'false';
@@ -37,6 +39,7 @@ export const AppDataSource = new DataSource({
     ApprovalRecord, ProjectSE, ApprovalFlow, ApprovalFlowStep,
     ApprovalFlowVersion, ApprovalInstance, ApprovalTask,
     SystemSetting, Notification, AuditLog, Announcement, AnnouncementRead,
+    PermissionRequest, UserPermissionGrant,
   ],
   migrations: [],
   subscribers: [],

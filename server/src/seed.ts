@@ -11,6 +11,7 @@ import { ProjectSE } from './entities/ProjectSE';
 import { ApprovalFlow } from './entities/ApprovalFlow';
 import { ApprovalFlowStep } from './entities/ApprovalFlowStep';
 import { ApprovalFlowVersion } from './entities/ApprovalFlowVersion';
+import { permissionDefinitions } from './config/permissionDefinitions';
 
 async function seed() {
   if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PROD_SEED !== 'true') {
@@ -22,26 +23,20 @@ async function seed() {
 
   // 1. 创建权限
   const permRepo = AppDataSource.getRepository(Permission);
-  const modules = ['timesheet', 'overtime', 'weekly_report', 'report', 'system'];
-  const actions = ['create', 'read', 'update', 'delete', 'approve'];
-  const moduleLabels: Record<string, string> = {
-    timesheet: '工时管理', overtime: '加班管理', weekly_report: '周报管理', report: '报表中心', system: '系统管理',
-  };
-  const actionLabels: Record<string, string> = {
-    create: '新增', read: '查看', update: '编辑', delete: '删除', approve: '审批',
-  };
-
   const allPerms: Permission[] = [];
-  for (const mod of modules) {
-    for (const action of actions) {
-      const code = `${mod}:${action}`;
-      let perm = await permRepo.findOne({ where: { code } });
-      if (!perm) {
-        perm = permRepo.create({ code, name: `${moduleLabels[mod]}-${actionLabels[action]}`, module: mod, action });
-        await permRepo.save(perm);
-      }
-      allPerms.push(perm);
+  for (const def of permissionDefinitions) {
+    let perm = await permRepo.findOne({ where: { code: def.code } });
+    if (!perm) {
+      perm = permRepo.create(def);
+    } else {
+      perm.name = def.name;
+      perm.module = def.module;
+      perm.action = def.action;
+      perm.grantable = !!def.grantable;
+      perm.scopeTypes = def.scopeTypes ?? null;
     }
+    perm = await permRepo.save(perm);
+    allPerms.push(perm);
   }
   console.log(`✅ 权限初始化完成 (${allPerms.length} 条)`);
 
@@ -61,20 +56,39 @@ async function seed() {
       role = roleRepo.create(rd);
       await roleRepo.save(role);
     }
+    const employeePermissions = [
+      'timesheet:access', 'timesheet:create', 'timesheet:update:self', 'timesheet:delete:self', 'timesheet:submit:self', 'timesheet:withdraw:self', 'timesheet:view:self',
+      'overtime:access', 'overtime:create', 'overtime:update:self', 'overtime:delete:self', 'overtime:submit:self', 'overtime:withdraw:self', 'overtime:view:self',
+      'weekly_report:access', 'weekly_report:create', 'weekly_report:update:self', 'weekly_report:submit:self', 'weekly_report:view:self',
+      'approval:access', 'approval:view:todo', 'approval:view:done', 'approval:view:cc', 'approval:approve:assigned', 'approval:withdraw:self',
+      'report:access', 'report:view:self',
+      'project:access', 'project:view:self',
+      'permission_request:access', 'permission_request:create', 'permission_request:view:self',
+    ];
+    const leaderPermissions = [
+      ...employeePermissions,
+      'timesheet:view:group', 'overtime:view:group', 'weekly_report:view:group',
+      'timesheet:approve:assigned', 'overtime:approve:assigned', 'weekly_report:approve:assigned',
+      'report:view:group', 'report:view:project', 'report:view:overtime',
+      'project:view:managed', 'project:update', 'project:assign_se',
+      'permission_request:approve:assigned',
+    ];
+    const managerPermissions = [
+      ...employeePermissions,
+      'timesheet:view:department', 'overtime:view:department', 'weekly_report:view:department',
+      'timesheet:approve:assigned', 'overtime:approve:assigned', 'weekly_report:approve:assigned',
+      'report:view:department', 'report:view:project', 'report:view:overtime', 'report:export',
+      'project:view:managed', 'project:update', 'project:assign_se',
+      'permission_request:approve:assigned',
+    ];
     if (rd.name === 'admin') {
       role.permissions = allPerms;
     } else if (rd.name === 'manager') {
-      role.permissions = allPerms.filter(p => !p.module.startsWith('system'));
+      role.permissions = allPerms.filter(p => managerPermissions.includes(p.code));
     } else if (rd.name === 'group_leader') {
-      role.permissions = allPerms.filter(p =>
-        ['timesheet', 'overtime', 'weekly_report'].includes(p.module)
-        || p.module === 'report' && p.action === 'read'
-      );
+      role.permissions = allPerms.filter(p => leaderPermissions.includes(p.code));
     } else {
-      role.permissions = allPerms.filter(p =>
-        ['timesheet', 'overtime', 'weekly_report'].includes(p.module) && ['create', 'read', 'update', 'delete'].includes(p.action)
-        || p.module === 'report' && p.action === 'read'
-      );
+      role.permissions = allPerms.filter(p => employeePermissions.includes(p.code));
     }
     await roleRepo.save(role);
     allRoles.push(role);
@@ -288,7 +302,7 @@ async function seed() {
   const stepRepo = AppDataSource.getRepository(ApprovalFlowStep);
   const flowVersionRepo = AppDataSource.getRepository(ApprovalFlowVersion);
 
-  const createDefaultFlow = async (type: 'timesheet' | 'overtime' | 'weekly_report', name: string, steps: { stepType: any; label: string; parentLevel?: number }[]) => {
+  const createDefaultFlow = async (type: 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request', name: string, steps: { stepType: any; label: string; parentLevel?: number; customApproverId?: number | null }[]) => {
     // 清除同类型旧的默认
     await flowRepo.update({ type, isDefault: true }, { isDefault: false });
 
@@ -312,6 +326,7 @@ async function seed() {
         stepType: steps[i].stepType,
         label: steps[i].label,
         parentLevel: steps[i].parentLevel || 1,
+        customApproverId: steps[i].customApproverId ?? null,
       }));
     }
 
@@ -332,7 +347,7 @@ async function seed() {
         stepType: step.stepType,
         label: step.label,
         parentLevel: step.parentLevel || 1,
-        customApproverId: null,
+        customApproverId: step.customApproverId ?? null,
       })),
     }));
 
@@ -355,6 +370,11 @@ async function seed() {
   // 周报审批流程：直属负责人
   await createDefaultFlow('weekly_report', '周报审批流程（默认）', [
     { stepType: 'group_leader', label: '直属负责人审批' },
+  ]);
+
+  await createDefaultFlow('permission_request', '权限申请审批流程（默认）', [
+    { stepType: 'group_leader', label: '直属负责人审批' },
+    { stepType: 'custom', label: '系统管理员审批', customApproverId: adminUser.id },
   ]);
 
   console.log('✅ 审批流程初始化完成');

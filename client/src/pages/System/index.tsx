@@ -23,21 +23,35 @@ function PermissionGuard({ permission, children }: { permission: string; childre
   return hasPermission(permission) ? <>{children}</> : null;
 }
 
+const systemTabOptions = [
+  { key: 'org', label: '\u7ec4\u7ec7\u67b6\u6784', permission: 'system:org:manage' },
+  { key: 'user', label: '\u7528\u6237\u7ba1\u7406', permission: 'system:user:manage' },
+  { key: 'role', label: '\u89d2\u8272\u6743\u9650', permission: 'system:role:manage' },
+  { key: 'approval-flow', label: '\u5ba1\u6279\u6d41\u7a0b', permission: 'system:approval_flow:manage' },
+  { key: 'announcement', label: '\u516c\u544a\u7ba1\u7406', permission: 'system:announcement:view' },
+  { key: 'settings', label: '\u7cfb\u7edf\u8bbe\u7f6e', permission: 'system:settings:manage' },
+];
+
 export default function System() {
+  const { hasPermission } = usePermission();
   const [tabKey, setTabKey] = useState('org');
+  const tabItems = systemTabOptions.filter((item) => hasPermission(item.permission));
+
+  useEffect(() => {
+    if (tabItems.length && !tabItems.some((item) => item.key === tabKey)) {
+      setTabKey(tabItems[0].key);
+    }
+  }, [tabKey, tabItems.map((item) => item.key).join(',')]);
 
   return (
     <div>
-      <Title level={4} style={{ fontFamily: '"Fraunces", Georgia, serif', fontWeight: 700, letterSpacing: '-0.01em' }}>系统管理</Title>
+      <Title level={4} style={{ fontFamily: '"Fraunces", Georgia, serif', fontWeight: 700, letterSpacing: '-0.01em' }}>{'\u7cfb\u7edf\u7ba1\u7406'}</Title>
       <Card style={{ borderRadius: 12 }}>
-        <Tabs activeKey={tabKey} onChange={setTabKey} items={[
-          { key: 'org', label: '组织架构' },
-          { key: 'user', label: '用户管理' },
-          { key: 'role', label: '角色权限' },
-          { key: 'approval-flow', label: '审批流程' },
-          { key: 'announcement', label: '公告管理' },
-          { key: 'settings', label: '系统设置' },
-        ]} />
+        {tabItems.length === 0 ? (
+          <Empty description={'\u6682\u65e0\u53ef\u7ba1\u7406\u6a21\u5757'} />
+        ) : (
+          <Tabs activeKey={tabKey} onChange={setTabKey} items={tabItems.map(({ key, label }) => ({ key, label }))} />
+        )}
 
         {tabKey === 'org' && <OrgTab />}
         {tabKey === 'user' && <UserTab />}
@@ -121,7 +135,7 @@ function OrgTab() {
           {g.leader && <Tag color="blue" style={{ marginLeft: 8, fontSize: 12 }}>负责人: {g.leader.realName}</Tag>}
           {g.members?.length > 0 && <Tag style={{ marginLeft: 4, fontSize: 11, color: '#7A7060' }}>{g.members.length}人</Tag>}
           <span style={{ marginLeft: 8 }}>
-          <PermissionGuard permission="system:create">
+          <PermissionGuard permission="system:org:manage">
             <Tooltip title="添加子组"><PlusOutlined style={{ color: '#4A8B5E', cursor: 'pointer' }} onClick={() => {
               setEditGroup(null);
               groupForm.resetFields();
@@ -129,14 +143,14 @@ function OrgTab() {
               setGroupModalOpen(true);
             }} /></Tooltip>
           </PermissionGuard>
-          <PermissionGuard permission="system:update">
+          <PermissionGuard permission="system:org:manage">
             <Tooltip title="编辑"><EditOutlined style={{ color: '#6B8F71', marginLeft: 8, cursor: 'pointer' }} onClick={() => {
               setEditGroup(g);
               groupForm.setFieldsValue({ name: g.name, description: g.description, leaderId: g.leader?.id, parentId: g.parentId, departmentId: g.departmentId });
               setGroupModalOpen(true);
             }} /></Tooltip>
           </PermissionGuard>
-          <PermissionGuard permission="system:delete">
+          <PermissionGuard permission="system:org:manage">
             <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteGroup(g.id); message.success('删除成功'); load(); }}>
               <DeleteOutlined style={{ color: '#C0564B', marginLeft: 8, cursor: 'pointer' }} />
             </Popconfirm>
@@ -177,14 +191,14 @@ function OrgTab() {
             <strong>{dept.name}</strong>
             {dept.leader && <Tag color="green" style={{ marginLeft: 8, fontSize: 12 }}>负责人: {dept.leader.realName}</Tag>}
             <span style={{ marginLeft: 8 }}>
-              <PermissionGuard permission="system:update">
+              <PermissionGuard permission="system:org:manage">
                 <Tooltip title="编辑"><EditOutlined style={{ color: '#6B8F71', cursor: 'pointer' }} onClick={() => {
                   setEditDept(dept);
                   deptForm.setFieldsValue({ name: dept.name, description: dept.description, leaderId: dept.leader?.id });
                   setDeptModalOpen(true);
                 }} /></Tooltip>
               </PermissionGuard>
-              <PermissionGuard permission="system:delete">
+              <PermissionGuard permission="system:org:manage">
                 <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteDepartment(dept.id); message.success('删除成功'); load(); }}>
                   <DeleteOutlined style={{ color: '#C0564B', marginLeft: 8, cursor: 'pointer' }} />
                 </Popconfirm>
@@ -227,7 +241,7 @@ function OrgTab() {
       <Row gutter={16}>
         <Col span={6}>
           <Card title="部门列表" size="small" extra={
-            <PermissionGuard permission="system:create">
+            <PermissionGuard permission="system:org:manage">
               <Button type="link" size="small" icon={<PlusOutlined />} onClick={() => {
                 setEditDept(null);
                 deptForm.resetFields();
@@ -480,7 +494,7 @@ function UserTab() {
 // ==================== 角色权限 ====================
 function RoleTab() {
   const { hasPermission } = usePermission();
-  const canUpdate = hasPermission('system:update');
+  const canUpdate = hasPermission('system:role:manage');
   const [roles, setRoles] = useState<Role[]>([]);
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [selectedRole, setSelectedRole] = useState<number>();
@@ -528,7 +542,7 @@ function RoleTab() {
       </Col>
       <Col span={16}>
         <Card title="权限配置" size="small" extra={
-          <PermissionGuard permission="system:update">
+          <PermissionGuard permission="system:role:manage">
             <Button type="primary" size="small" onClick={handleSave}>保存</Button>
           </PermissionGuard>
         }>
@@ -634,7 +648,7 @@ function ProjectTab() {
       title: '操作', key: 'action', width: 260,
       render: (_: any, record: any) => (
         <Space>
-          <PermissionGuard permission="system:update">
+          <PermissionGuard permission="project:update">
             <Button type="link" size="small" onClick={() => {
               setEditItem(record);
               form.setFieldsValue({
@@ -650,7 +664,7 @@ function ProjectTab() {
               setSeModalOpen(true);
             }}>配置SE</Button>
           </PermissionGuard>
-          <PermissionGuard permission="system:delete">
+          <PermissionGuard permission="project:delete">
             <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteProject(record.id); message.success('删除成功'); load(); }}>
               <Button type="link" size="small" danger>删除</Button>
             </Popconfirm>
@@ -666,7 +680,7 @@ function ProjectTab() {
     {
       title: '操作', key: 'action', width: 80,
       render: (_: any, r: ProjectSE) => (
-        <PermissionGuard permission="system:delete">
+        <PermissionGuard permission="project:assign_se">
           <Popconfirm title="确定删除?" onConfirm={async () => {
             await systemApi.removeProjectSE(r.id);
             message.success('删除成功');
@@ -715,7 +729,7 @@ function ProjectTab() {
           <Table rowKey="id" columns={seColumns} dataSource={projectSEs} pagination={false} size="small"
             locale={{ emptyText: '暂无SE配置' }} />
         </Card>
-        <PermissionGuard permission="system:update">
+        <PermissionGuard permission="project:update">
           <Card size="small" title="添加SE">
           <Form form={seForm} layout="inline" onFinish={handleAddSE}>
             <Form.Item name="userId" label="SE" rules={[{ required: true }]}>
@@ -779,7 +793,7 @@ function ApprovalFlowTab() {
   };
 
   const typeLabels: Record<string, string> = {
-    timesheet: '工时审批', overtime: '加班审批', weekly_report: '周报审批',
+    timesheet: '工时审批', overtime: '加班审批', weekly_report: '周报审批', permission_request: '权限申请审批',
   };
 
   const columns = [
@@ -807,7 +821,7 @@ function ApprovalFlowTab() {
       title: '操作', key: 'action', width: 180,
       render: (_: any, record: ApprovalFlow) => (
         <Space>
-          <PermissionGuard permission="system:update">
+          <PermissionGuard permission="system:approval_flow:manage">
             <Button type="link" size="small" onClick={() => {
               setEditFlow(record);
               form.setFieldsValue({
@@ -820,7 +834,7 @@ function ApprovalFlowTab() {
               setModalOpen(true);
             }}>编辑</Button>
           </PermissionGuard>
-          <PermissionGuard permission="system:delete">
+          <PermissionGuard permission="system:approval_flow:manage">
             <Popconfirm title="确定删除?" onConfirm={async () => {
               await systemApi.deleteApprovalFlow(record.id);
               message.success('删除成功');
@@ -1025,27 +1039,31 @@ function AnnouncementTab() {
           <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => handleViewStats(record)}>
             统计
           </Button>
-          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => {
-            setEditItem(record);
-            form.setFieldsValue({
-              title: record.title,
-              content: record.content,
-              type: record.type,
-              targetScope: record.targetScope,
-              targetDeptId: record.targetDeptId,
-              targetUserIds: record.targetUserIds,
-            });
-            setModalOpen(true);
-          }}>
-            编辑
-          </Button>
-          <Popconfirm title="确定删除?" onConfirm={async () => {
-            await announcementApi.delete(record.id);
-            message.success('删除成功');
-            load();
-          }}>
-            <Button type="link" size="small" danger icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
+          <PermissionGuard permission="system:announcement:update">
+            <Button type="link" size="small" icon={<EditOutlined />} onClick={() => {
+              setEditItem(record);
+              form.setFieldsValue({
+                title: record.title,
+                content: record.content,
+                type: record.type,
+                targetScope: record.targetScope,
+                targetDeptId: record.targetDeptId,
+                targetUserIds: record.targetUserIds,
+              });
+              setModalOpen(true);
+            }}>
+              {'\u7f16\u8f91'}
+            </Button>
+          </PermissionGuard>
+          <PermissionGuard permission="system:announcement:delete">
+            <Popconfirm title={'\u786e\u5b9a\u5220\u9664?'} onConfirm={async () => {
+              await announcementApi.delete(record.id);
+              message.success('\u5220\u9664\u6210\u529f');
+              load();
+            }}>
+              <Button type="link" size="small" danger icon={<DeleteOutlined />}>{'\u5220\u9664'}</Button>
+            </Popconfirm>
+          </PermissionGuard>
         </Space>
       ),
     },
@@ -1053,7 +1071,7 @@ function AnnouncementTab() {
 
   return (
     <>
-      <PermissionGuard permission="system:create">
+      <PermissionGuard permission="system:announcement:create">
         <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 16 }}
           onClick={() => {
             setEditItem(null);
@@ -1220,7 +1238,7 @@ function SettingsTab() {
               placeholder="如：WorkTime"
             />
           </Col>
-          <PermissionGuard permission="system:update">
+          <PermissionGuard permission="system:settings:manage">
             <Col>
               <Button type="primary" onClick={async () => {
                 setSaving(true);
@@ -1284,7 +1302,7 @@ function SettingsTab() {
             />
             <span>号后不允许提交上月工时</span>
           </Col>
-          <PermissionGuard permission="system:update">
+          <PermissionGuard permission="system:settings:manage">
             <Col>
               <Button type="primary" onClick={async () => {
                 setSaving(true);

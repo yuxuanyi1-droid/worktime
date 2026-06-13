@@ -9,7 +9,7 @@ export class ApprovalRecord {
   id!: number;
 
   @Column({ type: 'varchar', length: 50 })
-  targetType!: 'timesheet' | 'overtime' | 'weekly_report';
+  targetType!: 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
 
   @Column({ type: 'integer' })
   targetId!: number;

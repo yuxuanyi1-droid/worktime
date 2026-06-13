@@ -35,12 +35,13 @@ interface MenuItem {
 }
 
 const allMenuItems: MenuItem[] = [
+  { key: '/permission-request', icon: <KeyOutlined />, label: '权限申请', permission: 'permission_request:access' },
   { key: '/', icon: <DashboardOutlined />, label: '工作台' },
   { key: '/timesheet', icon: <ClockCircleOutlined />, label: '工时', permission: 'timesheet:read' },
   { key: '/overtime', icon: <ThunderboltOutlined />, label: '加班', permission: 'overtime:read' },
   { key: '/weekly-report', icon: <FileTextOutlined />, label: '周报', permission: 'weekly_report:read' },
   { key: '/approval', icon: <CheckCircleOutlined />, label: '审批' },
-  { key: '/report', icon: <BarChartOutlined />, label: '报表', permission: 'report:read' },
+  { key: '/report', icon: <BarChartOutlined />, label: '报表', permission: 'report:access' },
   { key: '/project', icon: <ProjectOutlined />, label: '项目' },
   { key: '/system', icon: <SettingOutlined />, label: '管理', permission: 'system:read' },
 ];

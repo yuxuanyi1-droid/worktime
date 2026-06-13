@@ -67,6 +67,8 @@ export interface Permission {
   name: string;
   module: string;
   action: string;
+  grantable?: boolean;
+  scopeTypes?: string[];
 }
 
 // 项目
@@ -78,6 +80,10 @@ export interface Project {
   status: string; // active=进行中, completed=已完成, suspended=已中止, cancelled=已取消
   managers?: { id: number; realName: string }[];
   moduleSEs?: ProjectSE[];
+  canUpdate?: boolean;
+  canAssignSE?: boolean;
+  canAssignManager?: boolean;
+  canDelete?: boolean;
 }
 
 // 项目状态映射
@@ -104,6 +110,10 @@ export interface ProjectSE {
 export interface Timesheet {
   id: number;
   userId: number;
+  departmentSnapshotId?: number | null;
+  departmentSnapshotName?: string | null;
+  groupSnapshotId?: number | null;
+  groupSnapshotName?: string | null;
   projectId: number;
   project?: Project;
   date: string;
@@ -123,6 +133,10 @@ export interface Timesheet {
 export interface OvertimeApplication {
   id: number;
   userId: number;
+  departmentSnapshotId?: number | null;
+  departmentSnapshotName?: string | null;
+  groupSnapshotId?: number | null;
+  groupSnapshotName?: string | null;
   projectId?: number | null;
   project?: { id: number; name: string } | null;
   date: string;
@@ -154,7 +168,7 @@ export interface WeeklyReport {
 
 // 审批
 export interface ApprovalItem {
-  targetType: 'timesheet' | 'overtime' | 'weekly_report';
+  targetType: 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
   targetId: number;
   instanceId?: number | null;
   taskId?: number | null;
@@ -171,6 +185,12 @@ export interface ApprovalItem {
   weekEnd?: string;
   totalHours?: number;
   summary?: string;
+  permissionCode?: string;
+  permissionName?: string;
+  scopeType?: string;
+  scopeId?: number | null;
+  scopeName?: string | null;
+  expiresAt?: string | null;
   currentStep?: number;
   totalSteps?: number;
   currentStepLabel?: string;
@@ -197,7 +217,7 @@ export interface ApprovalRecord {
 export interface ApprovalFlow {
   id: number;
   name: string;
-  type: 'timesheet' | 'overtime' | 'weekly_report';
+  type: 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
   description?: string;
   isDefault: boolean;
   enabled: boolean;
@@ -259,9 +279,11 @@ export interface ProjectReport {
 }
 
 export interface ReportScope {
+  canViewPersonal: boolean;
   canViewDepartment: boolean;
   canViewGroup: boolean;
   canViewProject: boolean;
+  canViewOvertime: boolean;
   departments: Department[];
   groups: Group[];
   projects: Project[];
@@ -280,6 +302,7 @@ export const statusMap: Record<string, { label: string; color: string }> = {
   submitted: { label: '审批中', color: 'processing' },
   approved: { label: '已审批', color: 'success' },
   rejected: { label: '已驳回', color: 'error' },
+  withdrawn: { label: '已撤回', color: 'default' },
   deprecated: { label: '已废弃', color: 'warning' },
 };
 
@@ -298,3 +321,42 @@ export const stepTypeMap: Record<string, string> = {
   project_manager: '项目管理员',
   custom: '自定义审批人',
 };
+
+export interface PermissionRequestItem {
+  id: number;
+  applicantId: number;
+  applicant?: { id: number; realName: string } | null;
+  permissionCode: string;
+  permissionName: string;
+  scopeType: 'self' | 'group' | 'department' | 'project' | 'global';
+  scopeId?: number | null;
+  scopeName?: string | null;
+  reason: string;
+  expiresAt?: string | null;
+  status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
+  currentStep: number;
+  totalSteps: number;
+  approvalInstanceId?: number | null;
+  grantId?: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserPermissionGrant {
+  id: number;
+  userId: number;
+  user?: { id: number; realName: string; username: string } | null;
+  permissionCode: string;
+  scopeType: 'self' | 'group' | 'department' | 'project' | 'global';
+  scopeId?: number | null;
+  scopeName?: string | null;
+  source: 'request' | 'manual' | 'system';
+  status: 'active' | 'revoked' | 'expired';
+  startsAt?: string | null;
+  expiresAt?: string | null;
+  approvalInstanceId?: number | null;
+  requestId?: number | null;
+  reason?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

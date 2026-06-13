@@ -6,6 +6,7 @@ import { Between, In, Not } from 'typeorm';
 import { NotificationService } from './notificationService';
 import { User } from '../entities/User';
 import { ApprovalInstanceService } from './approvalInstanceService';
+import { AccessPolicyService, OrgSnapshot } from './accessPolicyService';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 dayjs.extend(isoWeek);
@@ -17,8 +18,13 @@ export class TimesheetService {
   private recordRepo = AppDataSource.getRepository(ApprovalRecord);
   private approvalInstanceService = new ApprovalInstanceService();
   private notificationService = new NotificationService();
+  private accessPolicy = new AccessPolicyService();
   private userRepo = AppDataSource.getRepository(User);
   private settingRepo = AppDataSource.getRepository(SystemSetting);
+
+  private createRecord(data: Partial<Timesheet> & { userId: number }, orgSnapshot: OrgSnapshot) {
+    return this.repo.create({ ...data, ...orgSnapshot });
+  }
 
   /** 检查工时锁定 */
   private async checkTimesheetLock(dates: string[]) {
@@ -40,12 +46,14 @@ export class TimesheetService {
   }
 
   async create(data: { userId: number; projectId: number; date: string; hours: number; description?: string }) {
-    const record = this.repo.create(data);
+    const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
+    const record = this.createRecord(data, orgSnapshot);
     return this.repo.save(record);
   }
 
   async batchCreate(userId: number, items: { projectId: number; date: string; hours: number; description?: string }[]) {
-    const records = items.map(item => this.repo.create({ ...item, userId }));
+    const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
+    const records = items.map(item => this.createRecord({ ...item, userId }, orgSnapshot));
     return this.repo.save(records);
   }
 
@@ -129,10 +137,13 @@ export class TimesheetService {
   async submit(ids: number[], userId: number) {
     if (!ids?.length) throw new Error('请选择要提交的记录');
     const records = await this.repo.findBy({ id: In(ids) });
+    const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
     for (const r of records) {
       if (r.userId !== userId) throw new Error('只能提交自己的工时记录');
       if (r.status !== 'draft') throw new Error(`记录 ${r.id} 不是草稿状态，无法提交`);
+      Object.assign(r, orgSnapshot);
     }
+    await this.repo.save(records);
     const submitter = await this.userRepo.findOneBy({ id: userId });
     for (const r of records) {
       const resolved = await this.approvalInstanceService.start({
@@ -183,6 +194,7 @@ export class TimesheetService {
 
     const allDates = rows.flatMap(r => r.entries.map(e => e.date));
     await this.checkTimesheetLock(allDates);
+    const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
 
     // 单日工时校验
     const dailyHours: Record<string, number> = {};
@@ -294,16 +306,17 @@ export class TimesheetService {
             existingRec.status = 'deprecated';
             await this.repo.save(existingRec);
             removedIds.add(existingRec.id);
-            records.push(this.repo.create({
+            records.push(this.createRecord({
               userId,
               projectId: row.projectId,
               date: entry.date,
               hours: entry.hours,
               description: row.description,
               previousGroupId: oldSubGroupId,
-            }));
+            }, orgSnapshot));
           } else {
             // 普通草稿：原地更新
+            Object.assign(existingRec, orgSnapshot);
             existingRec.hours = entry.hours;
             existingRec.description = row.description || existingRec.description;
             records.push(existingRec);
@@ -333,24 +346,24 @@ export class TimesheetService {
           existingRec.status = 'deprecated';
           await this.repo.save(existingRec);
           removedIds.add(existingRec.id);
-          records.push(this.repo.create({
+          records.push(this.createRecord({
             userId,
             projectId: row.projectId,
             date: entry.date,
             hours: entry.hours,
             description: row.description,
             previousGroupId: oldSubGroupId || previousGroupId,
-          }));
+          }, orgSnapshot));
         } else {
           // 创建新记录
-          records.push(this.repo.create({
+          records.push(this.createRecord({
             userId,
             projectId: row.projectId,
             date: entry.date,
             hours: entry.hours,
             description: row.description,
             previousGroupId,
-          }));
+          }, orgSnapshot));
         }
       }
 
@@ -431,6 +444,7 @@ export class TimesheetService {
    */
   async modifySubmitted(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; hours: number }[] }[]) {
     if (!rows?.length) throw new Error('请提供要修改的记录');
+    const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
 
     // ★ 所有行共享同一个 weekStart，整周统一处理
     const weekStart = rows[0].weekStart;
@@ -543,6 +557,7 @@ export class TimesheetService {
 
       if (existingRecord) {
         // 同项目同日期：原地更新
+        Object.assign(existingRecord, orgSnapshot);
         existingRecord.hours = entry.hours;
         existingRecord.description = entry.description || existingRecord.description;
         existingRecord.previousGroupId = previousGroupId;
@@ -558,7 +573,7 @@ export class TimesheetService {
         }
 
         // 创建新草稿
-        await this.repo.save(this.repo.create({
+        await this.repo.save(this.createRecord({
           userId,
           projectId: entry.projectId,
           date: entry.date,
@@ -566,7 +581,7 @@ export class TimesheetService {
 
           description: entry.description,
           previousGroupId,
-        }));
+        }, orgSnapshot));
       }
     }
 

@@ -7,6 +7,16 @@ export class NotificationService {
   private repo = AppDataSource.getRepository(Notification);
   private userRepo = AppDataSource.getRepository(User);
 
+  private getApprovalTypeLabel(targetType: string) {
+    const labels: Record<string, string> = {
+      timesheet: '工时',
+      overtime: '加班',
+      weekly_report: '周报',
+      permission_request: '权限',
+    };
+    return labels[targetType] || '审批';
+  }
+
   /** 创建通知 */
   async create(data: {
     userId: number;
@@ -75,10 +85,11 @@ export class NotificationService {
 
   /** 发送审批相关通知 */
   async notifyApprovalPending(approverIds: number[], targetType: string, targetId: number, applicantName: string, title: string) {
+    const typeLabel = this.getApprovalTypeLabel(targetType);
     return this.createBatch(approverIds, {
       type: 'approval_pending',
       title: `待审批：${title}`,
-      content: `${applicantName} 提交了一份${targetType === 'timesheet' ? '工时' : targetType === 'overtime' ? '加班' : '周报'}申请，请及时审批`,
+      content: `${applicantName} 提交了一份${typeLabel}申请，请及时审批`,
       targetType,
       targetId,
     });
@@ -87,7 +98,7 @@ export class NotificationService {
   /** 通知申请人审批结果 */
   async notifyApprovalResult(applicantId: number, targetType: string, targetId: number, approved: boolean, comment?: string) {
     const actionLabel = approved ? '已通过' : '已驳回';
-    const typeLabel = targetType === 'timesheet' ? '工时' : targetType === 'overtime' ? '加班' : '周报';
+    const typeLabel = this.getApprovalTypeLabel(targetType);
     return this.create({
       userId: applicantId,
       type: approved ? 'approval_approved' : 'approval_rejected',

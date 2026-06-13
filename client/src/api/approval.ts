@@ -2,16 +2,22 @@ import request from '../utils/request';
 import { PageResult, ApprovalItem, ApprovalRecord } from '../types';
 
 export interface MySubmission {
-  targetType: 'timesheet' | 'overtime' | 'weekly_report';
+  targetType: 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
   targetId: number;
   instanceId?: number | null;
   title: string;
-  status: 'draft' | 'submitted' | 'approved' | 'rejected';
+  status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
   currentStep?: number;
   totalSteps?: number;
   hours?: number;
   date?: string;
   description?: string;
+  permissionCode?: string;
+  permissionName?: string;
+  scopeType?: string;
+  scopeId?: number | null;
+  scopeName?: string | null;
+  expiresAt?: string | null;
   createdAt: string;
 }
 
@@ -37,6 +43,13 @@ export interface ApprovalDetail {
     totalHours?: number;
     content?: string;
     summary?: string;
+    permissionCode?: string;
+    permissionName?: string;
+    scopeType?: string;
+    scopeId?: number | null;
+    scopeName?: string | null;
+    expiresAt?: string | null;
+    grantId?: number | null;
     submissionGroupId?: number;
     weekEntries?: { date: string; hours: number }[];
     previousApproval?: { targetId: number; submissionGroupId: number } | null;

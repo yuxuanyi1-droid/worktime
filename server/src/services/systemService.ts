@@ -8,6 +8,7 @@ import { Project } from '../entities/Project';
 import { ProjectSE } from '../entities/ProjectSE';
 import bcrypt from 'bcryptjs';
 import { In } from 'typeorm';
+import { permissionDefinitions } from '../config/permissionDefinitions';
 
 export class SystemService {
   // ==================== 部门管理 ====================
@@ -274,27 +275,19 @@ export class SystemService {
   }
 
   async initPermissions() {
-    const modules = ['timesheet', 'overtime', 'weekly_report', 'report', 'system'];
-    const actions = ['create', 'read', 'update', 'delete', 'approve'];
-    const labels: Record<string, string> = {
-      timesheet: '工时管理', overtime: '加班管理', weekly_report: '周报管理', report: '报表中心', system: '系统管理',
-    };
-    const actionLabels: Record<string, string> = {
-      create: '新增', read: '查看', update: '编辑', delete: '删除', approve: '审批',
-    };
-
-    for (const mod of modules) {
-      for (const action of actions) {
-        const code = `${mod}:${action}`;
-        const existing = await this.permRepo.findOne({ where: { code } });
-        if (!existing) {
-          await this.permRepo.save(this.permRepo.create({
-            code,
-            name: `${labels[mod]}-${actionLabels[action]}`,
-            module: mod,
-            action,
-          }));
-        }
+    for (const def of permissionDefinitions) {
+      const existing = await this.permRepo.findOne({ where: { code: def.code } });
+      if (!existing) {
+        await this.permRepo.save(this.permRepo.create(def));
+      } else {
+        await this.permRepo.save({
+          ...existing,
+          name: def.name,
+          module: def.module,
+          action: def.action,
+          grantable: !!def.grantable,
+          scopeTypes: def.scopeTypes ?? null,
+        });
       }
     }
     return this.permRepo.find();

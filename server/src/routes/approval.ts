@@ -18,8 +18,8 @@ import {
 const router = Router();
 const approvalService = new ApprovalService();
 const userRepo = AppDataSource.getRepository(User);
-const targetTypes = ['timesheet', 'overtime', 'weekly_report'] as const;
-const approvalStatuses = ['draft', 'submitted', 'approved', 'rejected', 'deprecated'] as const;
+const targetTypes = ['timesheet', 'overtime', 'weekly_report', 'permission_request'] as const;
+const approvalStatuses = ['draft', 'submitted', 'approved', 'rejected', 'deprecated', 'withdrawn'] as const;
 const approvalActions = ['approve', 'reject'] as const;
 
 router.use(authMiddleware);

@@ -14,6 +14,7 @@ import { reportRoutes } from './routes/report';
 import { notificationRoutes } from './routes/notification';
 import { auditRoutes } from './routes/audit';
 import { announcementRoutes } from './routes/announcement';
+import { permissionRequestRoutes } from './routes/permissionRequest';
 
 dotenv.config();
 
@@ -53,6 +54,7 @@ app.use('/api/v1/reports', reportRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/audit-logs', auditRoutes);
 app.use('/api/v1/announcements', announcementRoutes);
+app.use('/api/v1/permission-requests', permissionRequestRoutes);
 
 // 健康检查（包含数据库状态）
 app.get('/api/health', (req, res) => {

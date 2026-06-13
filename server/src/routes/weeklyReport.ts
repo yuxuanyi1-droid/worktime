@@ -46,7 +46,10 @@ router.get('/week', requirePermission('weekly_report:read'), async (req: AuthReq
     const userId = firstQueryValue(req.query.userId)
       ? parsePositiveInt(firstQueryValue(req.query.userId), 'userId')
       : req.user!.id;
-    if (!await canAccessUserData(req.user!, userId)) {
+    if (!await canAccessUserData(req.user!, userId, {
+      departmentPermissions: ['weekly_report:view:department'],
+      groupPermissions: ['weekly_report:view:group'],
+    })) {
       return res.status(403).json({ code: 403, message: '只能查看自己或负责部门内成员的周报' });
     }
     const data = await weeklyReportService.getByWeek(userId, weekStart);

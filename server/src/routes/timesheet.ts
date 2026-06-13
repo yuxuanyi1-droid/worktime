@@ -73,7 +73,10 @@ router.get('/weekly-summary', requirePermission('timesheet:read'), async (req: A
     const weekStart = parseDateString(firstQueryValue(req.query.weekStart), 'weekStart');
     const weekEnd = parseDateString(firstQueryValue(req.query.weekEnd), 'weekEnd');
     const targetUserId = req.query.userId ? parsePositiveInt(firstQueryValue(req.query.userId), 'userId') : req.user!.id;
-    if (!await canAccessUserData(req.user!, targetUserId)) {
+    if (!await canAccessUserData(req.user!, targetUserId, {
+      departmentPermissions: ['timesheet:view:department'],
+      groupPermissions: ['timesheet:view:group'],
+    })) {
       return res.status(403).json({ code: 403, message: '只能查看自己或负责部门内成员的工时汇总' });
     }
     const data = await timesheetService.getWeeklySummary(targetUserId, weekStart, weekEnd);

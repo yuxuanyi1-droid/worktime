@@ -9,6 +9,7 @@ type SummaryHours = { hours: number };
 
 export type ReportFilters = {
   departmentId?: number;
+  departmentIds?: number[];
   groupId?: number;
   groupIds?: number[];
   userId?: number;
@@ -70,8 +71,8 @@ export class ReportService {
       const hours = Number(record.hours);
       const user = record.user as any;
       const project = record.project as any;
-      const departmentName = user?.department?.name || UNKNOWN_DEPARTMENT;
-      const groupName = user?.group?.name || UNKNOWN_GROUP;
+      const departmentName = record.departmentSnapshotName || UNKNOWN_DEPARTMENT;
+      const groupName = record.groupSnapshotName || UNKNOWN_GROUP;
 
       byDate[record.date] = (byDate[record.date] || 0) + hours;
       addCountSummary(byUser, user?.realName || UNKNOWN_USER, hours);
@@ -94,16 +95,15 @@ export class ReportService {
   private async getApprovedTimesheets(startDate: string, endDate: string, filters: ReportFilters = {}) {
     const qb = this.timesheetRepo.createQueryBuilder('t')
       .leftJoinAndSelect('t.user', 'u')
-      .leftJoinAndSelect('u.department', 'd')
-      .leftJoinAndSelect('u.group', 'g')
       .leftJoinAndSelect('t.project', 'p')
       .where('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
       .andWhere('t.status = :status', { status: 'approved' });
 
     if (filters.userId) qb.andWhere('t.userId = :userId', { userId: filters.userId });
-    if (filters.departmentId) qb.andWhere('u.departmentId = :departmentId', { departmentId: filters.departmentId });
-    if (filters.groupIds?.length) qb.andWhere('u.groupId IN (:...groupIds)', { groupIds: filters.groupIds });
-    else if (filters.groupId) qb.andWhere('u.groupId = :groupId', { groupId: filters.groupId });
+    if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
+    else if (filters.departmentId) qb.andWhere('t.departmentSnapshotId = :departmentId', { departmentId: filters.departmentId });
+    if (filters.groupIds?.length) qb.andWhere('t.groupSnapshotId IN (:...groupIds)', { groupIds: filters.groupIds });
+    else if (filters.groupId) qb.andWhere('t.groupSnapshotId = :groupId', { groupId: filters.groupId });
 
     return this.dedupTimesheets(await qb.getMany());
   }
@@ -126,34 +126,41 @@ export class ReportService {
   async getProjectReport(projectId: number, startDate: string, endDate: string, filters: ReportFilters = {}) {
     const qb = this.timesheetRepo.createQueryBuilder('t')
       .leftJoinAndSelect('t.user', 'u')
-      .leftJoinAndSelect('u.department', 'd')
-      .leftJoinAndSelect('u.group', 'g')
       .leftJoinAndSelect('t.project', 'p')
       .where('p.id = :projectId', { projectId })
       .andWhere('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
       .andWhere('t.status = :status', { status: 'approved' });
 
-    if (filters.departmentId) qb.andWhere('u.departmentId = :departmentId', { departmentId: filters.departmentId });
-    if (filters.groupIds?.length) qb.andWhere('u.groupId IN (:...groupIds)', { groupIds: filters.groupIds });
-    else if (filters.groupId) qb.andWhere('u.groupId = :groupId', { groupId: filters.groupId });
+    if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
+    else if (filters.departmentId) qb.andWhere('t.departmentSnapshotId = :departmentId', { departmentId: filters.departmentId });
+    if (filters.groupIds?.length) qb.andWhere('t.groupSnapshotId IN (:...groupIds)', { groupIds: filters.groupIds });
+    else if (filters.groupId) qb.andWhere('t.groupSnapshotId = :groupId', { groupId: filters.groupId });
     if (filters.userId) qb.andWhere('t.userId = :userId', { userId: filters.userId });
 
     const records = this.dedupTimesheets(await qb.getMany());
     return this.summarizeTimesheets(records);
   }
 
-  async getOvertimeReport(params: { departmentId?: number; groupId?: number; groupIds?: number[]; userId?: number; startDate: string; endDate: string }) {
-    const { departmentId, groupId, groupIds, userId, startDate, endDate } = params;
+  async getOvertimeReport(params: { departmentId?: number; departmentIds?: number[]; groupId?: number; groupIds?: number[]; userId?: number; startDate: string; endDate: string; matchAnyScope?: boolean }) {
+    const { departmentId, departmentIds, groupId, groupIds, userId, startDate, endDate, matchAnyScope } = params;
     const qb = this.overtimeRepo.createQueryBuilder('o')
       .leftJoinAndSelect('o.user', 'u')
-      .leftJoinAndSelect('u.department', 'd')
-      .leftJoinAndSelect('u.group', 'g')
       .where('o.date BETWEEN :start AND :end', { start: startDate, end: endDate })
       .andWhere('o.status = :status', { status: 'approved' });
 
-    if (departmentId) qb.andWhere('u.departmentId = :departmentId', { departmentId });
-    if (groupIds?.length) qb.andWhere('u.groupId IN (:...groupIds)', { groupIds });
-    else if (groupId) qb.andWhere('u.groupId = :groupId', { groupId });
+    if (matchAnyScope) {
+      const scopeConditions: string[] = [];
+      if (departmentIds?.length) scopeConditions.push('o.departmentSnapshotId IN (:...departmentIds)');
+      else if (departmentId) scopeConditions.push('o.departmentSnapshotId = :departmentId');
+      if (groupIds?.length) scopeConditions.push('o.groupSnapshotId IN (:...groupIds)');
+      else if (groupId) scopeConditions.push('o.groupSnapshotId = :groupId');
+      if (scopeConditions.length) qb.andWhere(`(${scopeConditions.join(' OR ')})`, { departmentIds, departmentId, groupIds, groupId });
+    } else {
+      if (departmentIds?.length) qb.andWhere('o.departmentSnapshotId IN (:...departmentIds)', { departmentIds });
+      else if (departmentId) qb.andWhere('o.departmentSnapshotId = :departmentId', { departmentId });
+      if (groupIds?.length) qb.andWhere('o.groupSnapshotId IN (:...groupIds)', { groupIds });
+      else if (groupId) qb.andWhere('o.groupSnapshotId = :groupId', { groupId });
+    }
     if (userId) qb.andWhere('o.userId = :userId', { userId });
 
     const records = await qb.getMany();
@@ -168,7 +175,7 @@ export class ReportService {
       return acc;
     }, {} as Record<string, number>);
     const byGroup = records.reduce((acc, record) => {
-      addHoursSummary(acc, (record.user as any)?.group?.name || UNKNOWN_GROUP, Number(record.hours));
+      addHoursSummary(acc, record.groupSnapshotName || UNKNOWN_GROUP, Number(record.hours));
       return acc;
     }, {} as Record<string, SummaryHours>);
 
