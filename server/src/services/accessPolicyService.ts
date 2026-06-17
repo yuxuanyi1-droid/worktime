@@ -1,3 +1,5 @@
+import { EntityManager } from 'typeorm';
+import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { Department } from '../entities/Department';
 import { Group } from '../entities/Group';
@@ -25,11 +27,13 @@ export type UserDataScopePermissions = {
 };
 
 export class AccessPolicyService {
-  private departmentRepo = AppDataSource.getRepository(Department);
-  private groupRepo = AppDataSource.getRepository(Group);
-  private projectRepo = AppDataSource.getRepository(Project);
-  private userRepo = AppDataSource.getRepository(User);
-  private grantRepo = AppDataSource.getRepository(UserPermissionGrant);
+  constructor(private manager?: EntityManager) {}
+
+  private get departmentRepo() { return (this.manager ?? AppDataSource).getRepository(Department); }
+  private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
+  private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
+  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get grantRepo() { return (this.manager ?? AppDataSource).getRepository(UserPermissionGrant); }
 
   isAdmin(viewer: AccessViewer) {
     return viewer.roles.includes('admin');
@@ -59,6 +63,32 @@ export class AccessPolicyService {
       if (grant.startsAt && grant.startsAt > now) continue;
       if (grant.expiresAt && grant.expiresAt <= now) continue;
       codes.add(grant.permissionCode);
+    }
+    return expandPermissionCodes(codes);
+  }
+
+  /**
+   * 对已加载（含 roles.permissions 关系）的 user 计算权限集合。
+   * 避免在 authMiddleware 已查过 user 后，permissionMiddleware 再重复查询。
+   * 仅补充查询 active grants。
+   */
+  async getPermissionCodesForLoadedUser(user: { id: number; roles?: { permissions?: { code: string }[] }[] } | null) {
+    const codes = new Set<string>();
+    for (const role of user?.roles ?? []) {
+      for (const permission of role.permissions ?? []) {
+        codes.add(permission.code);
+      }
+    }
+    if (user) {
+      const now = new Date();
+      const grants = await this.grantRepo.find({
+        where: { userId: user.id, status: 'active' },
+      });
+      for (const grant of grants) {
+        if (grant.startsAt && grant.startsAt > now) continue;
+        if (grant.expiresAt && grant.expiresAt <= now) continue;
+        codes.add(grant.permissionCode);
+      }
     }
     return expandPermissionCodes(codes);
   }

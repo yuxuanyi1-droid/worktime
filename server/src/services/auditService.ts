@@ -1,5 +1,6 @@
 import { AppDataSource } from '../config/database';
 import { AuditLog } from '../entities/AuditLog';
+import { logger } from '../utils/logger';
 
 export class AuditService {
   private repo = AppDataSource.getRepository(AuditLog);
@@ -15,7 +16,10 @@ export class AuditService {
     try {
       const log = this.repo.create(data);
       await this.repo.save(log);
-    } catch {} // 审计日志失败不影响业务
+    } catch (e) {
+      // 审计写入失败不影响业务，但需记录到日志便于排查（合规场景下审计丢失是严重问题）
+      logger.error({ err: e, auditData: data }, '审计日志写入失败');
+    }
   }
 
   async getLogs(params: {

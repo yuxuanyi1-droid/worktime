@@ -4,6 +4,7 @@ import { AppDataSource } from '../config/database';
 import { authConfig } from '../config/auth';
 import { User } from '../entities/User';
 import { AccessPolicyService } from './accessPolicyService';
+import { BusinessError } from '../utils/errors';
 
 export class AuthService {
   private userRepo = AppDataSource.getRepository(User);
@@ -16,16 +17,17 @@ export class AuthService {
     });
 
     if (!user) {
-      throw new Error('用户名或密码错误');
+      throw new BusinessError('用户名或密码错误');
     }
 
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
-      throw new Error('用户名或密码错误');
+      throw new BusinessError('用户名或密码错误');
     }
 
+    // 签发 token 时带上 tokenVersion，改密码/登出后 version+1 使旧 token 失效
     const token = jwt.sign(
-      { id: user.id, username: user.username, realName: user.realName },
+      { id: user.id, username: user.username, realName: user.realName, v: user.tokenVersion },
       authConfig.jwtSecret,
       { expiresIn: authConfig.jwtExpiresIn } as jwt.SignOptions
     );
@@ -55,7 +57,7 @@ export class AuthService {
     });
 
     if (!user) {
-      throw new Error('用户不存在');
+      throw new BusinessError('用户不存在');
     }
 
     const permissions = Array.from(await this.accessPolicy.getPermissionCodes(user.id));
@@ -75,19 +77,29 @@ export class AuthService {
 
   async changePassword(userId: number, oldPassword: string, newPassword: string) {
     const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) throw new Error('用户不存在');
+    if (!user) throw new BusinessError('用户不存在');
 
     const isValid = await bcrypt.compare(oldPassword, user.password);
-    if (!isValid) throw new Error('原密码错误');
+    if (!isValid) throw new BusinessError('原密码错误');
 
     user.password = await bcrypt.hash(newPassword, 10);
+    // tokenVersion+1：使改密前签发的所有 token 失效，强制重新登录
+    user.tokenVersion += 1;
     await this.userRepo.save(user);
     return true;
   }
 
+  /** 登出：使当前 token 失效（tokenVersion+1） */
+  async logout(userId: number) {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new BusinessError('用户不存在');
+    user.tokenVersion += 1;
+    await this.userRepo.save(user);
+  }
+
   async updateProfile(userId: number, data: { realName?: string; email?: string; phone?: string }) {
     const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) throw new Error('用户不存在');
+    if (!user) throw new BusinessError('用户不存在');
 
     if (data.realName) user.realName = data.realName;
     if (data.email !== undefined) user.email = data.email;

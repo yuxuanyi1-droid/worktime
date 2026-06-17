@@ -2,8 +2,12 @@ import 'reflect-metadata';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { AppDataSource } from './config/database';
+import pinoHttp from 'pino-http';
+import { AppDataSource, ensureSchema } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
+import { globalLimiter, loginLimiter } from './middleware/security';
+import { metricsMiddleware, metricsHandler } from './middleware/metrics';
+import { logger } from './utils/logger';
 import { authRoutes } from './routes/auth';
 import { systemRoutes } from './routes/system';
 import { timesheetRoutes } from './routes/timesheet';
@@ -24,13 +28,22 @@ const PORT = process.env.PORT || 3000;
 // 数据库连接状态
 let dbConnected = false;
 
-// 中间件
+// 中间件（顺序重要）
+// 反向代理后取真实 IP（限流依赖此设置）
+app.set('trust proxy', 1);
+// HTTP 请求日志（pino-http，结构化）
+app.use(pinoHttp({ logger, autoLogging: process.env.NODE_ENV !== 'test' }));
+// Prometheus 指标采集
+app.use(metricsMiddleware);
 app.use(cors({
   origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
   credentials: true,
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// 全局限流（所有路由）
+app.use('/api/', globalLimiter);
 
 // 数据库状态检查中间件（仅对 API 路由生效）
 app.use('/api/v1', (req, res, next) => {
@@ -42,6 +55,9 @@ app.use('/api/v1', (req, res, next) => {
   }
   next();
 });
+
+// 登录接口额外限流
+app.use('/api/v1/auth/login', loginLimiter);
 
 // 路由
 app.use('/api/v1/auth', authRoutes);
@@ -55,6 +71,9 @@ app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/audit-logs', auditRoutes);
 app.use('/api/v1/announcements', announcementRoutes);
 app.use('/api/v1/permission-requests', permissionRequestRoutes);
+
+// Prometheus 指标端点
+app.get('/api/metrics', metricsHandler);
 
 // 健康检查（包含数据库状态）
 app.get('/api/health', (req, res) => {
@@ -70,20 +89,20 @@ app.use(errorHandler);
 
 // 启动服务
 AppDataSource.initialize()
-  .then(() => {
+  .then(async () => {
+    await ensureSchema();
     dbConnected = true;
-    console.log('✅ 数据库连接成功');
-    console.log(`📋 已注册实体: ${AppDataSource.entityMetadatas.map(e => e.name).join(', ')}`);
+    logger.info('数据库连接成功');
+    logger.info({ entities: AppDataSource.entityMetadatas.map(e => e.name) }, '已注册实体');
     app.listen(PORT, () => {
-      console.log(`🚀 服务端运行在 http://localhost:${PORT}`);
+      logger.info(`服务端运行在 http://localhost:${PORT}`);
     });
   })
   .catch((error) => {
-    console.error('❌ 数据库连接失败:', error.message);
-    console.error('   请检查 server/.env 中的数据库配置');
+    logger.error({ err: error }, '数据库连接失败，请检查 server/.env 中的数据库配置');
     // 即使数据库连接失败也启动服务，方便调试
     app.listen(PORT, () => {
-      console.log(`⚠️  服务端运行在 http://localhost:${PORT} (数据库未连接)`);
+      logger.warn(`服务端运行在 http://localhost:${PORT} (数据库未连接)`);
     });
   });
 

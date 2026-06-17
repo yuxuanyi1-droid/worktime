@@ -14,3 +14,4 @@ export { ApprovalTask } from './ApprovalTask';
 export { SystemSetting } from './SystemSetting';
 export { PermissionRequest } from './PermissionRequest';
 export { UserPermissionGrant } from './UserPermissionGrant';
+export { SubmissionSequence } from './SubmissionSequence';

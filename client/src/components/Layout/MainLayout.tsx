@@ -1,5 +1,6 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Dropdown, Avatar, Badge, Popover, List, Empty, Spin, Tag, Tabs, Space, Button } from 'antd';
+import { ErrorBoundary } from '../ErrorBoundary';
 import {
   DashboardOutlined,
   ClockCircleOutlined,
@@ -324,6 +325,16 @@ export default function MainLayout() {
     }
   }, [currentPath, isAllowed, isKnownRoute, navigate]);
 
+  // 监听 401 事件，软跳转到登录页（保留 SPA 状态，带 redirect 以便登录后返回）
+  useEffect(() => {
+    const onUnauthorized = () => {
+      const redirect = encodeURIComponent(location.pathname + location.search);
+      navigate(`/login?redirect=${redirect}`, { replace: true });
+    };
+    window.addEventListener('unauthorized', onUnauthorized);
+    return () => window.removeEventListener('unauthorized', onUnauthorized);
+  }, [navigate]);
+
   const isActive = (key: string) => {
     if (key === '/') return currentPath === '/';
     return currentPath === key || currentPath.startsWith(key + '/');
@@ -433,7 +444,9 @@ export default function MainLayout() {
         padding: '28px 40px',
         minHeight: 'calc(100vh - 65px)',
       }}>
-        <Outlet />
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </div>
     </div>
   );

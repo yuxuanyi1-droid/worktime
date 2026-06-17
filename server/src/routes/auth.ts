@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Request, Router } from 'express';
 import { AuthService } from '../services/authService';
 import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
@@ -10,13 +10,25 @@ const auditService = new AuditService();
 const loginFailures = new Map<string, { count: number; lockedUntil?: number; lastFailedAt: number }>();
 const MAX_LOGIN_FAILURES = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const LOGIN_FAILURE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-function getLoginKey(req: any, username: string) {
+function getLoginKey(req: Request, username: string) {
   return `${req.ip || 'unknown'}:${String(username).toLowerCase()}`;
+}
+
+function pruneLoginFailures(now = Date.now()) {
+  for (const [key, failure] of loginFailures.entries()) {
+    const isStale = now - failure.lastFailedAt > LOGIN_FAILURE_CACHE_TTL_MS;
+    const lockExpired = failure.lockedUntil !== undefined && failure.lockedUntil <= now;
+    if (isStale || lockExpired) {
+      loginFailures.delete(key);
+    }
+  }
 }
 
 router.post('/login', async (req, res, next) => {
   try {
+    pruneLoginFailures();
     const { username, password } = req.body;
     if (!username || !password) {
       return res.status(400).json({ code: 400, message: '用户名和密码不能为空' });
@@ -45,7 +57,17 @@ router.post('/login', async (req, res, next) => {
         lastFailedAt: Date.now(),
       });
     }
-    res.status(400).json({ code: 400, message: error.message });
+    next(error);
+  }
+});
+
+router.post('/logout', authMiddleware, async (req: AuthRequest, res, next) => {
+  try {
+    await authService.logout(req.user!.id);
+    auditService.log({ userId: req.user!.id, action: 'logout', target: 'system', ip: req.ip });
+    res.json({ code: 0, message: '已登出' });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -53,8 +75,8 @@ router.get('/profile', authMiddleware, async (req: AuthRequest, res, next) => {
   try {
     const profile = await authService.getProfile(req.user!.id);
     res.json({ code: 0, data: profile });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -62,8 +84,8 @@ router.put('/profile', authMiddleware, async (req: AuthRequest, res, next) => {
   try {
     const data = await authService.updateProfile(req.user!.id, req.body);
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -71,9 +93,10 @@ router.put('/change-password', authMiddleware, async (req: AuthRequest, res, nex
   try {
     const { oldPassword, newPassword } = req.body;
     await authService.changePassword(req.user!.id, oldPassword, newPassword);
+    auditService.log({ userId: req.user!.id, action: 'change_password', target: 'user', targetId: req.user!.id, ip: req.ip });
     res.json({ code: 0, message: '密码修改成功' });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 

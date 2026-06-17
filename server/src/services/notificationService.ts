@@ -1,11 +1,15 @@
+import { EntityManager } from 'typeorm';
+import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { Notification } from '../entities/Notification';
 import { User } from '../entities/User';
 import { Between, In } from 'typeorm';
 
 export class NotificationService {
-  private repo = AppDataSource.getRepository(Notification);
-  private userRepo = AppDataSource.getRepository(User);
+  constructor(private manager?: EntityManager) {}
+
+  private get repo() { return (this.manager ?? AppDataSource).getRepository(Notification); }
+  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
 
   private getApprovalTypeLabel(targetType: string) {
     const labels: Record<string, string> = {
@@ -78,8 +82,8 @@ export class NotificationService {
   /** 删除通知 */
   async delete(userId: number, id: number) {
     const notification = await this.repo.findOne({ where: { id } });
-    if (!notification) throw new Error('通知不存在');
-    if (notification.userId !== userId) throw new Error('只能删除自己的通知');
+    if (!notification) throw new BusinessError('通知不存在');
+    if (notification.userId !== userId) throw new BusinessError('只能删除自己的通知');
     await this.repo.delete(id);
   }
 

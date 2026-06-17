@@ -1,3 +1,4 @@
+import { EntityManager } from 'typeorm';
 import { AppDataSource } from '../config/database';
 import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
@@ -43,9 +44,11 @@ function totalOfDates(byDate: Record<string, number>) {
 }
 
 export class ReportService {
-  private timesheetRepo = AppDataSource.getRepository(Timesheet);
-  private overtimeRepo = AppDataSource.getRepository(OvertimeApplication);
-  private approvalService = new ApprovalService();
+  constructor(private manager?: EntityManager) {}
+
+  private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
+  private get overtimeRepo() { return (this.manager ?? AppDataSource).getRepository(OvertimeApplication); }
+  private get approvalService() { return new ApprovalService(this.manager); }
 
   private dedupTimesheets(records: Timesheet[]): Timesheet[] {
     const map = new Map<string, Timesheet>();
@@ -92,12 +95,22 @@ export class ReportService {
     };
   }
 
-  private async getApprovedTimesheets(startDate: string, endDate: string, filters: ReportFilters = {}) {
+  /**
+   * 查询报表用工时记录。
+   *
+   * 统计口径：status 为 approved 或 submitted 的记录（排除 deprecated/draft/rejected）。
+   * - approved：已审批通过，正常统计
+   * - submitted：修改审批中的最新版本——旧记录已 deprecated，新记录正在审批，
+   *   纳入统计可避免「修改期间报表工时凭空消失」的问题
+   * 然后由 dedupTimesheets 按 (userId, date, projectId) 去重保留 id 最大，
+   * 确保同一条工时只计一次（取最新版本）。
+   */
+  private async getReportTimesheets(startDate: string, endDate: string, filters: ReportFilters = {}) {
     const qb = this.timesheetRepo.createQueryBuilder('t')
       .leftJoinAndSelect('t.user', 'u')
       .leftJoinAndSelect('t.project', 'p')
       .where('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
-      .andWhere('t.status = :status', { status: 'approved' });
+      .andWhere('t.status IN (:...statuses)', { statuses: ['approved', 'submitted'] });
 
     if (filters.userId) qb.andWhere('t.userId = :userId', { userId: filters.userId });
     if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
@@ -109,17 +122,17 @@ export class ReportService {
   }
 
   async getPersonalReport(userId: number, startDate: string, endDate: string) {
-    const records = await this.getApprovedTimesheets(startDate, endDate, { userId });
+    const records = await this.getReportTimesheets(startDate, endDate, { userId });
     return this.summarizeTimesheets(records);
   }
 
   async getGroupReport(groupId: number, startDate: string, endDate: string, groupIds?: number[]) {
-    const records = await this.getApprovedTimesheets(startDate, endDate, { groupId, groupIds });
+    const records = await this.getReportTimesheets(startDate, endDate, { groupId, groupIds });
     return this.summarizeTimesheets(records);
   }
 
   async getDepartmentReport(departmentId: number, startDate: string, endDate: string, filters: ReportFilters = {}) {
-    const records = await this.getApprovedTimesheets(startDate, endDate, { ...filters, departmentId });
+    const records = await this.getReportTimesheets(startDate, endDate, { ...filters, departmentId });
     return this.summarizeTimesheets(records);
   }
 
@@ -129,7 +142,7 @@ export class ReportService {
       .leftJoinAndSelect('t.project', 'p')
       .where('p.id = :projectId', { projectId })
       .andWhere('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
-      .andWhere('t.status = :status', { status: 'approved' });
+      .andWhere('t.status IN (:...statuses)', { statuses: ['approved', 'submitted'] });
 
     if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
     else if (filters.departmentId) qb.andWhere('t.departmentSnapshotId = :departmentId', { departmentId: filters.departmentId });
@@ -187,15 +200,18 @@ export class ReportService {
     const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
     const monthEnd = formatLocalDate(new Date(now.getFullYear(), now.getMonth() + 1, 0));
 
+    // 本月工时：一次查询同时算 monthHours 和 trend（两者 where 条件相同，避免重复查询）
     const rawMonthTimesheets = await this.timesheetRepo.find({
       where: { userId, date: Between(monthStart, monthEnd), status: Not('deprecated') },
+      order: { date: 'ASC' },
     });
     const monthTimesheets = this.dedupTimesheets(rawMonthTimesheets);
-    const monthByDate = monthTimesheets.reduce((acc: Record<string, number>, record) => {
-      acc[record.date] = (acc[record.date] || 0) + Number(record.hours);
-      return acc;
-    }, {});
+    const monthByDate: Record<string, number> = {};
+    for (const record of monthTimesheets) {
+      monthByDate[record.date] = (monthByDate[record.date] || 0) + Number(record.hours);
+    }
     const monthHours = totalOfDates(monthByDate);
+    const trend = Object.entries(monthByDate).map(([date, hours]) => ({ date, hours }));
 
     const pendingResult = await this.approvalService.getPendingList(userId, { page: 1, pageSize: 1 });
     const pendingCount = pendingResult.total;
@@ -204,17 +220,6 @@ export class ReportService {
       where: { userId, date: Between(monthStart, monthEnd), status: 'approved' },
     });
     const overtimeHours = monthOvertime.reduce((sum, record) => sum + Number(record.hours), 0);
-
-    const rawTrend = await this.timesheetRepo.find({
-      where: { userId, date: Between(monthStart, monthEnd), status: Not('deprecated') },
-      order: { date: 'ASC' },
-    });
-    const trendRecords = this.dedupTimesheets(rawTrend);
-    const trendByDate: Record<string, number> = {};
-    for (const timesheet of trendRecords) {
-      trendByDate[timesheet.date] = (trendByDate[timesheet.date] || 0) + Number(timesheet.hours);
-    }
-    const trend = Object.entries(trendByDate).map(([date, hours]) => ({ date, hours }));
 
     return { monthHours, overtimeHours, pendingCount, trend };
   }

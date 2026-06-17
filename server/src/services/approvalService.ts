@@ -1,3 +1,4 @@
+import { EntityManager, In, Repository } from 'typeorm';
 import { AppDataSource } from '../config/database';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
 import { Timesheet } from '../entities/Timesheet';
@@ -10,40 +11,90 @@ import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationService } from './notificationService';
 import { PermissionRequest } from '../entities/PermissionRequest';
 import { PermissionGovernanceService } from './permissionGovernanceService';
+import { BusinessError } from '../utils/errors';
 
 type TargetType = 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
 
+/**
+ * 审批目标实体的公共形状（判别联合的公共部分）。
+ * 收敛原先的 any，约束实际被读取的字段，保留各类型特有字段为可选。
+ */
+interface ApprovalTargetLike {
+  id: number;
+  status: string;
+  userId?: number;
+  applicantId?: number;
+  projectId?: number | null;
+  currentStep?: number;
+  totalSteps?: number;
+  approvalInstanceId?: number | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  // timesheet 特有
+  submissionGroupId?: number | null;
+  previousGroupId?: number | null;
+  // overtime / weekly_report / permission_request 特有
+  date?: string;
+  hours?: number;
+  overtimeType?: string;
+  reason?: string;
+  weekStart?: string;
+  weekEnd?: string;
+  totalHours?: number;
+  content?: string;
+  summary?: string;
+  permissionCode?: string;
+  permissionName?: string;
+  scopeType?: string;
+  scopeId?: number | null;
+  scopeName?: string | null;
+  expiresAt?: Date | null;
+  grantId?: number | null;
+}
+
+/** 通知动作（事务提交后统一发送） */
+type PendingNotification =
+  | { kind: 'pending'; approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string }
+  | { kind: 'result'; applicantId: number; targetType: string; targetId: number; approved: boolean; comment?: string };
+
 export class ApprovalService {
-  private recordRepo = AppDataSource.getRepository(ApprovalRecord);
-  private timesheetRepo = AppDataSource.getRepository(Timesheet);
-  private overtimeRepo = AppDataSource.getRepository(OvertimeApplication);
-  private weeklyReportRepo = AppDataSource.getRepository(WeeklyReport);
-  private permissionRequestRepo = AppDataSource.getRepository(PermissionRequest);
-  private userRepo = AppDataSource.getRepository(User);
-  private approvalInstanceService = new ApprovalInstanceService();
-  private notificationService = new NotificationService();
-  private permissionGovernanceService = new PermissionGovernanceService();
+  constructor(private manager?: EntityManager) {}
+
+  private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
+  private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
+  private get overtimeRepo() { return (this.manager ?? AppDataSource).getRepository(OvertimeApplication); }
+  private get weeklyReportRepo() { return (this.manager ?? AppDataSource).getRepository(WeeklyReport); }
+  private get permissionRequestRepo() { return (this.manager ?? AppDataSource).getRepository(PermissionRequest); }
+  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
+  private get notificationService() { return new NotificationService(this.manager); }
+  private get permissionGovernanceService() { return new PermissionGovernanceService(this.manager); }
 
   private async isAdminUser(userId: number): Promise<boolean> {
     const user = await this.userRepo.findOne({ where: { id: userId }, relations: ['roles'] });
     return (user?.roles?.map(role => role.name) ?? []).includes('admin');
   }
 
-  private async getTargetInfo(targetType: string, targetId: number) {
-    let target: any = null;
-    let repo: any = null;
+  private async getTargetInfo(targetType: string, targetId: number): Promise<{
+    target: ApprovalTargetLike | null;
+    applicantId: number;
+    repo: Repository<any> | null;
+    projectId: number | null;
+  }> {
+    let target: ApprovalTargetLike | null = null;
+    let repo: Repository<any> | null = null;
 
     if (targetType === 'timesheet') {
-      target = await this.timesheetRepo.findOne({ where: { id: targetId } });
+      target = await this.timesheetRepo.findOne({ where: { id: targetId } }) as ApprovalTargetLike | null;
       repo = this.timesheetRepo;
     } else if (targetType === 'overtime') {
-      target = await this.overtimeRepo.findOne({ where: { id: targetId } });
+      target = await this.overtimeRepo.findOne({ where: { id: targetId } }) as ApprovalTargetLike | null;
       repo = this.overtimeRepo;
     } else if (targetType === 'weekly_report') {
-      target = await this.weeklyReportRepo.findOne({ where: { id: targetId } });
+      target = await this.weeklyReportRepo.findOne({ where: { id: targetId } }) as ApprovalTargetLike | null;
       repo = this.weeklyReportRepo;
     } else if (targetType === 'permission_request') {
-      target = await this.permissionRequestRepo.findOne({ where: { id: targetId } });
+      target = await this.permissionRequestRepo.findOne({ where: { id: targetId } }) as ApprovalTargetLike | null;
       repo = this.permissionRequestRepo;
     }
 
@@ -51,11 +102,11 @@ export class ApprovalService {
       target,
       applicantId: target?.userId ?? target?.applicantId ?? 0,
       repo,
-      projectId: target?.projectId,
+      projectId: target?.projectId ?? null,
     };
   }
 
-  private async getTargetInstance(targetType: string, target: any, targetId: number) {
+  private async getTargetInstance(targetType: string, target: ApprovalTargetLike | null, targetId: number) {
     if (target?.approvalInstanceId) {
       const byId = await this.approvalInstanceService.getInstanceById(target.approvalInstanceId);
       if (byId) return byId;
@@ -63,7 +114,7 @@ export class ApprovalService {
     return this.approvalInstanceService.getLatestInstance(targetType, targetId);
   }
 
-  private async canViewApprovalTarget(targetType: string, target: any, targetId: number, viewerId: number, records?: ApprovalRecord[]) {
+  private async canViewApprovalTarget(targetType: string, target: ApprovalTargetLike, targetId: number, viewerId: number, records?: ApprovalRecord[]) {
     if ((target.userId ?? target.applicantId) === viewerId) return true;
     if (await this.isAdminUser(viewerId)) return true;
 
@@ -85,7 +136,7 @@ export class ApprovalService {
     };
   }
 
-  private async buildListItem(targetType: TargetType, target: any, instance: ApprovalInstance | null, applicant?: User | null) {
+  private async buildListItem(targetType: TargetType, target: ApprovalTargetLike, instance: ApprovalInstance | null, applicant?: User | null) {
     const applicantPrefix = applicant?.realName ? `${applicant.realName} - ` : '';
     const base: any = {
       targetType,
@@ -160,114 +211,174 @@ export class ApprovalService {
   async getPendingList(approverId: number, params: { targetType?: string; page?: number; pageSize?: number }) {
     const { targetType, page = 1, pageSize = 20 } = params;
     const isAdmin = await this.isAdminUser(approverId);
-    const tasks = await this.approvalInstanceService.getPendingTasks(approverId, { targetType, isAdmin });
-    const results: any[] = [];
+    // 拿到全部待办任务（已按 instance 去重），过滤掉自己提交的
+    const allTasks = (await this.approvalInstanceService.getPendingTasks(approverId, { targetType, isAdmin }))
+      .filter(task => task.instance?.applicantId !== approverId);
 
-    for (const task of tasks) {
-      if (task.instance?.applicantId === approverId) continue;
-      const { target } = await this.getTargetInfo(task.targetType, task.targetId);
-      if (!target || target.status !== 'submitted') continue;
+    const total = allTasks.length;
+    // 先取当前页的任务再组装，避免组装全部记录
+    const pageTasks = allTasks.slice((page - 1) * pageSize, page * pageSize);
 
-      const applicant = await this.userRepo.findOne({
-        where: { id: target.userId ?? target.applicantId },
+    // 批量加载 target：按 targetType 分组，用 In(...) 一次性取，避免 N+1
+    const tasksByType = new Map<string, typeof pageTasks>();
+    for (const task of pageTasks) {
+      const bucket = tasksByType.get(task.targetType) ?? [];
+      bucket.push(task);
+      tasksByType.set(task.targetType, bucket);
+    }
+
+    const targetMap = new Map<string, any>();
+    for (const [type, bucket] of tasksByType) {
+      const ids = bucket.map(t => t.targetId);
+      const repo = this.getRepoByTargetType(type);
+      if (repo && ids.length) {
+        const found = await repo.find({ where: { id: In(ids) } as any });
+        for (const t of found) targetMap.set(`${type}_${t.id}`, t);
+      }
+    }
+
+    // 批量加载 applicant：收集所有 applicantId 一次性查
+    const applicantIds = new Set<number>();
+    for (const task of pageTasks) {
+      const target = targetMap.get(`${task.targetType}_${task.targetId}`);
+      if (target) applicantIds.add(target.userId ?? target.applicantId ?? 0);
+    }
+    const applicantMap = new Map<number, User>();
+    if (applicantIds.size) {
+      const applicants = await this.userRepo.find({
+        where: { id: In([...applicantIds].filter(Boolean)) },
         relations: ['department', 'group'],
       });
+      for (const a of applicants) applicantMap.set(a.id, a);
+    }
+
+    const results: any[] = [];
+    for (const task of pageTasks) {
+      const target = targetMap.get(`${task.targetType}_${task.targetId}`);
+      if (!target || target.status !== 'submitted') continue;
+      const applicant = applicantMap.get(target.userId ?? target.applicantId) ?? null;
       const item = await this.buildListItem(task.targetType as TargetType, target, task.instance, applicant);
       item.taskId = task.id;
       results.push(item);
     }
 
     results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    const total = results.length;
-    const list = results.slice((page - 1) * pageSize, page * pageSize);
-    return { list, total, page, pageSize };
+    return { list: results, total, page, pageSize };
+  }
+
+  /** 按 targetType 返回对应的实体 repository（供批量查询） */
+  private getRepoByTargetType(targetType: string) {
+    if (targetType === 'timesheet') return this.timesheetRepo;
+    if (targetType === 'overtime') return this.overtimeRepo;
+    if (targetType === 'weekly_report') return this.weeklyReportRepo;
+    if (targetType === 'permission_request') return this.permissionRequestRepo;
+    return null;
   }
 
   async approve(approverId: number, approverName: string, items: { targetType: string; targetId: number; action: 'approve' | 'reject'; comment?: string }[]) {
     const isAdmin = await this.isAdminUser(approverId);
+    const notifications: PendingNotification[] = [];
 
-    for (const item of items) {
-      const { target, repo, applicantId } = await this.getTargetInfo(item.targetType, item.targetId);
-      if (!target) throw new Error(`${item.targetType} record ${item.targetId} not found`);
-      if (target.status !== 'submitted') throw new Error(`记录 ${item.targetId} 不是待审批状态`);
+    await AppDataSource.transaction(async (manager) => {
+      const txService = new ApprovalService(manager);
 
-      const result = await this.approvalInstanceService.act({
-        targetType: item.targetType,
-        targetId: item.targetId,
-        approverId,
-        approverName,
-        action: item.action,
-        comment: item.comment,
-        isAdmin,
-      });
+      for (const item of items) {
+        const { target, repo, applicantId } = await txService.getTargetInfo(item.targetType, item.targetId);
+        if (!target) throw new BusinessError(`${item.targetType} record ${item.targetId} not found`);
+        if (target.status !== 'submitted') throw new BusinessError(`记录 ${item.targetId} 不是待审批状态`);
 
-      await this.recordRepo.save(this.recordRepo.create({
-        targetType: item.targetType as TargetType,
-        targetId: item.targetId,
-        instanceId: result.instance.id,
-        taskId: result.task.id,
-        approverId,
-        approverName,
-        action: item.action,
-        comment: item.comment,
-        stepOrder: result.task.stepOrder,
-        stepType: result.task.stepType,
-        stepLabel: result.task.stepLabel,
-      }));
+        const result = await txService.approvalInstanceService.act({
+          targetType: item.targetType,
+          targetId: item.targetId,
+          approverId,
+          approverName,
+          action: item.action,
+          comment: item.comment,
+          isAdmin,
+        });
 
-      const updateData: any = {};
-      if (result.status === 'rejected') {
-        updateData.status = 'rejected';
-        updateData.currentStep = 0;
-      } else if (result.status === 'approved') {
-        updateData.status = 'approved';
-        updateData.currentStep = 0;
-      } else {
-        updateData.currentStep = result.instance.currentStepOrder || 0;
-      }
+        await txService.recordRepo.save(txService.recordRepo.create({
+          targetType: item.targetType as TargetType,
+          targetId: item.targetId,
+          instanceId: result.instance.id,
+          taskId: result.task.id,
+          approverId,
+          approverName,
+          action: item.action,
+          comment: item.comment,
+          stepOrder: result.task.stepOrder,
+          stepType: result.task.stepType,
+          stepLabel: result.task.stepLabel,
+        }));
 
-      if (item.targetType === 'timesheet' && target.submissionGroupId) {
-        await this.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
-        if (item.action === 'approve' && result.status === 'approved' && target.previousGroupId) {
-          await this.timesheetRepo.update(
-            { submissionGroupId: target.previousGroupId, userId: target.userId },
-            { status: 'deprecated' },
-          );
-        }
-      } else if (item.targetType === 'permission_request') {
-        if (result.status === 'approved') {
-          const grant = await this.permissionGovernanceService.activateGrant(item.targetId, result.instance.id, {
-            id: approverId,
-            name: approverName,
-          });
-          await this.permissionRequestRepo.update(item.targetId, { ...updateData, grantId: grant.id });
-        } else if (result.status === 'rejected') {
-          await this.permissionGovernanceService.markRejected(item.targetId);
-        } else {
-          await this.permissionGovernanceService.markSubmitted(item.targetId, result.instance.currentStepOrder || 0);
-        }
-      } else {
-        await repo.update(item.targetId, updateData);
-      }
-
-      try {
-        if (item.action === 'reject') {
-          await this.notificationService.notifyApprovalResult(applicantId, item.targetType, item.targetId, false, item.comment);
+        const updateData: any = {};
+        if (result.status === 'rejected') {
+          updateData.status = 'rejected';
+          updateData.currentStep = 0;
         } else if (result.status === 'approved') {
-          await this.notificationService.notifyApprovalResult(applicantId, item.targetType, item.targetId, true);
+          updateData.status = 'approved';
+          updateData.currentStep = 0;
+        } else {
+          updateData.currentStep = result.instance.currentStepOrder || 0;
+        }
+
+        if (item.targetType === 'timesheet' && target.submissionGroupId) {
+          await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
+          if (item.action === 'approve' && result.status === 'approved' && target.previousGroupId) {
+            await txService.timesheetRepo.update(
+              { submissionGroupId: target.previousGroupId, userId: target.userId },
+              { status: 'deprecated' },
+            );
+          }
+        } else if (item.targetType === 'permission_request') {
+          if (result.status === 'approved') {
+            const grant = await txService.permissionGovernanceService.activateGrant(item.targetId, result.instance.id, {
+              id: approverId,
+              name: approverName,
+            });
+            await txService.permissionRequestRepo.update(item.targetId, { ...updateData, grantId: grant.id });
+          } else if (result.status === 'rejected') {
+            await txService.permissionGovernanceService.markRejected(item.targetId);
+          } else {
+            await txService.permissionGovernanceService.markSubmitted(item.targetId, result.instance.currentStepOrder || 0);
+          }
+        } else {
+          await repo!.update(item.targetId, updateData);
+        }
+
+        if (item.action === 'reject') {
+          notifications.push({ kind: 'result', applicantId, targetType: item.targetType, targetId: item.targetId, approved: false, comment: item.comment });
+        } else if (result.status === 'approved') {
+          notifications.push({ kind: 'result', applicantId, targetType: item.targetType, targetId: item.targetId, approved: true });
         } else if (result.nextApproverIds.length) {
-          await this.notificationService.notifyApprovalPending(
-            result.nextApproverIds,
-            item.targetType,
-            item.targetId,
-            approverName,
-            `审批流转至步骤${result.instance.currentStepOrder}`,
-          );
+          notifications.push({
+            kind: 'pending',
+            approverIds: result.nextApproverIds,
+            targetType: item.targetType,
+            targetId: item.targetId,
+            applicantName: approverName,
+            title: `审批流转至步骤${result.instance.currentStepOrder}`,
+          });
+        }
+      }
+    });
+
+    await this.flushNotifications(notifications);
+    return { success: true };
+  }
+
+  /** 事务提交后统一发送通知（失败不影响业务） */
+  private async flushNotifications(notifications: PendingNotification[]) {
+    const notifier = new NotificationService();
+    for (const n of notifications) {
+      try {
+        if (n.kind === 'pending') {
+          await notifier.notifyApprovalPending(n.approverIds, n.targetType, n.targetId, n.applicantName, n.title);
+        } else {
+          await notifier.notifyApprovalResult(n.applicantId, n.targetType, n.targetId, n.approved, n.comment);
         }
       } catch {}
     }
-
-    return { success: true };
   }
 
   async getMySubmissions(userId: number, params: { targetType?: string; status?: string; page?: number; pageSize?: number }) {
@@ -278,19 +389,24 @@ export class ApprovalService {
       const items = await this.timesheetRepo
         .createQueryBuilder('t')
         .leftJoinAndSelect('t.project', 'p')
+        .leftJoinAndSelect('t.user', 'u')
         .where('t.userId = :userId', { userId })
         .andWhere('t.status != :deprecated', { deprecated: 'deprecated' })
         .getMany();
 
       const seenGroups = new Set<number>();
+      const dedupItems: typeof items = [];
       for (const item of items) {
         if (status && item.status !== status) continue;
         if (item.submissionGroupId) {
           if (seenGroups.has(item.submissionGroupId)) continue;
           seenGroups.add(item.submissionGroupId);
         }
-        const instance = await this.getTargetInstance('timesheet', item, item.id);
-        results.push(await this.buildListItem('timesheet', item, instance, item.user));
+        dedupItems.push(item);
+      }
+      const instanceMap = await this.batchInstances('timesheet', dedupItems);
+      for (const item of dedupItems) {
+        results.push(await this.buildListItem('timesheet', item, instanceMap.get(item.id) ?? null, item.user));
       }
     }
 
@@ -298,9 +414,9 @@ export class ApprovalService {
       const where: any = { userId };
       if (status) where.status = status;
       const items = await this.overtimeRepo.find({ where });
+      const instanceMap = await this.batchInstances('overtime', items);
       for (const item of items) {
-        const instance = await this.getTargetInstance('overtime', item, item.id);
-        results.push(await this.buildListItem('overtime', item, instance));
+        results.push(await this.buildListItem('overtime', item, instanceMap.get(item.id) ?? null));
       }
     }
 
@@ -308,9 +424,9 @@ export class ApprovalService {
       const where: any = { userId };
       if (status) where.status = status;
       const items = await this.weeklyReportRepo.find({ where });
+      const instanceMap = await this.batchInstances('weekly_report', items);
       for (const item of items) {
-        const instance = await this.getTargetInstance('weekly_report', item, item.id);
-        results.push(await this.buildListItem('weekly_report', item, instance));
+        results.push(await this.buildListItem('weekly_report', item, instanceMap.get(item.id) ?? null));
       }
     }
 
@@ -319,9 +435,9 @@ export class ApprovalService {
       if (status) where.status = status;
       const items = await this.permissionRequestRepo.find({ where });
       const applicant = await this.userRepo.findOne({ where: { id: userId }, relations: ['department', 'group'] });
+      const instanceMap = await this.batchInstances('permission_request', items);
       for (const item of items) {
-        const instance = await this.getTargetInstance('permission_request', item, item.id);
-        results.push(await this.buildListItem('permission_request', item, instance, applicant));
+        results.push(await this.buildListItem('permission_request', item, instanceMap.get(item.id) ?? null, applicant));
       }
     }
 
@@ -329,6 +445,48 @@ export class ApprovalService {
     const total = results.length;
     const list = results.slice((page - 1) * pageSize, page * pageSize);
     return { list, total, page, pageSize };
+  }
+
+  /**
+   * 批量加载审批实例：优先按 target 自带的 approvalInstanceId 批量查；
+   * 对缺失的再按 (targetType, targetId) 批量取最新实例。避免逐条查询（N+1 → 2 次）。
+   */
+  private async batchInstances(targetType: string, targets: any[]): Promise<Map<number, ApprovalInstance | null>> {
+    const result = new Map<number, ApprovalInstance | null>();
+    if (!targets.length) return result;
+
+    const byInstanceId = new Map<number, number>(); // instanceId -> targetId
+    const missingTargetIds: number[] = [];
+    for (const t of targets) {
+      if (t.approvalInstanceId) {
+        byInstanceId.set(t.approvalInstanceId, t.id);
+      } else {
+        missingTargetIds.push(t.id);
+      }
+    }
+
+    // 1. 按 approvalInstanceId 批量
+    if (byInstanceId.size) {
+      const instances = await this.approvalInstanceService.getInstanceByIds([...byInstanceId.keys()]);
+      for (const inst of instances) {
+        const targetId = byInstanceId.get(inst.id);
+        if (targetId) result.set(targetId, inst);
+      }
+      // 缺失的（approvalInstanceId 已失效）也加入 missing
+      for (const [instanceId, targetId] of byInstanceId) {
+        if (!result.has(targetId)) missingTargetIds.push(targetId);
+      }
+    }
+
+    // 2. 对仍缺失的，按 (targetType, targetId) 批量取最新实例
+    if (missingTargetIds.length) {
+      const latest = await this.approvalInstanceService.getLatestInstances(targetType, missingTargetIds);
+      for (const inst of latest) {
+        if (!result.has(inst.targetId)) result.set(inst.targetId, inst);
+      }
+    }
+
+    return result;
   }
 
   async getApprovalHistory(params: { targetType?: string; targetId?: number; page?: number; pageSize?: number; viewerId: number; mine?: boolean }) {
@@ -343,6 +501,24 @@ export class ApprovalService {
 
     qb.orderBy('r.createdAt', 'DESC');
     const records = await qb.getMany();
+
+    // 批量预取所有 target：按 targetType 分组用 In(...) 一次查，避免逐条 getTargetInfo
+    const targetIdsByType = new Map<string, Set<number>>();
+    for (const record of records) {
+      const bucket = targetIdsByType.get(record.targetType) ?? new Set<number>();
+      bucket.add(record.targetId);
+      targetIdsByType.set(record.targetType, bucket);
+    }
+    const targetMap = new Map<string, any>();
+    for (const [type, idSet] of targetIdsByType) {
+      const ids = [...idSet];
+      const repo = this.getRepoByTargetType(type);
+      if (repo && ids.length) {
+        const found = await repo.find({ where: { id: In(ids) } as any });
+        for (const t of found) targetMap.set(`${type}_${t.id}`, t);
+      }
+    }
+
     const list: ApprovalRecord[] = [];
     const permissionCache = new Map<string, boolean>();
 
@@ -350,7 +526,7 @@ export class ApprovalService {
       const key = `${record.targetType}_${record.targetId}`;
       let canView = permissionCache.get(key);
       if (canView === undefined) {
-        const { target } = await this.getTargetInfo(record.targetType, record.targetId);
+        const target = targetMap.get(key);
         canView = !!target && await this.canViewApprovalTarget(record.targetType, target, record.targetId, viewerId, records.filter(r => r.targetType === record.targetType && r.targetId === record.targetId));
         permissionCache.set(key, canView);
       }
@@ -363,67 +539,73 @@ export class ApprovalService {
   }
 
   async withdraw(userId: number, targetType: string, targetId: number) {
-    const { target, repo } = await this.getTargetInfo(targetType, targetId);
-    if (!target) throw new Error('记录不存在');
-    if ((target.userId ?? target.applicantId) !== userId) throw new Error('只能撤回自己的申请');
-    if (target.status !== 'submitted') throw new Error('只能撤回审批中的申请');
+    await AppDataSource.transaction(async (manager) => {
+      const txService = new ApprovalService(manager);
+      const { target, repo } = await txService.getTargetInfo(targetType, targetId);
+      if (!target) throw new BusinessError('记录不存在');
+      if ((target.userId ?? target.applicantId) !== userId) throw new BusinessError('只能撤回自己的申请');
+      if (target.status !== 'submitted') throw new BusinessError('只能撤回审批中的申请');
 
-    const submitter = await this.userRepo.findOneBy({ id: userId });
-    const instance = await this.approvalInstanceService.withdraw(targetType, targetId, userId, submitter?.realName || '');
-    await this.recordRepo.save(this.recordRepo.create({
-      targetType: targetType as TargetType,
-      targetId,
-      instanceId: instance?.id ?? target.approvalInstanceId ?? null,
-      taskId: null,
-      approverId: userId,
-      approverName: submitter?.realName || '',
-      action: 'withdraw',
-      comment: '申请人撤回审批',
-      stepOrder: target.currentStep || 1,
-      stepType: 'withdraw',
-      stepLabel: '撤回',
-    }));
+      const submitter = await txService.userRepo.findOneBy({ id: userId });
+      const instance = await txService.approvalInstanceService.withdraw(targetType, targetId, userId, submitter?.realName || '');
+      await txService.recordRepo.save(txService.recordRepo.create({
+        targetType: targetType as TargetType,
+        targetId,
+        instanceId: instance?.id ?? target.approvalInstanceId ?? null,
+        taskId: null,
+        approverId: userId,
+        approverName: submitter?.realName || '',
+        action: 'withdraw',
+        comment: '申请人撤回审批',
+        stepOrder: target.currentStep || 1,
+        stepType: 'withdraw',
+        stepLabel: '撤回',
+      }));
 
-    const updateData: any = {
-      status: targetType === 'permission_request' ? 'withdrawn' : 'draft',
-      currentStep: 0,
-      approvalFlowId: null,
-      approvalInstanceId: null,
-      totalSteps: 0,
-    };
-    if (targetType === 'timesheet' && target.submissionGroupId) {
-      await this.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
-    } else {
-      await repo.update(targetId, updateData);
-    }
+      const updateData: any = {
+        status: targetType === 'permission_request' ? 'withdrawn' : 'draft',
+        currentStep: 0,
+        approvalFlowId: null,
+        approvalInstanceId: null,
+        totalSteps: 0,
+      };
+      if (targetType === 'timesheet' && target.submissionGroupId) {
+        await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
+      } else {
+        await repo!.update(targetId, updateData);
+      }
+    });
 
     return { success: true };
   }
 
   async cc(fromUserId: number, fromUserName: string, targetType: string, targetId: number, recipientIds: number[]) {
-    const { target } = await this.getTargetInfo(targetType, targetId);
-    if (!target) throw new Error('记录不存在');
-    if ((target.userId ?? target.applicantId) !== fromUserId) throw new Error('只能抄送自己的申请');
-    const instance = await this.getTargetInstance(targetType, target, targetId);
+    await AppDataSource.transaction(async (manager) => {
+      const txService = new ApprovalService(manager);
+      const { target } = await txService.getTargetInfo(targetType, targetId);
+      if (!target) throw new BusinessError('记录不存在');
+      if ((target.userId ?? target.applicantId) !== fromUserId) throw new BusinessError('只能抄送自己的申请');
+      const instance = await txService.getTargetInstance(targetType, target, targetId);
 
-    for (const recipientId of recipientIds) {
-      const recipient = await this.userRepo.findOneBy({ id: recipientId });
-      if (!recipient) continue;
+      for (const recipientId of recipientIds) {
+        const recipient = await txService.userRepo.findOneBy({ id: recipientId });
+        if (!recipient) continue;
 
-      await this.recordRepo.save(this.recordRepo.create({
-        targetType: targetType as TargetType,
-        targetId,
-        instanceId: instance?.id ?? null,
-        taskId: null,
-        approverId: recipientId,
-        approverName: recipient.realName,
-        action: 'cc',
-        comment: `${fromUserName} 抄送给您传阅`,
-        stepOrder: 0,
-        stepType: 'cc',
-        stepLabel: '抄送传阅',
-      }));
-    }
+        await txService.recordRepo.save(txService.recordRepo.create({
+          targetType: targetType as TargetType,
+          targetId,
+          instanceId: instance?.id ?? null,
+          taskId: null,
+          approverId: recipientId,
+          approverName: recipient.realName,
+          action: 'cc',
+          comment: `${fromUserName} 抄送给您传阅`,
+          stepOrder: 0,
+          stepType: 'cc',
+          stepLabel: '抄送传阅',
+        }));
+      }
+    });
 
     return { success: true };
   }
@@ -437,13 +619,53 @@ export class ApprovalService {
 
     const total = await qb.getCount();
     const records = await qb.skip((page - 1) * pageSize).take(pageSize).getMany();
-    const list: any[] = [];
+    if (records.length === 0) return { list: [], total, page, pageSize };
 
+    // 批量加载 target：按 targetType 分组用 In(...) 一次查，避免 N+1
+    const targetIdsByType = new Map<string, number[]>();
     for (const record of records) {
-      const { target } = await this.getTargetInfo(record.targetType, record.targetId);
+      const bucket = targetIdsByType.get(record.targetType) ?? [];
+      bucket.push(record.targetId);
+      targetIdsByType.set(record.targetType, bucket);
+    }
+    const targetMap = new Map<string, ApprovalTargetLike>();
+    for (const [type, ids] of targetIdsByType) {
+      const repo = this.getRepoByTargetType(type);
+      if (repo && ids.length) {
+        const found = await repo.find({ where: { id: In(ids) } as any });
+        for (const t of found) targetMap.set(`${type}_${t.id}`, t as ApprovalTargetLike);
+      }
+    }
+
+    // 批量加载 applicant
+    const applicantIds = new Set<number>();
+    for (const record of records) {
+      const target = targetMap.get(`${record.targetType}_${record.targetId}`);
+      if (target) applicantIds.add(target.userId ?? target.applicantId ?? 0);
+    }
+    const applicantMap = new Map<number, User>();
+    if (applicantIds.size) {
+      const applicants = await this.userRepo.find({
+        where: { id: In([...applicantIds].filter(Boolean)) },
+        relations: ['department'],
+      });
+      for (const a of applicants) applicantMap.set(a.id, a);
+    }
+
+    // 批量加载 instance（按 targetType 分组）
+    const instanceMap = new Map<string, ApprovalInstance | null>();
+    for (const [type, ids] of targetIdsByType) {
+      const merged = await this.batchInstances(type, ids.map(id => ({ id, approvalInstanceId: undefined as any })));
+      for (const [tid, inst] of merged) instanceMap.set(`${type}_${tid}`, inst);
+    }
+
+    const list: any[] = [];
+    for (const record of records) {
+      const target = targetMap.get(`${record.targetType}_${record.targetId}`);
       if (!target) continue;
-      const applicant = await this.userRepo.findOne({ where: { id: target.userId ?? target.applicantId }, relations: ['department'] });
-      const item = await this.buildListItem(record.targetType as TargetType, target, await this.getTargetInstance(record.targetType, target, record.targetId), applicant);
+      const applicant = applicantMap.get(target.userId ?? target.applicantId ?? 0) ?? null;
+      const instance = instanceMap.get(`${record.targetType}_${record.targetId}`) ?? null;
+      const item = await this.buildListItem(record.targetType as TargetType, target, instance, applicant);
       item.status = target.status;
       item.ccFrom = record.comment?.replace(' 抄送给您传阅', '') || '未知';
       item.ccAt = record.createdAt;
@@ -453,7 +675,7 @@ export class ApprovalService {
     return { list, total, page, pageSize };
   }
 
-  private async buildApprovalContent(targetType: string, targetId: number, target: any) {
+  private async buildApprovalContent(targetType: string, targetId: number, target: ApprovalTargetLike) {
     const applicant = await this.userRepo.findOne({
       where: { id: target.userId ?? target.applicantId },
       relations: ['department', 'group'],
@@ -561,7 +783,7 @@ export class ApprovalService {
 
   async getApprovalDetail(targetType: string, targetId: number, viewerId?: number) {
     const { target } = await this.getTargetInfo(targetType, targetId);
-    if (!target) throw new Error('记录不存在');
+    if (!target) throw new BusinessError('记录不存在');
 
     const records = await this.recordRepo.find({
       where: { targetType: targetType as TargetType, targetId },
@@ -569,7 +791,7 @@ export class ApprovalService {
     });
 
     if (viewerId && !await this.canViewApprovalTarget(targetType, target, targetId, viewerId, records)) {
-      throw new Error('无权查看该审批详情');
+      throw new BusinessError('无权查看该审批详情');
     }
 
     const instance = await this.getTargetInstance(targetType, target, targetId);

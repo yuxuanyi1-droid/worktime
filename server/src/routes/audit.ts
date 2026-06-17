@@ -9,7 +9,7 @@ const auditService = new AuditService();
 router.use(authMiddleware);
 
 // 获取审计日志 — 仅管理员
-router.get('/', requireRole('admin'), async (req: AuthRequest, res) => {
+router.get('/', requireRole('admin'), async (req: AuthRequest, res, next) => {
   try {
     const data = await auditService.getLogs({
       userId: req.query.userId ? Number(req.query.userId) : undefined,
@@ -21,8 +21,8 @@ router.get('/', requireRole('admin'), async (req: AuthRequest, res) => {
       pageSize: req.query.pageSize ? Number(req.query.pageSize) : 20,
     });
     res.json({ code: 0, data });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 

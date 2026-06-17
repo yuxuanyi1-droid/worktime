@@ -6,6 +6,7 @@ import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requireAllPermissions, requirePermission } from '../middleware/permission';
 import { AccessPolicyService } from '../services/accessPolicyService';
 import { ReportService } from '../services/reportService';
+import { BusinessError } from '../utils/errors';
 import {
   firstQueryValue,
   parseDateString,
@@ -71,13 +72,13 @@ async function getProjectScopedFilters(projectId: number, requestedDepartmentId?
   const projectDepartmentIds = filters.departments.map((department) => department.id);
 
   if (requestedDepartmentId && !projectDepartmentIds.includes(requestedDepartmentId)) {
-    throw new Error('部门不属于当前项目报表范围');
+    throw new BusinessError('部门不属于当前项目报表范围');
   }
   if (requestedGroupId) {
     const group = filters.groups.find((item) => item.id === requestedGroupId);
-    if (!group) throw new Error('组别不属于当前项目报表范围');
+    if (!group) throw new BusinessError('组别不属于当前项目报表范围');
     if (requestedDepartmentId && group.departmentId !== requestedDepartmentId) {
-      throw new Error('组别不属于当前部门');
+      throw new BusinessError('组别不属于当前部门');
     }
   }
 
@@ -141,7 +142,7 @@ function serializeProjects(projects: Awaited<ReturnType<AccessPolicyService['get
 
 router.use(authMiddleware);
 
-router.get('/scope', requirePermission('report:access'), async (req: AuthRequest, res) => {
+router.get('/scope', requirePermission('report:access'), async (req: AuthRequest, res, next) => {
   try {
     const viewer = req.user!;
     const [
@@ -183,12 +184,12 @@ router.get('/scope', requirePermission('report:access'), async (req: AuthRequest
         projects: serializeProjects(projects),
       },
     });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/personal', requirePermission('report:view:self'), async (req: AuthRequest, res) => {
+router.get('/personal', requirePermission('report:view:self'), async (req: AuthRequest, res, next) => {
   try {
     const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
     const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
@@ -206,12 +207,12 @@ router.get('/personal', requirePermission('report:view:self'), async (req: AuthR
 
     const data = await reportService.getPersonalReport(targetUserId, startDate, endDate);
     res.json({ code: 0, data });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/group', requirePermission('report:view:group'), async (req: AuthRequest, res) => {
+router.get('/group', requirePermission('report:view:group'), async (req: AuthRequest, res, next) => {
   try {
     const groupId = parsePositiveInt(firstQueryValue(req.query.groupId), 'groupId');
     const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
@@ -224,12 +225,12 @@ router.get('/group', requirePermission('report:view:group'), async (req: AuthReq
     const groupIds = await accessPolicy.getGroupAndDescendantIds([groupId]);
     const data = await reportService.getGroupReport(groupId, startDate, endDate, groupIds);
     res.json({ code: 0, data });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/department', requirePermission('report:view:department'), async (req: AuthRequest, res) => {
+router.get('/department', requirePermission('report:view:department'), async (req: AuthRequest, res, next) => {
   try {
     const departmentId = parsePositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
@@ -246,12 +247,12 @@ router.get('/department', requirePermission('report:view:department'), async (re
     const groupIds = groupId ? await accessPolicy.getGroupAndDescendantIds([groupId]) : undefined;
     const data = await reportService.getDepartmentReport(departmentId, startDate, endDate, { groupId, groupIds });
     res.json({ code: 0, data });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/project', requirePermission('report:view:project'), async (req: AuthRequest, res) => {
+router.get('/project', requirePermission('report:view:project'), async (req: AuthRequest, res, next) => {
   try {
     const projectId = parsePositiveInt(firstQueryValue(req.query.projectId), 'projectId');
     const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
@@ -266,12 +267,12 @@ router.get('/project', requirePermission('report:view:project'), async (req: Aut
     const { filters, reportFilters } = await getProjectScopedFilters(projectId, departmentId, groupId);
     const data = await reportService.getProjectReport(projectId, startDate, endDate, reportFilters);
     res.json({ code: 0, data: { ...data, filters } });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/overtime', requirePermission('report:view:overtime'), async (req: AuthRequest, res) => {
+router.get('/overtime', requirePermission('report:view:overtime'), async (req: AuthRequest, res, next) => {
   try {
     const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
@@ -329,21 +330,21 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
       matchAnyScope,
     });
     res.json({ code: 0, data });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/dashboard', async (req: AuthRequest, res) => {
+router.get('/dashboard', async (req: AuthRequest, res, next) => {
   try {
     const data = await reportService.getDashboardData(req.user!.id);
     res.json({ code: 0, data });
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/export/personal', requireAllPermissions('report:view:self', 'report:export'), async (req: AuthRequest, res) => {
+router.get('/export/personal', requireAllPermissions('report:view:self', 'report:export'), async (req: AuthRequest, res, next) => {
   try {
     const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
     const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
@@ -391,12 +392,12 @@ router.get('/export/personal', requireAllPermissions('report:view:self', 'report
     res.setHeader('Content-Disposition', `attachment; filename=timesheet-report-${startDate}-${endDate}.xlsx`);
     await workbook.xlsx.write(res);
     res.end();
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
   }
 });
 
-router.get('/export/department', requireAllPermissions('report:view:department', 'report:export'), async (req: AuthRequest, res) => {
+router.get('/export/department', requireAllPermissions('report:view:department', 'report:export'), async (req: AuthRequest, res, next) => {
   try {
     const departmentId = parsePositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
@@ -444,8 +445,173 @@ router.get('/export/department', requireAllPermissions('report:view:department',
     res.setHeader('Content-Disposition', `attachment; filename=dept-report-${startDate}-${endDate}.xlsx`);
     await workbook.xlsx.write(res);
     res.end();
-  } catch (error: any) {
-    res.status(400).json({ code: 400, message: error.message });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 导出组别工时报表
+router.get('/export/group', requireAllPermissions('report:view:group', 'report:export'), async (req: AuthRequest, res, next) => {
+  try {
+    const groupId = parsePositiveInt(firstQueryValue(req.query.groupId), 'groupId');
+    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
+    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+
+    if (!await accessPolicy.canAccessGroup(req.user!, groupId, { allowDepartmentLeader: false })) {
+      return res.status(403).json({ code: 403, message: '只能导出自己负责组别的报表' });
+    }
+
+    const groupIds = await accessPolicy.getGroupAndDescendantIds([groupId]);
+    const data = await reportService.getGroupReport(groupId, startDate, endDate, groupIds);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('组别工时报表');
+
+    sheet.columns = [
+      { header: '人员', key: 'user', width: 14 },
+      { header: '组别', key: 'group', width: 16 },
+      { header: '项目', key: 'project', width: 20 },
+      { header: '工时(天)', key: 'hours', width: 12 },
+      { header: '日期', key: 'date', width: 14 },
+    ];
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
+
+    for (const record of data.records as any[]) {
+      sheet.addRow({
+        user: record.user?.realName || '-',
+        group: record.groupSnapshotName || '-',
+        project: record.project?.name || '-',
+        hours: record.hours,
+        date: record.date,
+      });
+    }
+    sheet.addRow([]);
+    sheet.addRow({ user: '合计', hours: data.totalHours });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=group-report-${startDate}-${endDate}.xlsx`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 导出项目工时报表
+router.get('/export/project', requireAllPermissions('report:view:project', 'report:export'), async (req: AuthRequest, res, next) => {
+  try {
+    const projectId = parsePositiveInt(firstQueryValue(req.query.projectId), 'projectId');
+    const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
+    const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
+    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
+    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+
+    if (!await accessPolicy.canAccessProjectReport(req.user!, projectId)) {
+      return res.status(403).json({ code: 403, message: '只能导出自己负责项目的报表' });
+    }
+
+    const { reportFilters } = await getProjectScopedFilters(projectId, departmentId, groupId);
+    const data = await reportService.getProjectReport(projectId, startDate, endDate, reportFilters);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('项目工时报表');
+
+    sheet.columns = [
+      { header: '人员', key: 'user', width: 14 },
+      { header: '部门', key: 'department', width: 16 },
+      { header: '组别', key: 'group', width: 16 },
+      { header: '工时(天)', key: 'hours', width: 12 },
+      { header: '日期', key: 'date', width: 14 },
+    ];
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
+
+    for (const record of data.records as any[]) {
+      sheet.addRow({
+        user: record.user?.realName || '-',
+        department: record.departmentSnapshotName || '-',
+        group: record.groupSnapshotName || '-',
+        hours: record.hours,
+        date: record.date,
+      });
+    }
+    sheet.addRow([]);
+    sheet.addRow({ user: '合计', hours: data.totalHours });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=project-report-${startDate}-${endDate}.xlsx`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 导出加班统计报表
+router.get('/export/overtime', requireAllPermissions('report:view:overtime', 'report:export'), async (req: AuthRequest, res, next) => {
+  try {
+    const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
+    const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
+    const requestedUserId = parseOptionalPositiveInt(firstQueryValue(req.query.userId), 'userId');
+    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
+    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+
+    if (departmentId && !await accessPolicy.canAccessDepartment(req.user!, departmentId)) {
+      return res.status(403).json({ code: 403, message: '只能导出自己负责部门的加班报表' });
+    }
+    if (groupId && !await accessPolicy.canAccessGroup(req.user!, groupId)) {
+      return res.status(403).json({ code: 403, message: '只能导出自己负责组别的加班报表' });
+    }
+
+    let groupIds = groupId ? await accessPolicy.getGroupAndDescendantIds([groupId]) : undefined;
+    let departmentIds: number[] | undefined;
+    const hasAllOvertimeScope = accessPolicy.isAdmin(req.user!) || await accessPolicy.hasPermission(req.user!, 'report:view:all');
+    if (!departmentId && !groupId && !requestedUserId && !accessPolicy.isAdmin(req.user!)) {
+      const [accessibleDepartmentIds, accessibleGroupIds] = await Promise.all([
+        accessPolicy.getAccessibleDepartmentIds(req.user!, ['report:view:overtime']),
+        accessPolicy.getAccessibleGroupIds(req.user!, ['report:view:overtime']),
+      ]);
+      departmentIds = accessibleDepartmentIds?.length ? accessibleDepartmentIds : undefined;
+      groupIds = accessibleGroupIds?.length ? accessibleGroupIds : (groupIds ?? undefined);
+    }
+    const userId = departmentId || groupId || groupIds?.length || departmentIds?.length || hasAllOvertimeScope
+      ? requestedUserId
+      : (requestedUserId ?? req.user!.id);
+    const data = await reportService.getOvertimeReport({
+      departmentId, departmentIds, groupId, groupIds, userId, startDate, endDate,
+      matchAnyScope: !!departmentIds?.length && !!groupIds?.length,
+    });
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('加班统计报表');
+
+    sheet.columns = [
+      { header: '人员', key: 'user', width: 14 },
+      { header: '日期', key: 'date', width: 14 },
+      { header: '加班类型', key: 'type', width: 14 },
+      { header: '加班时长(小时)', key: 'hours', width: 16 },
+      { header: '原因', key: 'reason', width: 30 },
+    ];
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
+
+    const typeText: Record<string, string> = { weekend: '周末加班', holiday: '节假日加班', weekday: '工作日加班' };
+    for (const record of data.records as any[]) {
+      sheet.addRow({
+        user: record.user?.realName || '-',
+        date: record.date,
+        type: typeText[record.overtimeType] || record.overtimeType,
+        hours: record.hours,
+        reason: record.reason || '',
+      });
+    }
+    sheet.addRow([]);
+    sheet.addRow({ user: '合计', hours: data.totalHours });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=overtime-report-${startDate}-${endDate}.xlsx`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
   }
 });
 

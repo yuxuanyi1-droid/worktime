@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
@@ -21,10 +21,9 @@ import dayjs from 'dayjs';
 import { reportApi } from '../../api/report';
 import { DepartmentReport, GroupReport, OvertimeReport, PersonalReport, ProjectReport, ReportScope } from '../../types';
 import request from '../../utils/request';
+import LazyEChart from '../../components/Charts/LazyEChart';
 
 const { Title, Text } = Typography;
-const ReactECharts = lazy(() => import('echarts-for-react'));
-
 type ReportTabKey = 'personal' | 'group' | 'department' | 'project' | 'overtime';
 type SummaryValue = { hours: number; count?: number };
 
@@ -32,11 +31,7 @@ const palette = ['#4F7B63', '#B7791F', '#B85C5C', '#4F6F8F', '#7A6C5D', '#6D7E3F
 const emptyText = '选择筛选条件后点击查询';
 
 function Chart({ option, height = 300 }: { option: any; height?: number }) {
-  return (
-    <Suspense fallback={<Spin />}>
-      <ReactECharts option={option} style={{ height }} />
-    </Suspense>
-  );
+  return <LazyEChart option={option} style={{ height }} />;
 }
 
 function hasChartData(option: any) {
@@ -315,6 +310,8 @@ export default function Report() {
   const [scopeLoading, setScopeLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 记录已加载过的 Tab，切 Tab 时若未加载则自动加载一次
+  const [loadedTabs, setLoadedTabs] = useState<Set<ReportTabKey>>(new Set());
 
   const startDate = dateRange[0].format('YYYY-MM-DD');
   const endDate = dateRange[1].format('YYYY-MM-DD');
@@ -466,22 +463,49 @@ export default function Report() {
     }
   };
 
-  const queryCurrent = () => {
-    if (tabKey === 'group') loadGroup();
-    else if (tabKey === 'department') loadDepartment();
-    else if (tabKey === 'project') loadProject();
-    else if (tabKey === 'overtime') loadOvertime();
+  const queryCurrent = (key: ReportTabKey = tabKey) => {
+    // 标记该 Tab 已加载（无论成功失败，避免切回时反复触发）
+    setLoadedTabs((prev) => new Set(prev).add(key));
+    if (key === 'group') loadGroup();
+    else if (key === 'department') loadDepartment();
+    else if (key === 'project') loadProject();
+    else if (key === 'overtime') loadOvertime();
     else loadPersonal();
   };
 
-  const handleExport = async (type: 'personal' | 'department') => {
+  /** 切 Tab 时若该 Tab 未加载过则自动加载 */
+  const handleTabChange = (key: string) => {
+    const nextKey = key as ReportTabKey;
+    setTabKey(nextKey);
+    if (!loadedTabs.has(nextKey)) {
+      queryCurrent(nextKey);
+    }
+  };
+
+  /** 日期范围改变时清空已加载标记，强制重新查询 */
+  const handleDateChange = (value: [dayjs.Dayjs | null, dayjs.Dayjs | null] | null) => {
+    if (value && value[0] && value[1]) {
+      setDateRange([value[0], value[1]]);
+      setLoadedTabs(new Set());
+    }
+  };
+
+  const handleExport = async (type: ReportTabKey) => {
     try {
       const params: any = { startDate, endDate };
-      if (type === 'department') {
-        if (!selectedDept) {
-          setError('请选择部门');
-          return;
-        }
+      if (type === 'group') {
+        if (!selectedGroup) { setError('请选择组别'); return; }
+        params.groupId = selectedGroup;
+      } else if (type === 'department') {
+        if (!selectedDept) { setError('请选择部门'); return; }
+        params.departmentId = selectedDept;
+        params.groupId = selectedDeptGroup;
+      } else if (type === 'project') {
+        if (!selectedProj) { setError('请选择项目'); return; }
+        params.projectId = selectedProj;
+        params.departmentId = selectedProjDept;
+        params.groupId = selectedProjGroup;
+      } else if (type === 'overtime') {
         params.departmentId = selectedDept;
         params.groupId = selectedDeptGroup;
       }
@@ -506,9 +530,7 @@ export default function Report() {
           <Col>
             <DatePicker.RangePicker
               value={dateRange}
-              onChange={(value) => {
-                if (value && value[0] && value[1]) setDateRange([value[0], value[1]]);
-              }}
+              onChange={handleDateChange}
             />
           </Col>
           {tabKey === 'group' && (
@@ -592,15 +614,13 @@ export default function Report() {
             </>
           )}
           <Col>
-            <Button type="primary" onClick={queryCurrent} loading={loading}>查询</Button>
+            <Button type="primary" onClick={() => queryCurrent()} loading={loading}>查询</Button>
           </Col>
-          {(tabKey === 'personal' || tabKey === 'department') && (
-            <Col>
-              <Button icon={<DownloadOutlined />} onClick={() => handleExport(tabKey as 'personal' | 'department')}>
-                导出Excel
-              </Button>
-            </Col>
-          )}
+          <Col>
+            <Button icon={<DownloadOutlined />} onClick={() => handleExport(tabKey)}>
+              导出Excel
+            </Button>
+          </Col>
         </Row>
       </Card>
 
@@ -619,7 +639,7 @@ export default function Report() {
         <Tabs
           activeKey={tabKey}
           items={tabItems}
-          onChange={(key) => setTabKey(key as ReportTabKey)}
+          onChange={handleTabChange}
           style={{ marginBottom: 12 }}
         />
 

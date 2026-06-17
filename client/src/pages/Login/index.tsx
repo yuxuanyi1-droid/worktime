@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Form, Input, Button, message } from 'antd';
 import { UserOutlined, LockOutlined } from '@ant-design/icons';
@@ -14,8 +14,10 @@ export default function Login() {
   const { systemName, loadSettings } = useAppStore();
 
   useEffect(() => {
-    // 无 token 时后端会 401，跳过加载（使用默认名称即可）
-    if (localStorage.getItem('token')) loadSettings();
+    // Settings API requires authentication, so we only refresh the cached name when a token already exists.
+    if (localStorage.getItem('token')) {
+      loadSettings();
+    }
   }, [loadSettings]);
 
   const onFinish = async (values: { username: string; password: string }) => {
@@ -29,62 +31,89 @@ export default function Login() {
         navigate(redirect);
       }
     } catch {
-      // error handled by interceptor
+      // The request interceptor already handles error messaging.
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: '#F8F4ED',
-      position: 'relative',
-      overflow: 'hidden',
-    }}>
-      {/* 装饰圆 */}
-      <div style={{
-        position: 'absolute', width: 500, height: 500, borderRadius: '50%',
-        background: 'rgba(107,143,113,0.08)', top: -180, right: -120,
-      }} />
-      <div style={{
-        position: 'absolute', width: 360, height: 360, borderRadius: '50%',
-        background: 'rgba(196,149,106,0.08)', bottom: -120, left: -100,
-      }} />
-      <div style={{
-        position: 'absolute', width: 200, height: 200, borderRadius: '50%',
-        background: 'rgba(107,143,113,0.06)', top: '40%', left: '10%',
-      }} />
-
-      {/* 登录卡片 */}
-      <div style={{
-        width: 420,
-        borderRadius: 24,
-        background: '#FDFBF7',
-        border: '1px solid #E8E0D4',
-        padding: '48px 40px',
-        boxShadow: '0 20px 60px rgba(44,36,24,0.06)',
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#F8F4ED',
         position: 'relative',
-      }}>
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          width: 500,
+          height: 500,
+          borderRadius: '50%',
+          background: 'rgba(107,143,113,0.08)',
+          top: -180,
+          right: -120,
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          width: 360,
+          height: 360,
+          borderRadius: '50%',
+          background: 'rgba(196,149,106,0.08)',
+          bottom: -120,
+          left: -100,
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          width: 200,
+          height: 200,
+          borderRadius: '50%',
+          background: 'rgba(107,143,113,0.06)',
+          top: '40%',
+          left: '10%',
+        }}
+      />
+
+      <div
+        style={{
+          width: 420,
+          borderRadius: 24,
+          background: '#FDFBF7',
+          border: '1px solid #E8E0D4',
+          padding: '48px 40px',
+          boxShadow: '0 20px 60px rgba(44,36,24,0.06)',
+          position: 'relative',
+        }}
+      >
         <div style={{ textAlign: 'center', marginBottom: 40 }}>
-          <h1 style={{
-            fontFamily: '"Fraunces", Georgia, serif',
-            fontSize: 32,
-            fontWeight: 900,
-            color: '#2C2418',
-            marginBottom: 8,
-            letterSpacing: '-0.02em',
-          }}>
+          <h1
+            style={{
+              fontFamily: '"Fraunces", Georgia, serif',
+              fontSize: 32,
+              fontWeight: 900,
+              color: '#2C2418',
+              marginBottom: 8,
+              letterSpacing: '-0.02em',
+            }}
+          >
             {systemName}
           </h1>
-          <p style={{
-            color: '#9A9080',
-            fontSize: 14,
-            fontWeight: 400,
-          }}>
+          <p
+            style={{
+              color: '#9A9080',
+              fontSize: 14,
+              fontWeight: 400,
+            }}
+          >
             工时管理系统
           </p>
         </div>
@@ -129,7 +158,7 @@ export default function Login() {
                 borderColor: '#2C2418',
               }}
             >
-              登 录
+              登录
             </Button>
           </Form.Item>
         </Form>

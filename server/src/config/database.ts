@@ -24,9 +24,15 @@ import { Announcement } from '../entities/Announcement';
 import { AnnouncementRead } from '../entities/AnnouncementRead';
 import { PermissionRequest } from '../entities/PermissionRequest';
 import { UserPermissionGrant } from '../entities/UserPermissionGrant';
+import { SubmissionSequence } from '../entities/SubmissionSequence';
+import { InitSchema1700000000000 } from '../migrations/1700000000000-InitSchema';
 
 const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db');
-const shouldSynchronize = process.env.NODE_ENV !== 'production' && process.env.TYPEORM_SYNCHRONIZE !== 'false';
+// 默认关闭 synchronize（防止生产环境自动改表丢数据）；
+// 仅当显式设置 TYPEORM_SYNCHRONIZE=true 时才开启（开发临时调试用）。
+// 首次建表由 ensureSchema() 负责（空库时同步一次，已有库不干预）；
+// schema 变更走 migration（见 src/migrations/）。
+const shouldSynchronize = process.env.TYPEORM_SYNCHRONIZE === 'true';
 
 export const AppDataSource = new DataSource({
   type: 'better-sqlite3',
@@ -40,11 +46,38 @@ export const AppDataSource = new DataSource({
     ApprovalFlowVersion, ApprovalInstance, ApprovalTask,
     SystemSetting, Notification, AuditLog, Announcement, AnnouncementRead,
     PermissionRequest, UserPermissionGrant,
+    SubmissionSequence,
   ],
-  migrations: [],
+  migrations: [InitSchema1700000000000],
   subscribers: [],
   prepareDatabase: (db: any) => {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
   },
 });
+
+/**
+ * 确保 schema 存在：
+ * - 库为空（无任何业务表）→ 根据实体元数据建表（一次性，幂等）
+ * - 库已有表 → 不干预，避免覆盖或改动已有数据
+ * - 始终运行 migration（补齐新增实体表，如 submission_sequences）
+ *
+ * 应在 AppDataSource.initialize() 之后、业务逻辑之前调用（见 app.ts / seed.ts）。
+ * 这取代了原先常开的 synchronize，做到「首次自动建表 + 后续不自动改表 + migration 平滑升级」。
+ */
+export async function ensureSchema(): Promise<void> {
+  const queryRunner = AppDataSource.createQueryRunner();
+  try {
+    const tables = await queryRunner.getTables();
+    // 排除 TypeORM 系统表（migrations 记录、typeorm_metadata、sqlite_sequence）
+    const SYSTEM_TABLES = new Set(['migrations', 'typeorm_metadata', 'sqlite_sequence']);
+    const hasEntityTable = tables.some((t) => !SYSTEM_TABLES.has(t.name));
+    if (!hasEntityTable) {
+      await AppDataSource.synchronize(false);
+    }
+  } finally {
+    await queryRunner.release();
+  }
+  // 运行 migration：补齐新增实体表（IF NOT EXISTS 幂等），由 migrations 表跟踪版本
+  await AppDataSource.runMigrations();
+}

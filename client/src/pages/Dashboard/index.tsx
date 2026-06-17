@@ -7,11 +7,11 @@ import {
   ThunderboltOutlined,
   FileTextOutlined,
 } from '@ant-design/icons';
-import ReactECharts from 'echarts-for-react';
 import { reportApi } from '../../api/report';
 import { DashboardData } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
 import { useAuthStore } from '../../stores/authStore';
+import LazyEChart from '../../components/Charts/LazyEChart';
 
 const getGreeting = (date: Date) => {
   const hour = date.getHours();
@@ -220,7 +220,7 @@ export default function Dashboard() {
           </div>
           <div style={{ padding: '0 22px 18px' }}>
             {trendOption ? (
-              <ReactECharts option={trendOption} style={{ height: 300 }} />
+              <LazyEChart option={trendOption} style={{ height: 300 }} />
             ) : (
               <div style={{ height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#B0A898' }}>
                 暂无数据

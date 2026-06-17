@@ -10,9 +10,18 @@ export default defineConfig({
     chunkSizeWarningLimit: 1400,
     rollupOptions: {
       output: {
-        manualChunks: {
-          antd: ['antd', '@ant-design/icons'],
-          react: ['react', 'react-dom', 'react-router-dom'],
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('react-dom') || id.includes('react-router-dom') || id.includes(`${path.sep}react${path.sep}`)) {
+            return 'react-vendor';
+          }
+          if (id.includes('@ant-design')) return 'antd-icons';
+          if (id.includes(`${path.sep}antd${path.sep}`)) return 'antd';
+          if (id.includes('echarts')) return 'charts';
+          if (id.includes('dayjs')) return 'dayjs';
+          if (id.includes('axios')) return 'network';
+          if (id.includes('zustand')) return 'state';
+          return undefined;
         },
       },
     },

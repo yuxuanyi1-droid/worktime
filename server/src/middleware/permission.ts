@@ -7,10 +7,14 @@ import { AccessPolicyService } from '../services/accessPolicyService';
 const accessPolicy = new AccessPolicyService();
 
 /**
- * 获取用户完整权限集合
+ * 获取用户完整权限集合。优先复用 authMiddleware 在请求上挂的缓存，避免重复查库。
  */
-async function getUserPermissions(userId: number): Promise<Set<string>> {
-  return accessPolicy.getPermissionCodes(userId);
+async function getUserPermissions(req: AuthRequest): Promise<Set<string>> {
+  if (req.userPermissions) return req.userPermissions;
+  // 兜底：极端情况下（中间件未注入缓存）仍走完整查询
+  const perms = await accessPolicy.getPermissionCodes(req.user!.id);
+  req.userPermissions = perms;
+  return perms;
 }
 
 /**
@@ -29,7 +33,7 @@ export const requirePermission = (...requiredPermissions: string[]) => {
       if (!req.user) return res.status(401).json({ code: 401, message: '未登录' });
       if (isAdmin(req)) return next();
 
-      const perms = await getUserPermissions(req.user.id);
+      const perms = await getUserPermissions(req);
       const hasPermission = requiredPermissions.some(p => perms.has(p));
       if (!hasPermission) {
         return res.status(403).json({ code: 403, message: '无此操作权限' });
@@ -50,7 +54,7 @@ export const requireAllPermissions = (...requiredPermissions: string[]) => {
       if (!req.user) return res.status(401).json({ code: 401, message: '未登录' });
       if (isAdmin(req)) return next();
 
-      const perms = await getUserPermissions(req.user.id);
+      const perms = await getUserPermissions(req);
       const hasAll = requiredPermissions.every(p => perms.has(p));
       if (!hasAll) {
         return res.status(403).json({ code: 403, message: '无此操作权限' });

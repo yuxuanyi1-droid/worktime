@@ -29,9 +29,10 @@ request.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       useAuthStore.getState().clearAuth();
-      // 已在登录页时不要重定向，避免无限刷新
+      // 通过事件总线通知 React 层软跳转（保留 SPA 状态，避免整页刷新丢数据）；
+      // 已在登录页时不派发，避免循环
       if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
+        window.dispatchEvent(new CustomEvent('unauthorized'));
       }
       return Promise.reject(error);
     }

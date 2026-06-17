@@ -38,7 +38,7 @@ function parseOvertimePayload(body: Record<string, unknown>, partial = false) {
 router.use(authMiddleware);
 
 // 查看自己的加班
-router.get('/my', async (req: AuthRequest, res) => {
+router.get('/my', async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const data = await overtimeService.getByUser(req.user!.id, {
@@ -52,11 +52,13 @@ router.get('/my', async (req: AuthRequest, res) => {
       ...r,
       project: r.project ? { id: r.project.id, name: r.project.name } : null,
     })) } });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 加班统计
-router.get('/stats', requirePermission('overtime:read'), async (req: AuthRequest, res) => {
+router.get('/stats', requirePermission('overtime:read'), async (req: AuthRequest, res, next) => {
   try {
     const year = firstQueryValue(req.query.year)
       ? parsePositiveInt(firstQueryValue(req.query.year), 'year', { max: 9999 })
@@ -64,31 +66,37 @@ router.get('/stats', requirePermission('overtime:read'), async (req: AuthRequest
     const month = parseOptionalPositiveInt(firstQueryValue(req.query.month), 'month', { max: 12 });
     const data = await overtimeService.getStats(req.user!.id, year, month);
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 创建加班
-router.post('/', requirePermission('overtime:create'), async (req: AuthRequest, res) => {
+router.post('/', requirePermission('overtime:create'), async (req: AuthRequest, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const payload = parseOvertimePayload(body);
     const data = await overtimeService.create({ ...payload, userId: req.user!.id });
     res.json({ code: 0, data, message: '创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 创建并直接提交审批
-router.post('/submit-new', requirePermission('overtime:create'), async (req: AuthRequest, res) => {
+router.post('/submit-new', requirePermission('overtime:create'), async (req: AuthRequest, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const payload = parseOvertimePayload(body);
     const data = await overtimeService.createAndSubmit({ ...payload, userId: req.user!.id });
     res.json({ code: 0, data, message: '提交成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 更新加班
-router.put('/:id', requirePermission('overtime:update'), async (req: AuthRequest, res) => {
+router.put('/:id', requirePermission('overtime:update'), async (req: AuthRequest, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const data = await overtimeService.update(
@@ -97,24 +105,30 @@ router.put('/:id', requirePermission('overtime:update'), async (req: AuthRequest
       parseOvertimePayload(body, true),
     );
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 删除加班
-router.delete('/:id', requirePermission('overtime:delete'), async (req: AuthRequest, res) => {
+router.delete('/:id', requirePermission('overtime:delete'), async (req: AuthRequest, res, next) => {
   try {
     await overtimeService.delete(parsePositiveInt(req.params.id, 'id'), req.user!.id);
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 提交审批
-router.post('/submit', requirePermission('overtime:create'), async (req: AuthRequest, res) => {
+router.post('/submit', requirePermission('overtime:create'), async (req: AuthRequest, res, next) => {
   try {
     const ids = parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 100 });
     await overtimeService.submit(ids, req.user!.id);
     res.json({ code: 0, message: '提交成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 export const overtimeRoutes = router;

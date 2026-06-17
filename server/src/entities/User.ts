@@ -29,6 +29,10 @@ export class User {
   @Column({ type: 'integer', default: 1 })
   status!: number; // 1: 启用, 0: 禁用
 
+  /** token 版本号：改密码/登出时 +1，使旧 token 失效（中间件校验 version 不匹配即拒绝） */
+  @Column({ type: 'integer', default: 0 })
+  tokenVersion!: number;
+
   @ManyToOne(() => Department, department => department.users, { nullable: true })
   department!: Department;
 

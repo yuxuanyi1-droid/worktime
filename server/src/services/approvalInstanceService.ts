@@ -1,4 +1,5 @@
-import { In, MoreThan } from 'typeorm';
+import { EntityManager, In, MoreThan } from 'typeorm';
+import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { ApprovalInstance, ApprovalInstanceStepSnapshot } from '../entities/ApprovalInstance';
 import { ApprovalTask } from '../entities/ApprovalTask';
@@ -6,9 +7,11 @@ import { ApprovalTargetType } from '../entities/ApprovalFlowVersion';
 import { ApprovalFlowEngine } from './approvalFlowService';
 
 export class ApprovalInstanceService {
-  private instanceRepo = AppDataSource.getRepository(ApprovalInstance);
-  private taskRepo = AppDataSource.getRepository(ApprovalTask);
-  private flowEngine = new ApprovalFlowEngine();
+  constructor(private manager?: EntityManager) {}
+
+  private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
+  private get taskRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalTask); }
+  private get flowEngine() { return new ApprovalFlowEngine(this.manager); }
 
   async start(params: {
     targetType: ApprovalTargetType;
@@ -101,6 +104,29 @@ export class ApprovalInstanceService {
     });
   }
 
+  /** 批量按 id 查询实例（避免 N+1）。注意：不带 tasks 关系以保持轻量。 */
+  async getInstanceByIds(ids: number[]): Promise<ApprovalInstance[]> {
+    if (!ids.length) return [];
+    return this.instanceRepo.find({
+      where: { id: In(ids) },
+    });
+  }
+
+  /** 批量按 (targetType, targetId) 取每个 target 的最新实例（避免 N+1）。 */
+  async getLatestInstances(targetType: string, targetIds: number[]): Promise<ApprovalInstance[]> {
+    if (!targetIds.length) return [];
+    // 取所有候选后内存去重保留 id 最大；targetIds 通常不大（一页范围内）
+    const all = await this.instanceRepo.find({
+      where: { targetType: targetType as ApprovalTargetType, targetId: In(targetIds) },
+      order: { id: 'DESC' },
+    });
+    const seen = new Map<number, ApprovalInstance>();
+    for (const inst of all) {
+      if (!seen.has(inst.targetId)) seen.set(inst.targetId, inst);
+    }
+    return [...seen.values()];
+  }
+
   async getPendingInstance(targetType: string, targetId: number) {
     return this.instanceRepo.findOne({
       where: { targetType: targetType as ApprovalTargetType, targetId, status: 'pending' },
@@ -159,9 +185,9 @@ export class ApprovalInstanceService {
     isAdmin?: boolean;
   }) {
     const instance = await this.getPendingInstance(params.targetType, params.targetId);
-    if (!instance) throw new Error('审批实例不存在或已结束');
-    if (instance.applicantId === params.approverId) throw new Error('不能审批自己的申请');
-    if (!instance.currentStepOrder) throw new Error('审批实例当前步骤异常');
+    if (!instance) throw new BusinessError('审批实例不存在或已结束');
+    if (instance.applicantId === params.approverId) throw new BusinessError('不能审批自己的申请');
+    if (!instance.currentStepOrder) throw new BusinessError('审批实例当前步骤异常');
 
     const currentTasks = await this.taskRepo.find({
       where: {
@@ -171,10 +197,10 @@ export class ApprovalInstanceService {
       },
       order: { id: 'ASC' },
     });
-    if (!currentTasks.length) throw new Error('当前步骤没有待审批任务');
+    if (!currentTasks.length) throw new BusinessError('当前步骤没有待审批任务');
 
     const actingTask = currentTasks.find(task => task.approverId === params.approverId) || (params.isAdmin ? currentTasks[0] : null);
-    if (!actingTask) throw new Error('您不是当前步骤的审批人');
+    if (!actingTask) throw new BusinessError('您不是当前步骤的审批人');
 
     const now = new Date();
     actingTask.status = params.action === 'approve' ? 'approved' : 'rejected';

@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import bcrypt from 'bcryptjs';
-import { AppDataSource } from './config/database';
+import { AppDataSource, ensureSchema } from './config/database';
 import { User } from './entities/User';
 import { Department } from './entities/Department';
 import { Group } from './entities/Group';
@@ -19,6 +19,7 @@ async function seed() {
   }
 
   await AppDataSource.initialize();
+  await ensureSchema();
   console.log('🌱 开始初始化种子数据...');
 
   // 1. 创建权限

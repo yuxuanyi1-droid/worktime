@@ -1,4 +1,5 @@
-import { In, IsNull } from 'typeorm';
+import { EntityManager, In, IsNull } from 'typeorm';
+import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { permissionDefinitionMap, permissionDefinitions } from '../config/permissionDefinitions';
 import { Department } from '../entities/Department';
@@ -21,16 +22,18 @@ export type PermissionRequestPayload = {
 };
 
 export class PermissionGovernanceService {
-  private permissionRepo = AppDataSource.getRepository(Permission);
-  private requestRepo = AppDataSource.getRepository(PermissionRequest);
-  private recordRepo = AppDataSource.getRepository(ApprovalRecord);
-  private grantRepo = AppDataSource.getRepository(UserPermissionGrant);
-  private userRepo = AppDataSource.getRepository(User);
-  private departmentRepo = AppDataSource.getRepository(Department);
-  private groupRepo = AppDataSource.getRepository(Group);
-  private projectRepo = AppDataSource.getRepository(Project);
-  private approvalInstanceService = new ApprovalInstanceService();
-  private notificationService = new NotificationService();
+  constructor(private manager?: EntityManager) {}
+
+  private get permissionRepo() { return (this.manager ?? AppDataSource).getRepository(Permission); }
+  private get requestRepo() { return (this.manager ?? AppDataSource).getRepository(PermissionRequest); }
+  private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
+  private get grantRepo() { return (this.manager ?? AppDataSource).getRepository(UserPermissionGrant); }
+  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get departmentRepo() { return (this.manager ?? AppDataSource).getRepository(Department); }
+  private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
+  private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
+  private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
+  private get notificationService() { return new NotificationService(this.manager); }
 
   async getGrantableDefinitions() {
     const definitions = permissionDefinitions.filter((definition) => definition.grantable);
@@ -53,34 +56,34 @@ export class PermissionGovernanceService {
 
   private async resolveScopeName(scopeType: PermissionScopeType, scopeId?: number | null) {
     if (scopeType === 'global' || scopeType === 'self') return null;
-    if (!scopeId) throw new Error('请选择权限范围');
+    if (!scopeId) throw new BusinessError('请选择权限范围');
     if (scopeType === 'department') {
       const department = await this.departmentRepo.findOneBy({ id: scopeId });
-      if (!department) throw new Error('部门不存在');
+      if (!department) throw new BusinessError('部门不存在');
       return department.name;
     }
     if (scopeType === 'group') {
       const group = await this.groupRepo.findOneBy({ id: scopeId });
-      if (!group) throw new Error('组别不存在');
+      if (!group) throw new BusinessError('组别不存在');
       return group.name;
     }
     if (scopeType === 'project') {
       const project = await this.projectRepo.findOneBy({ id: scopeId });
-      if (!project) throw new Error('项目不存在');
+      if (!project) throw new BusinessError('项目不存在');
       return project.name;
     }
-    throw new Error('不支持的权限范围');
+    throw new BusinessError('不支持的权限范围');
   }
 
   private async normalizePayload(payload: PermissionRequestPayload) {
     const definition = permissionDefinitionMap.get(payload.permissionCode);
-    if (!definition || !definition.grantable) throw new Error('该权限不支持申请开通');
+    if (!definition || !definition.grantable) throw new BusinessError('该权限不支持申请开通');
     if (definition.scopeTypes?.length && !definition.scopeTypes.includes(payload.scopeType)) {
-      throw new Error('权限范围与申请权限不匹配');
+      throw new BusinessError('权限范围与申请权限不匹配');
     }
 
     const permission = await this.permissionRepo.findOne({ where: { code: payload.permissionCode } });
-    if (!permission) throw new Error('权限码尚未初始化');
+    if (!permission) throw new BusinessError('权限码尚未初始化');
 
     const scopeId = payload.scopeType === 'global' || payload.scopeType === 'self' ? null : payload.scopeId ?? null;
     const scopeName = await this.resolveScopeName(payload.scopeType, scopeId);
@@ -88,73 +91,86 @@ export class PermissionGovernanceService {
   }
 
   async createAndSubmit(applicantId: number, payload: PermissionRequestPayload) {
-    const { definition, permission, scopeId, scopeName } = await this.normalizePayload(payload);
-    const applicant = await this.userRepo.findOneBy({ id: applicantId });
-    if (!applicant) throw new Error('申请人不存在');
+    type PendingNotify = { approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string };
+    const notifications: PendingNotify[] = [];
+    let requestId: number;
 
-    const existingGrant = await this.grantRepo.findOne({
-      where: {
-        userId: applicantId,
+    await AppDataSource.transaction(async (manager) => {
+      const txService = new PermissionGovernanceService(manager);
+      const { definition, permission, scopeId, scopeName } = await txService.normalizePayload(payload);
+      const applicant = await txService.userRepo.findOneBy({ id: applicantId });
+      if (!applicant) throw new BusinessError('申请人不存在');
+
+      const existingGrant = await txService.grantRepo.findOne({
+        where: {
+          userId: applicantId,
+          permissionCode: payload.permissionCode,
+          scopeType: payload.scopeType,
+          scopeId: scopeId === null ? IsNull() : scopeId,
+          status: 'active',
+        },
+      });
+      if (existingGrant) throw new BusinessError('该权限已经开通');
+
+      const request = await txService.requestRepo.save(txService.requestRepo.create({
+        applicantId,
+        permissionId: permission.id,
         permissionCode: payload.permissionCode,
+        permissionName: definition.name,
         scopeType: payload.scopeType,
-        scopeId: scopeId === null ? IsNull() : scopeId,
-        status: 'active',
-      },
-    });
-    if (existingGrant) throw new Error('该权限已经开通');
+        scopeId,
+        scopeName,
+        reason: payload.reason,
+        expiresAt: payload.expiresAt ?? null,
+        status: 'submitted',
+      }));
+      requestId = request.id;
 
-    const request = await this.requestRepo.save(this.requestRepo.create({
-      applicantId,
-      permissionId: permission.id,
-      permissionCode: payload.permissionCode,
-      permissionName: definition.name,
-      scopeType: payload.scopeType,
-      scopeId,
-      scopeName,
-      reason: payload.reason,
-      expiresAt: payload.expiresAt ?? null,
-      status: 'submitted',
-    }));
-
-    const resolved = await this.approvalInstanceService.start({
-      targetType: 'permission_request',
-      targetId: request.id,
-      applicantId,
-    });
-
-    if (resolved.status === 'submitted' && resolved.instance) {
-      await this.requestRepo.update(request.id, {
-        currentStep: resolved.instance.currentStepOrder || 1,
-        approvalFlowId: resolved.instance.flowId,
-        approvalInstanceId: resolved.instance.id,
-        totalSteps: resolved.instance.totalSteps,
+      const resolved = await txService.approvalInstanceService.start({
+        targetType: 'permission_request',
+        targetId: request.id,
+        applicantId,
       });
-      if (resolved.firstApproverIds.length) {
-        await this.notificationService.notifyApprovalPending(
-          resolved.firstApproverIds,
-          'permission_request',
-          request.id,
-          applicant.realName,
-          `权限申请 ${definition.name}`,
-        );
+
+      if (resolved.status === 'submitted' && resolved.instance) {
+        await txService.requestRepo.update(request.id, {
+          currentStep: resolved.instance.currentStepOrder || 1,
+          approvalFlowId: resolved.instance.flowId,
+          approvalInstanceId: resolved.instance.id,
+          totalSteps: resolved.instance.totalSteps,
+        });
+        if (resolved.firstApproverIds.length) {
+          notifications.push({
+            approverIds: resolved.firstApproverIds,
+            targetType: 'permission_request',
+            targetId: request.id,
+            applicantName: applicant.realName,
+            title: `权限申请 ${definition.name}`,
+          });
+        }
+      } else {
+        const grant = await txService.activateGrant(request.id, null, null);
+        await txService.requestRepo.update(request.id, {
+          status: 'approved',
+          currentStep: 0,
+          totalSteps: 0,
+          approvalInstanceId: resolved.instance?.id ?? null,
+          grantId: grant.id,
+        });
       }
-    } else {
-      const grant = await this.activateGrant(request.id, null, null);
-      await this.requestRepo.update(request.id, {
-        status: 'approved',
-        currentStep: 0,
-        totalSteps: 0,
-        approvalInstanceId: resolved.instance?.id ?? null,
-        grantId: grant.id,
-      });
+    });
+
+    const notifier = new NotificationService();
+    for (const n of notifications) {
+      try { await notifier.notifyApprovalPending(n.approverIds, n.targetType, n.targetId, n.applicantName, n.title); } catch {}
     }
 
-    return this.getRequestById(request.id);
+    return this.getRequestById(requestId!);
   }
 
   async activateGrant(requestId: number, approvalInstanceId: number | null, grantedBy: { id: number; name: string } | null) {
     const request = await this.requestRepo.findOne({ where: { id: requestId } });
-    if (!request) throw new Error('权限申请不存在');
+    if (!request) throw new BusinessError('权限申请不存在');
     const permission = await this.permissionRepo.findOne({ where: { code: request.permissionCode } });
 
     let grant = await this.grantRepo.findOne({
@@ -206,40 +222,46 @@ export class PermissionGovernanceService {
   }
 
   async withdraw(requestId: number, applicantId: number) {
-    const request = await this.requestRepo.findOne({ where: { id: requestId } });
-    if (!request) throw new Error('权限申请不存在');
-    if (request.applicantId !== applicantId) throw new Error('只能撤回自己的权限申请');
-    if (request.status !== 'submitted') throw new Error('仅审批中的申请可以撤回');
-    const applicant = await this.userRepo.findOneBy({ id: applicantId });
-    const instance = await this.approvalInstanceService.withdraw('permission_request', requestId, applicantId, applicant?.realName || '');
-    await this.recordRepo.save(this.recordRepo.create({
-      targetType: 'permission_request',
-      targetId: requestId,
-      instanceId: instance?.id ?? request.approvalInstanceId ?? null,
-      taskId: null,
-      approverId: applicantId,
-      approverName: applicant?.realName || '',
-      action: 'withdraw',
-      comment: '申请人撤回审批',
-      stepOrder: request.currentStep || 1,
-      stepType: 'withdraw',
-      stepLabel: '撤回',
-    }));
-    request.status = 'withdrawn';
-    request.currentStep = 0;
-    await this.requestRepo.save(request);
-    return request;
+    return AppDataSource.transaction(async (manager) => {
+      const txService = new PermissionGovernanceService(manager);
+      const request = await txService.requestRepo.findOne({ where: { id: requestId } });
+      if (!request) throw new BusinessError('权限申请不存在');
+      if (request.applicantId !== applicantId) throw new BusinessError('只能撤回自己的权限申请');
+      if (request.status !== 'submitted') throw new BusinessError('仅审批中的申请可以撤回');
+      const applicant = await txService.userRepo.findOneBy({ id: applicantId });
+      const instance = await txService.approvalInstanceService.withdraw('permission_request', requestId, applicantId, applicant?.realName || '');
+      await txService.recordRepo.save(txService.recordRepo.create({
+        targetType: 'permission_request',
+        targetId: requestId,
+        instanceId: instance?.id ?? request.approvalInstanceId ?? null,
+        taskId: null,
+        approverId: applicantId,
+        approverName: applicant?.realName || '',
+        action: 'withdraw',
+        comment: '申请人撤回审批',
+        stepOrder: request.currentStep || 1,
+        stepType: 'withdraw',
+        stepLabel: '撤回',
+      }));
+      request.status = 'withdrawn';
+      request.currentStep = 0;
+      await txService.requestRepo.save(request);
+      return request;
+    });
   }
 
   async revokeGrant(grantId: number, operatorId: number, reason?: string) {
-    const grant = await this.grantRepo.findOne({ where: { id: grantId } });
-    if (!grant) throw new Error('授权记录不存在');
-    if (grant.status !== 'active') return grant;
-    grant.status = 'revoked';
-    grant.revokedAt = new Date();
-    grant.revokedById = operatorId;
-    grant.revokeReason = reason || null;
-    return this.grantRepo.save(grant);
+    return AppDataSource.transaction(async (manager) => {
+      const txService = new PermissionGovernanceService(manager);
+      const grant = await txService.grantRepo.findOne({ where: { id: grantId } });
+      if (!grant) throw new BusinessError('授权记录不存在');
+      if (grant.status !== 'active') return grant;
+      grant.status = 'revoked';
+      grant.revokedAt = new Date();
+      grant.revokedById = operatorId;
+      grant.revokeReason = reason || null;
+      return txService.grantRepo.save(grant);
+    });
   }
 
   async getRequestById(id: number) {

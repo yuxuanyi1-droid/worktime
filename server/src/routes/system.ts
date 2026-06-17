@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import { SystemService } from '../services/systemService';
 import { ApprovalFlowEngine } from '../services/approvalFlowService';
+import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import { AppDataSource } from '../config/database';
 import { SystemSetting } from '../entities/SystemSetting';
 import { AccessPolicyService } from '../services/accessPolicyService';
+import { BusinessError } from '../utils/errors';
 import {
   firstQueryValue,
   parseArray,
@@ -22,6 +24,7 @@ const router = Router();
 const systemService = new SystemService();
 const flowEngine = new ApprovalFlowEngine();
 const accessPolicy = new AccessPolicyService();
+const auditService = new AuditService();
 const getSettingRepo = () => AppDataSource.getRepository(SystemSetting);
 const projectStatuses = ['active', 'completed', 'suspended', 'cancelled'] as const;
 const flowTypes = ['timesheet', 'overtime', 'weekly_report', 'permission_request'] as const;
@@ -165,7 +168,7 @@ function parseApprovalFlowPayload(body: Record<string, unknown>, partial = false
     ? undefined
     : parseArray(body.steps, 'steps', (stepValue, index) => {
       const step = stepValue as Record<string, unknown>;
-      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new Error(`steps[${index}]格式无效`);
+      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new BusinessError(`steps[${index}]格式无效`);
       const stepType = parseEnum(step.stepType, `steps[${index}].stepType`, stepTypes);
       const customApproverId = stepType === 'custom'
         ? parsePositiveInt(step.customApproverId, `steps[${index}].customApproverId`)
@@ -208,46 +211,56 @@ function parseProjectSEPayload(body: Record<string, unknown>) {
 router.use(authMiddleware);
 
 // ========== 部门 ==========
-router.get('/departments', async (req, res) => {
+router.get('/departments', async (req, res, next) => {
   try {
     const data = await systemService.getDepartments();
     res.json({ code: 0, data: data.map(d => ({
       ...d,
       leader: d.leader ? { id: d.leader.id, realName: d.leader.realName } : null,
     })) });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/departments', requirePermission('system:org:manage'), async (req, res) => {
+router.post('/departments', requirePermission('system:org:manage'), async (req, res, next) => {
   try {
     const data = await systemService.createDepartment(parseDepartmentPayload(req.body as Record<string, unknown>));
     res.json({ code: 0, data, message: '创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.put('/departments/:id', requirePermission('system:org:manage'), async (req, res) => {
+router.put('/departments/:id', requirePermission('system:org:manage'), async (req, res, next) => {
   try {
     const data = await systemService.updateDepartment(parsePositiveInt(req.params.id, 'id'), parseDepartmentPayload(req.body as Record<string, unknown>, true));
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.delete('/departments/:id', requirePermission('system:org:manage'), async (req, res) => {
+router.delete('/departments/:id', requirePermission('system:org:manage'), async (req, res, next) => {
   try {
     await systemService.deleteDepartment(parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ========== 分组（树形） ==========
-router.get('/groups/tree', async (req, res) => {
+router.get('/groups/tree', async (req, res, next) => {
   try {
     const data = await systemService.getGroupTree(parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId'));
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.get('/groups', async (req: AuthRequest, res) => {
+router.get('/groups', async (req: AuthRequest, res, next) => {
   try {
     const data = await systemService.getGroups(
       parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId'),
@@ -258,32 +271,40 @@ router.get('/groups', async (req: AuthRequest, res) => {
       leader: g.leader ? { id: g.leader.id, realName: g.leader.realName } : null,
       parent: g.parent ? { id: g.parent.id, name: g.parent.name } : null,
     })) });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/groups', requirePermission('system:org:manage'), async (req, res) => {
+router.post('/groups', requirePermission('system:org:manage'), async (req, res, next) => {
   try {
     const data = await systemService.createGroup(parseGroupPayload(req.body as Record<string, unknown>));
     res.json({ code: 0, data, message: '创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.put('/groups/:id', requirePermission('system:org:manage'), async (req, res) => {
+router.put('/groups/:id', requirePermission('system:org:manage'), async (req, res, next) => {
   try {
     const data = await systemService.updateGroup(parsePositiveInt(req.params.id, 'id'), parseGroupPayload(req.body as Record<string, unknown>, true));
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.delete('/groups/:id', requirePermission('system:org:manage'), async (req, res) => {
+router.delete('/groups/:id', requirePermission('system:org:manage'), async (req, res, next) => {
   try {
     await systemService.deleteGroup(parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ========== 用户 ==========
-router.get('/users', requirePermission('system:user:manage'), async (req: AuthRequest, res) => {
+router.get('/users', requirePermission('system:user:manage'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const data = await systemService.getUsers({
@@ -294,11 +315,13 @@ router.get('/users', requirePermission('system:user:manage'), async (req: AuthRe
       pageSize,
     });
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 获取所有用户（供选择器用）- 系统管理员或项目管理员可访问
-router.get('/users/all', async (req: AuthRequest, res) => {
+router.get('/users/all', async (req: AuthRequest, res, next) => {
   try {
     if (!await hasAnyPermission(
       req,
@@ -316,71 +339,115 @@ router.get('/users/all', async (req: AuthRequest, res) => {
     }
     const data = await systemService.getAllUsers();
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/users', requirePermission('system:user:manage'), async (req, res) => {
+router.post('/users', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
     const data = await systemService.createUser(parseUserPayload(req.body as Record<string, unknown>));
     res.json({ code: 0, data, message: '创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.put('/users/:id', requirePermission('system:user:manage'), async (req, res) => {
+router.put('/users/:id', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
-    const data = await systemService.updateUser(parsePositiveInt(req.params.id, 'id'), parseUserPayload(req.body as Record<string, unknown>, true));
+    const id = parsePositiveInt(req.params.id, 'id');
+    const data = await systemService.updateUser(id, parseUserPayload(req.body as Record<string, unknown>, true));
+    const actor = (req as AuthRequest).user!;
+    const statusChanged = (req.body as Record<string, unknown>).status !== undefined;
+    auditService.log({
+      userId: actor.id,
+      action: statusChanged ? `user.${(req.body as Record<string, unknown>).status === 0 ? 'disable' : 'enable'}` : 'user.update',
+      target: 'user',
+      targetId: id,
+      ip: req.ip,
+    });
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.delete('/users/:id', requirePermission('system:user:manage'), async (req, res) => {
+router.delete('/users/:id', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
-    await systemService.deleteUser(parsePositiveInt(req.params.id, 'id'));
+    const id = parsePositiveInt(req.params.id, 'id');
+    await systemService.deleteUser(id);
+    const actor = (req as AuthRequest).user!;
+    auditService.log({ userId: actor.id, action: 'user.delete', target: 'user', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.put('/users/:id/reset-password', requirePermission('system:user:manage'), async (req, res) => {
+router.put('/users/:id/reset-password', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
+    const id = parsePositiveInt(req.params.id, 'id');
     const password = parseString((req.body as Record<string, unknown>).password ?? '123456', 'password', { required: true, max: 128 })!;
-    await systemService.resetPassword(parsePositiveInt(req.params.id, 'id'), password);
+    await systemService.resetPassword(id, password);
+    const actor = (req as AuthRequest).user!;
+    auditService.log({ userId: actor.id, action: 'user.reset_password', target: 'user', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '密码重置成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ========== 角色 ==========
-router.get('/roles', requirePermission('system:user:manage', 'system:role:manage'), async (req, res) => {
+router.get('/roles', requirePermission('system:user:manage', 'system:role:manage'), async (req, res, next) => {
   try {
     const data = await systemService.getRoles();
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.put('/roles/:id/permissions', requirePermission('system:role:manage'), async (req, res) => {
+router.put('/roles/:id/permissions', requirePermission('system:role:manage'), async (req, res, next) => {
   try {
-    const permissionIds = parseArray(req.body.permissionIds, 'permissionIds', (id, index) => parsePositiveInt(id, `permissionIds[${index}]`), { max: 500 });
-    const data = await systemService.updateRolePermissions(parsePositiveInt(req.params.id, 'id'), permissionIds);
+    const id = parsePositiveInt(req.params.id, 'id');
+    const permissionIds = parseArray(req.body.permissionIds, 'permissionIds', (pid, index) => parsePositiveInt(pid, `permissionIds[${index}]`), { max: 500 });
+    const data = await systemService.updateRolePermissions(id, permissionIds);
+    const actor = (req as AuthRequest).user!;
+    auditService.log({
+      userId: actor.id,
+      action: 'role.update_permissions',
+      target: 'role',
+      targetId: id,
+      detail: JSON.stringify({ permissionIds }),
+      ip: req.ip,
+    });
     res.json({ code: 0, data, message: '权限更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ========== 权限 ==========
-router.get('/permissions', requirePermission('system:role:manage', 'system:permission:manage'), async (req, res) => {
+router.get('/permissions', requirePermission('system:role:manage', 'system:permission:manage'), async (req, res, next) => {
   try {
     const data = await systemService.getPermissions();
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/permissions/init', requirePermission('system:permission:manage'), async (req, res) => {
+router.post('/permissions/init', requirePermission('system:permission:manage'), async (req, res, next) => {
   try {
     const data = await systemService.initPermissions();
     res.json({ code: 0, data, message: '权限初始化成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ========== 项目 ==========
-router.get('/projects', async (req, res) => {
+router.get('/projects', async (req, res, next) => {
   try {
     const viewer = (req as AuthRequest).user!;
     const visibleProjects = await accessPolicy.getVisibleProjects(viewer);
@@ -389,29 +456,35 @@ router.get('/projects', async (req, res) => {
     }
     const data = visibleProjects;
     res.json({ code: 0, data: await Promise.all(data.map(p => mapProjectForViewer(p, viewer))) });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 获取进行中的项目列表（所有登录用户可访问，用于工时选择等）
-router.get('/projects/active', async (req, res) => {
+router.get('/projects/active', async (req, res, next) => {
   try {
     const data = await systemService.getActiveProjects();
     res.json({ code: 0, data: data.map(p => ({ id: p.id, name: p.name, code: p.code })) });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 管理员获取自己负责的项目
-router.get('/projects/my', async (req: AuthRequest, res) => {
+router.get('/projects/my', async (req: AuthRequest, res, next) => {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ code: 401, message: '未登录' });
     const data = await accessPolicy.getVisibleProjects(req.user!);
     res.json({ code: 0, data: await Promise.all(data.map(p => mapProjectForViewer(p, req.user!))) });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 检查当前用户是否可看项目管理
-router.get('/projects/can-view', async (req: AuthRequest, res) => {
+router.get('/projects/can-view', async (req: AuthRequest, res, next) => {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ code: 401, message: '未登录' });
@@ -419,19 +492,23 @@ router.get('/projects/can-view', async (req: AuthRequest, res) => {
     const visibleProjects = await accessPolicy.getVisibleProjects(req.user!);
     const isManager = visibleProjects.length > 0 && !isAdmin;
     res.json({ code: 0, data: { canView: isAdmin || visibleProjects.length > 0, isAdmin, isManager } });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 创建项目 - 仅系统管理员
-router.post('/projects', requirePermission('project:create'), async (req, res) => {
+router.post('/projects', requirePermission('project:create'), async (req, res, next) => {
   try {
     const data = await systemService.createProject(parseProjectPayload(req.body as Record<string, unknown>));
     res.json({ code: 0, data, message: '创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 更新项目 - 系统管理员或项目管理员
-router.put('/projects/:id', async (req: AuthRequest, res) => {
+router.put('/projects/:id', async (req: AuthRequest, res, next) => {
   try {
     const projectId = parsePositiveInt(req.params.id, 'id');
     if (!await accessPolicy.canUpdateProject(req.user!, projectId)) {
@@ -443,19 +520,23 @@ router.put('/projects/:id', async (req: AuthRequest, res) => {
     }
     const data = await systemService.updateProject(projectId, payload);
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 删除项目 - 仅系统管理员
-router.delete('/projects/:id', requirePermission('project:delete'), async (req, res) => {
+router.delete('/projects/:id', requirePermission('project:delete'), async (req, res, next) => {
   try {
     await systemService.deleteProject(parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ========== 项目SE ==========
-router.get('/projects/:projectId/ses', async (req: AuthRequest, res) => {
+router.get('/projects/:projectId/ses', async (req: AuthRequest, res, next) => {
   try {
     const projectId = parsePositiveInt(req.params.projectId, 'projectId');
     if (!await accessPolicy.canAccessProject(req.user!, projectId)) {
@@ -467,10 +548,12 @@ router.get('/projects/:projectId/ses', async (req: AuthRequest, res) => {
       user: se.user ? { id: se.user.id, realName: se.user.realName } : null,
       group: se.group ? { id: se.group.id, name: se.group.name } : null,
     })) });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/projects/:projectId/ses', async (req: AuthRequest, res) => {
+router.post('/projects/:projectId/ses', async (req: AuthRequest, res, next) => {
   try {
     const projectId = parsePositiveInt(req.params.projectId, 'projectId');
     if (!await accessPolicy.canAssignProjectSE(req.user!, projectId)) {
@@ -481,10 +564,12 @@ router.post('/projects/:projectId/ses', async (req: AuthRequest, res) => {
       ...parseProjectSEPayload(req.body as Record<string, unknown>),
     });
     res.json({ code: 0, data, message: '添加成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.delete('/projects/ses/:id', async (req: AuthRequest, res) => {
+router.delete('/projects/ses/:id', async (req: AuthRequest, res, next) => {
   try {
     // 先检查是否有权操作该SE对应的项目
     
@@ -496,11 +581,13 @@ router.delete('/projects/ses/:id', async (req: AuthRequest, res) => {
     }
     await systemService.removeProjectSE(id);
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ========== 审批流程 ==========
-router.get('/approval-flows', requirePermission('system:approval_flow:manage'), async (req, res) => {
+router.get('/approval-flows', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
   try {
     const type = parseOptionalEnum(firstQueryValue(req.query.type), 'type', flowTypes);
     const data = await flowEngine.getFlows(type);
@@ -508,43 +595,53 @@ router.get('/approval-flows', requirePermission('system:approval_flow:manage'), 
       ...f,
       steps: (f.steps || []).sort((a: any, b: any) => a.stepOrder - b.stepOrder),
     })) });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.get('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res) => {
+router.get('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
   try {
     const data = await flowEngine.getFlow(parsePositiveInt(req.params.id, 'id'));
     if (!data) return res.status(404).json({ code: 404, message: '审批流程不存在' });
     res.json({ code: 0, data: { ...data, steps: (data.steps || []).sort((a: any, b: any) => a.stepOrder - b.stepOrder) } });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/approval-flows', requirePermission('system:approval_flow:manage'), async (req, res) => {
+router.post('/approval-flows', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
   try {
     const data = await flowEngine.createFlow(parseApprovalFlowPayload(req.body as Record<string, unknown>));
     res.json({ code: 0, data, message: '创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.put('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res) => {
+router.put('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
   try {
     const data = await flowEngine.updateFlow(parsePositiveInt(req.params.id, 'id'), parseApprovalFlowPayload(req.body as Record<string, unknown>, true));
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.delete('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res) => {
+router.delete('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
   try {
     await flowEngine.deleteFlow(parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 export const systemRoutes = router;
 
 // ========== 系统设置 ==========
 // 所有登录用户可读设置
-router.get('/settings', async (_req, res) => {
+router.get('/settings', async (_req, res, next) => {
   try {
     const settingRepo = getSettingRepo();
     const list = await settingRepo.find({ order: { id: 'ASC' } });
@@ -552,10 +649,12 @@ router.get('/settings', async (_req, res) => {
     const settings: Record<string, string> = {};
     list.forEach(s => { settings[s.key] = s.value; });
     res.json({ code: 0, data: { list, settings } });
-  } catch (error: any) { res.status(500).json({ code: 500, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.put('/settings/:key', requirePermission('system:settings:manage'), async (req: AuthRequest, res) => {
+router.put('/settings/:key', requirePermission('system:settings:manage'), async (req: AuthRequest, res, next) => {
   try {
     const settingRepo = getSettingRepo();
     const key = parseEnum(req.params.key, 'key', settingKeys);
@@ -573,6 +672,16 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
       setting = settingRepo.create({ key, value });
       await settingRepo.save(setting);
     }
+    auditService.log({
+      userId: req.user!.id,
+      action: 'settings.update',
+      target: 'system_setting',
+      targetId: setting.id,
+      detail: JSON.stringify({ key, value }),
+      ip: req.ip,
+    });
     res.json({ code: 0, data: setting, message: '更新成功' });
-  } catch (error: any) { res.status(500).json({ code: 500, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });

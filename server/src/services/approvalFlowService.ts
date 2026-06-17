@@ -1,3 +1,5 @@
+import { EntityManager } from 'typeorm';
+import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { ApprovalFlow } from '../entities/ApprovalFlow';
 import { ApprovalFlowStep } from '../entities/ApprovalFlowStep';
@@ -25,14 +27,16 @@ type ApprovalFlowStepLike = {
  * 负责解析审批流程配置、匹配审批人
  */
 export class ApprovalFlowEngine {
-  private flowRepo = AppDataSource.getRepository(ApprovalFlow);
-  private stepRepo = AppDataSource.getRepository(ApprovalFlowStep);
-  private versionRepo = AppDataSource.getRepository(ApprovalFlowVersion);
-  private groupRepo = AppDataSource.getRepository(Group);
-  private userRepo = AppDataSource.getRepository(User);
-  private projectRepo = AppDataSource.getRepository(Project);
-  private projectSERepo = AppDataSource.getRepository(ProjectSE);
-  private deptRepo = AppDataSource.getRepository(Department);
+  constructor(private manager?: EntityManager) {}
+
+  private get flowRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalFlow); }
+  private get stepRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalFlowStep); }
+  private get versionRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalFlowVersion); }
+  private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
+  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
+  private get projectSERepo() { return (this.manager ?? AppDataSource).getRepository(ProjectSE); }
+  private get deptRepo() { return (this.manager ?? AppDataSource).getRepository(Department); }
 
   /**
    * 获取某类型的默认审批流程
@@ -226,7 +230,7 @@ export class ApprovalFlowEngine {
 
   async createFlowVersion(flowId: number) {
     const flow = await this.getFlow(flowId);
-    if (!flow) throw new Error('Approval flow not found');
+    if (!flow) throw new BusinessError('Approval flow not found');
 
     const lastVersion = await this.versionRepo.findOne({
       where: { flowId },
@@ -287,7 +291,7 @@ export class ApprovalFlowEngine {
 
   async updateFlow(id: number, data: { name?: string; description?: string; isDefault?: boolean; enabled?: boolean; steps?: any[] }) {
     const flow = await this.flowRepo.findOne({ where: { id }, relations: ['steps'] });
-    if (!flow) throw new Error('审批流程不存在');
+    if (!flow) throw new BusinessError('审批流程不存在');
 
     if (data.isDefault) {
       await this.flowRepo.update({ type: flow.type, isDefault: true }, { isDefault: false });

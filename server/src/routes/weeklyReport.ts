@@ -28,7 +28,7 @@ function parseWeeklyReportPayload(body: Record<string, unknown>) {
 router.use(authMiddleware);
 
 // 查看自己的周报
-router.get('/my', async (req: AuthRequest, res) => {
+router.get('/my', async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const data = await weeklyReportService.getByUser(req.user!.id, {
@@ -36,11 +36,13 @@ router.get('/my', async (req: AuthRequest, res) => {
       pageSize,
     });
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 查看指定周的周报
-router.get('/week', requirePermission('weekly_report:read'), async (req: AuthRequest, res) => {
+router.get('/week', requirePermission('weekly_report:read'), async (req: AuthRequest, res, next) => {
   try {
     const weekStart = parseDateString(firstQueryValue(req.query.weekStart), 'weekStart');
     const userId = firstQueryValue(req.query.userId)
@@ -54,25 +56,31 @@ router.get('/week', requirePermission('weekly_report:read'), async (req: AuthReq
     }
     const data = await weeklyReportService.getByWeek(userId, weekStart);
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 创建/更新周报
-router.post('/', requirePermission('weekly_report:create'), async (req: AuthRequest, res) => {
+router.post('/', requirePermission('weekly_report:create'), async (req: AuthRequest, res, next) => {
   try {
     const payload = parseWeeklyReportPayload(req.body as Record<string, unknown>);
     const data = await weeklyReportService.createOrUpdate({ ...payload, userId: req.user!.id });
     res.json({ code: 0, data, message: '保存成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 提交审批
-router.post('/submit', requirePermission('weekly_report:create'), async (req: AuthRequest, res) => {
+router.post('/submit', requirePermission('weekly_report:create'), async (req: AuthRequest, res, next) => {
   try {
     const id = parsePositiveInt(req.body.id, 'id');
     await weeklyReportService.submit(id, req.user!.id);
     res.json({ code: 0, message: '提交成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 export const weeklyReportRoutes = router;

@@ -15,6 +15,7 @@ import {
   parseString,
 } from '../utils/validation';
 import { canAccessUserData } from '../utils/accessControl';
+import { BusinessError } from '../utils/errors';
 
 const router = Router();
 const timesheetService = new TimesheetService();
@@ -22,7 +23,7 @@ const timesheetStatuses = ['draft', 'submitted', 'approved', 'rejected', 'deprec
 
 function parseTimesheetItem(item: unknown, index: number) {
   const row = item as Record<string, unknown>;
-  if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error(`items[${index}]格式无效`);
+  if (!row || typeof row !== 'object' || Array.isArray(row)) throw new BusinessError(`items[${index}]格式无效`);
   return {
     projectId: parsePositiveInt(row.projectId, `items[${index}].projectId`),
     date: parseDateString(row.date, `items[${index}].date`),
@@ -33,14 +34,14 @@ function parseTimesheetItem(item: unknown, index: number) {
 
 function parseTimesheetRow(rowValue: unknown, index: number) {
   const row = rowValue as Record<string, unknown>;
-  if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error(`rows[${index}]格式无效`);
+  if (!row || typeof row !== 'object' || Array.isArray(row)) throw new BusinessError(`rows[${index}]格式无效`);
   return {
     projectId: parsePositiveInt(row.projectId, `rows[${index}].projectId`),
     description: parseString(row.description, `rows[${index}].description`, { max: 1000 }) || '',
     weekStart: parseDateString(row.weekStart, `rows[${index}].weekStart`),
     entries: parseArray(row.entries, `rows[${index}].entries`, (entryValue, entryIndex) => {
       const entry = entryValue as Record<string, unknown>;
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`rows[${index}].entries[${entryIndex}]格式无效`);
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new BusinessError(`rows[${index}].entries[${entryIndex}]格式无效`);
       return {
         date: parseDateString(entry.date, `rows[${index}].entries[${entryIndex}].date`),
         hours: parseHours(entry.hours, `rows[${index}].entries[${entryIndex}].hours`),
@@ -52,7 +53,7 @@ function parseTimesheetRow(rowValue: unknown, index: number) {
 router.use(authMiddleware);
 
 // 查看自己的工时 — 所有登录用户
-router.get('/my', async (req: AuthRequest, res) => {
+router.get('/my', async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query, 50);
     const data = await timesheetService.getByUser(req.user!.id, {
@@ -64,11 +65,13 @@ router.get('/my', async (req: AuthRequest, res) => {
       includeAll: parseBooleanQuery(firstQueryValue(req.query.includeAll)),
     });
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 查看周汇总 — 所有登录用户（查看自己的）或管理员/经理查看别人的
-router.get('/weekly-summary', requirePermission('timesheet:read'), async (req: AuthRequest, res) => {
+router.get('/weekly-summary', requirePermission('timesheet:read'), async (req: AuthRequest, res, next) => {
   try {
     const weekStart = parseDateString(firstQueryValue(req.query.weekStart), 'weekStart');
     const weekEnd = parseDateString(firstQueryValue(req.query.weekEnd), 'weekEnd');
@@ -81,30 +84,36 @@ router.get('/weekly-summary', requirePermission('timesheet:read'), async (req: A
     }
     const data = await timesheetService.getWeeklySummary(targetUserId, weekStart, weekEnd);
     res.json({ code: 0, data });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 创建工时 — 需要 timesheet:create 权限
-router.post('/', requirePermission('timesheet:create'), async (req: AuthRequest, res) => {
+router.post('/', requirePermission('timesheet:create'), async (req: AuthRequest, res, next) => {
   try {
     const row = parseTimesheetItem(req.body, 0);
     const data = await timesheetService.create({ ...row, userId: req.user!.id });
     res.json({ code: 0, data, message: '创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 批量创建工时
-router.post('/batch', requirePermission('timesheet:create'), async (req: AuthRequest, res) => {
+router.post('/batch', requirePermission('timesheet:create'), async (req: AuthRequest, res, next) => {
   try {
     const { items } = req.body;
     const parsedItems = parseArray(items, 'items', parseTimesheetItem, { min: 1, max: 200 });
     const data = await timesheetService.batchCreate(req.user!.id, parsedItems);
     res.json({ code: 0, data, message: '批量创建成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 更新工时 — service 层校验所有权和状态
-router.put('/:id', requirePermission('timesheet:update'), async (req: AuthRequest, res) => {
+router.put('/:id', requirePermission('timesheet:update'), async (req: AuthRequest, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const data = await timesheetService.update(parsePositiveInt(req.params.id, 'id'), req.user!.id, {
@@ -113,42 +122,52 @@ router.put('/:id', requirePermission('timesheet:update'), async (req: AuthReques
       description: parseString(body.description, 'description', { max: 1000 }),
     });
     res.json({ code: 0, data, message: '更新成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 删除工时
-router.delete('/:id', requirePermission('timesheet:delete'), async (req: AuthRequest, res) => {
+router.delete('/:id', requirePermission('timesheet:delete'), async (req: AuthRequest, res, next) => {
   try {
     await timesheetService.delete(parsePositiveInt(req.params.id, 'id'), req.user!.id);
     res.json({ code: 0, message: '删除成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 提交审批
-router.post('/submit', requirePermission('timesheet:create'), async (req: AuthRequest, res) => {
+router.post('/submit', requirePermission('timesheet:create'), async (req: AuthRequest, res, next) => {
   try {
     const ids = parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 200 });
     await timesheetService.submit(ids, req.user!.id);
     res.json({ code: 0, message: '提交成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 修改已提交/已审批的工时（删除旧记录，创建新草稿）
-router.post('/modify', requirePermission('timesheet:update'), async (req: AuthRequest, res) => {
+router.post('/modify', requirePermission('timesheet:update'), async (req: AuthRequest, res, next) => {
   try {
     const rows = parseArray(req.body.rows, 'rows', parseTimesheetRow, { min: 1, max: 50 });
     await timesheetService.modifySubmitted(req.user!.id, rows);
     res.json({ code: 0, message: '修改成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 // 按行提交审批（每周表格，每行一个审批单）
-router.post('/submit-rows', requirePermission('timesheet:create'), async (req: AuthRequest, res) => {
+router.post('/submit-rows', requirePermission('timesheet:create'), async (req: AuthRequest, res, next) => {
   try {
     const rows = parseArray(req.body.rows, 'rows', parseTimesheetRow, { min: 1, max: 50 });
     await timesheetService.submitByRows(req.user!.id, rows);
     res.json({ code: 0, message: '提交成功' });
-  } catch (error: any) { res.status(400).json({ code: 400, message: error.message }); }
+  } catch (error) {
+    next(error);
+  }
 });
 
 export const timesheetRoutes = router;
