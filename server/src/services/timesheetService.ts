@@ -92,34 +92,26 @@ export class TimesheetService {
       .where('t.userId = :userId', { userId });
 
     if (!includeAll) {
-      qb.andWhere('t.status != :deprecated', { deprecated: 'deprecated' });
-    }
-
-    if (startDate && endDate) {
-      qb.andWhere('t.date BETWEEN :startDate AND :endDate', { startDate, endDate });
-    }
-    if (status) {
-      qb.andWhere('t.status = :status', { status });
+      // 去重：每个 (date, projectId) 只保留 id 最大的非废弃记录。
+      // 用子查询在 SQL 层完成去重，使 total 与分页后的 list 口径一致。
+      const dedupSub = this.repo.createQueryBuilder('d')
+        .select('MAX(d.id)', 'maxId')
+        .where('d.userId = :userId', { userId })
+        .andWhere('d.status != :deprecated', { deprecated: 'deprecated' })
+        .groupBy('d.date, d.projectId');
+      if (startDate && endDate) dedupSub.andWhere('d.date BETWEEN :startDate AND :endDate', { startDate, endDate });
+      if (status) dedupSub.andWhere('d.status = :status', { status });
+      qb.andWhere(`t.id IN (${dedupSub.getQuery()})`);
+      qb.setParameters({ deprecated: 'deprecated', startDate, endDate, status });
+    } else {
+      if (startDate && endDate) qb.andWhere('t.date BETWEEN :startDate AND :endDate', { startDate, endDate });
+      if (status) qb.andWhere('t.status = :status', { status });
     }
 
     qb.orderBy('t.date', 'DESC');
     const total = await qb.getCount();
-    const rawList = await qb.skip((page - 1) * pageSize).take(pageSize).getMany();
-
-    if (includeAll) {
-      return { list: rawList, total, page, pageSize };
-    }
-
-    const dedupMap = new Map<string, Timesheet>();
-    for (const r of rawList) {
-      const key = `${r.date}_${r.projectId}`;
-      const existing = dedupMap.get(key);
-      if (!existing || r.id > existing.id) {
-        dedupMap.set(key, r);
-      }
-    }
-    const list = Array.from(dedupMap.values()).sort((a, b) => b.date.localeCompare(a.date));
-    return { list, total: list.length, page, pageSize };
+    const list = await qb.skip((page - 1) * pageSize).take(pageSize).getMany();
+    return { list, total, page, pageSize };
   }
 
   /** 按日期范围查询 — 排除 deprecated，按 (date, projectId) 去重 */

@@ -42,6 +42,7 @@ export class NotificationService {
     targetType?: string;
     targetId?: number;
   }) {
+    if (!userIds?.length) return [];
     const notifications = userIds.map(uid => this.repo.create({ ...data, userId: uid }));
     return this.repo.save(notifications);
   }

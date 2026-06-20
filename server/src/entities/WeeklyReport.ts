@@ -26,11 +26,11 @@ export class WeeklyReport {
   @Column({ type: 'text', nullable: true })
   summary!: string;
 
-  @Column({ type: 'float', default: 0 })
+  @Column({ type: 'numeric', precision: 10, scale: 2, default: 0 })
   totalHours!: number;
 
   @Column({ type: 'varchar', length: 20, default: 'draft' })
-  status!: 'draft' | 'submitted' | 'approved' | 'rejected';
+  status!: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
 
   @Column({ type: 'integer', default: 0 })
   currentStep!: number;

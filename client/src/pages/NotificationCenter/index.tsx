@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Card, Tabs, Table, Button, Space, Tag, Typography, Empty, Modal, Badge,
+  Card, Tabs, Table, Button, Space, Tag, Typography, Empty, Modal, Badge, message,
   List, Spin, Input, Descriptions,
 } from 'antd';
 import {
@@ -37,7 +37,9 @@ export default function NotificationCenter() {
     try {
       const res = await notificationApi.getList({ page: notifPage, pageSize: 20 });
       if (res.data) { setNotifications(res.data.list); setNotifTotal(res.data.total); }
-    } catch {}
+    } catch (e: any) {
+      message.error(e?.response?.data?.message || '通知加载失败');
+    }
     setNotifLoading(false);
   };
 
@@ -46,7 +48,9 @@ export default function NotificationCenter() {
     try {
       const res = await announcementApi.getMyList({ page: announPage, pageSize: 20 });
       if (res.data) { setAnnouncements(res.data.list); setAnnounTotal(res.data.total); }
-    } catch {}
+    } catch (e: any) {
+      message.error(e?.response?.data?.message || '公告加载失败');
+    }
     setAnnounLoading(false);
   };
 

@@ -67,6 +67,7 @@ export default function TimesheetPage() {
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false); // 编辑模式：控制已提交/已审批行是否可编辑
   const rowSnapshotRef = useRef<Map<string, WeekRow>>(new Map()); // 编辑模式开始时的行快照
+  const weekLoadReqId = useRef(0); // 切周请求竞态守卫：只接受最新一次的响应
 
   // 系统设置：工时单位 days/hours
   const [unitMode, setUnitMode] = useState<'days' | 'hours'>('days');
@@ -142,6 +143,8 @@ export default function TimesheetPage() {
   /** 加载当前周已有的工时数据（含已提交/已通过），填充到周表格 */
   const loadWeekDrafts = async () => {
     if (projects.length === 0) return;
+    // 竞态守卫：快速切周时只接受最后一次请求的响应，避免旧响应覆盖新数据
+    const reqId = ++weekLoadReqId.current;
     try {
       // 加载该周所有状态的工时记录
       const res = await timesheetApi.getMy({
@@ -149,6 +152,7 @@ export default function TimesheetPage() {
         endDate: weekDates[6],
         pageSize: 200,
       });
+      if (reqId !== weekLoadReqId.current) return; // 已有更新的请求，丢弃本次响应
       if (res.data && res.data.list.length > 0) {
         const allItems = res.data.list;
         // 按 projectId 分组（合并所有状态）
@@ -288,9 +292,25 @@ export default function TimesheetPage() {
         });
         return { key: `row_${++rowKeyCounter}_${Date.now()}`, projectId: Number(pid), description: desc, hours };
       });
-      if (newRows.length > 0) {
+      if (newRows.length === 0) return;
+
+      // 本周已有非空数据时，覆盖前需二次确认，避免误丢已填内容
+      const hasCurrentData = rows.some(r => weekDates.some(d => (r.hours[d] || 0) > 0));
+      const doCopy = () => {
         setRows(newRows);
         message.success(`已复制上周 ${newRows.length} 个项目行`);
+      };
+      if (hasCurrentData) {
+        Modal.confirm({
+          title: '确认覆盖本周工时',
+          content: '本周已填写工时，复制上周将覆盖当前内容，是否继续？',
+          okText: '覆盖',
+          okType: 'danger',
+          cancelText: '取消',
+          onOk: doCopy,
+        });
+      } else {
+        doCopy();
       }
     } catch (error) {
       message.error(getErrorMessage(error, '复制上周工时失败'));

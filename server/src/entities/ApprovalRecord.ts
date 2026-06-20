@@ -44,13 +44,13 @@ export class ApprovalRecord {
   @Column({ type: 'varchar', length: 100, nullable: true })
   stepLabel!: string;
 
-  @ManyToOne(() => Timesheet, timesheet => timesheet.approvalRecords, { nullable: true })
+  @ManyToOne(() => Timesheet, timesheet => timesheet.approvalRecords, { nullable: true, onDelete: 'SET NULL' })
   timesheet!: Timesheet;
 
-  @ManyToOne(() => OvertimeApplication, overtime => overtime.approvalRecords, { nullable: true })
+  @ManyToOne(() => OvertimeApplication, overtime => overtime.approvalRecords, { nullable: true, onDelete: 'SET NULL' })
   overtime!: OvertimeApplication;
 
-  @ManyToOne(() => WeeklyReport, weeklyReport => weeklyReport.approvalRecords, { nullable: true })
+  @ManyToOne(() => WeeklyReport, weeklyReport => weeklyReport.approvalRecords, { nullable: true, onDelete: 'SET NULL' })
   weeklyReport!: WeeklyReport;
 
   @CreateDateColumn()

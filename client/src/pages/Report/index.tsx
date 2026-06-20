@@ -318,9 +318,9 @@ export default function Report() {
   const groupsForDept = (deptId?: number) => (scope?.groups || []).filter((group) => !deptId || group.departmentId === deptId);
   const selectedProject = (scope?.projects || []).find((project) => project.id === selectedProj);
   const projectModuleGroups = (selectedProject?.moduleSEs || [])
-    .map((se: any) => se.group)
-    .filter(Boolean)
-    .map((group: any) => ({
+    .map((se) => se.group)
+    .filter((group): group is NonNullable<typeof group> => Boolean(group))
+    .map((group) => ({
       id: group.id,
       name: group.name,
       departmentId: group.departmentId ?? null,
@@ -329,13 +329,13 @@ export default function Report() {
   const projectDepartments = uniqueById([
     ...(projData?.filters?.departments || []),
     ...projectModuleGroups
-      .map((group: any) => group.department)
-      .filter(Boolean)
-      .map((department: any) => ({ id: department.id, name: department.name })),
+      .map((group) => group.department)
+      .filter((dept): dept is NonNullable<typeof dept> => Boolean(dept))
+      .map((department) => ({ id: department.id, name: department.name })),
   ]);
   const projectGroups = uniqueById([
     ...(projData?.filters?.groups || []),
-    ...projectModuleGroups.map((group: any) => ({ id: group.id, name: group.name, departmentId: group.departmentId ?? null })),
+    ...projectModuleGroups.map((group) => ({ id: group.id, name: group.name, departmentId: group.departmentId ?? null })),
   ])
     .filter((group) => !selectedProjDept || group.departmentId === selectedProjDept);
 

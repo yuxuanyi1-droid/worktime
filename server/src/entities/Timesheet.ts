@@ -1,10 +1,14 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, OneToMany, Index } from 'typeorm';
 import { User } from './User';
 import { Project } from './Project';
 import { ApprovalRecord } from './ApprovalRecord';
 import { ApprovalFlow } from './ApprovalFlow';
 
 @Entity('timesheets')
+@Index('idx_timesheet_user_date', ['userId', 'date'])
+@Index('idx_timesheet_user_status', ['userId', 'status'])
+@Index('idx_timesheet_submission_group', ['submissionGroupId'])
+@Index('idx_timesheet_date_status', ['date', 'status'])
 export class Timesheet {
   @PrimaryGeneratedColumn()
   id!: number;
@@ -36,7 +40,7 @@ export class Timesheet {
   @Column({ type: 'varchar', length: 20 })
   date!: string; // YYYY-MM-DD
 
-  @Column({ type: 'float' })
+  @Column({ type: 'numeric', precision: 10, scale: 2 })
   hours!: number;
 
   @Column({ type: 'text', nullable: true })

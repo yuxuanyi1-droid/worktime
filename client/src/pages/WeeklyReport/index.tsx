@@ -117,14 +117,16 @@ export default function WeeklyReportPage() {
       // 加载本周工时
       const hoursRes = await timesheetApi.getWeeklySummary(ws, we);
       if (hoursRes.data) setWeekHours(hoursRes.data);
-    } catch {}
+    } catch (e: any) {
+      message.error(e?.response?.data?.message || '周报数据加载失败');
+    }
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
       const ws = weekStart.format('YYYY-MM-DD');
-      const we = weekStart.add(4, 'day').format('YYYY-MM-DD');
+      const we = weekStart.add(6, 'day').format('YYYY-MM-DD');
       await weeklyReportApi.save({
         weekStart: ws,
         weekEnd: we,
@@ -134,7 +136,9 @@ export default function WeeklyReportPage() {
       });
       message.success('保存成功');
       loadData();
-    } catch {}
+    } catch (e: any) {
+      message.error(e?.response?.data?.message || '保存失败');
+    }
     setSaving(false);
   };
 
@@ -147,7 +151,9 @@ export default function WeeklyReportPage() {
       await weeklyReportApi.submit(report.id);
       message.success('提交成功');
       loadData();
-    } catch {}
+    } catch (e: any) {
+      message.error(e?.response?.data?.message || '提交失败');
+    }
   };
 
   const getErrorMessage = (error: unknown, fallback: string) => {

@@ -41,14 +41,14 @@ export class OvertimeApplication {
   @Column({ type: 'varchar', length: 20 })
   overtimeType!: OvertimeType;
 
-  @Column({ type: 'float' })
+  @Column({ type: 'numeric', precision: 10, scale: 2 })
   hours!: number;
 
   @Column({ type: 'text', nullable: true })
   reason!: string;
 
   @Column({ type: 'varchar', length: 20, default: 'draft' })
-  status!: 'draft' | 'submitted' | 'approved' | 'rejected';
+  status!: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
 
   @Column({ type: 'integer', default: 0 })
   currentStep!: number;

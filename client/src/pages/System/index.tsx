@@ -74,6 +74,7 @@ function OrgTab() {
   const [editDept, setEditDept] = useState<Department | null>(null);
   const [editGroup, setEditGroup] = useState<Group | null>(null);
   const [selectedDeptId, setSelectedDeptId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
   const [deptForm] = Form.useForm();
   const [groupForm] = Form.useForm();
 
@@ -285,7 +286,7 @@ function OrgTab() {
       </Row>
 
       {/* 部门编辑 Modal */}
-      <Modal title={editDept ? '编辑部门' : '新增部门'} open={deptModalOpen}
+      <Modal title={editDept ? '编辑部门' : '新增部门'} open={deptModalOpen} confirmLoading={saving}
         onCancel={() => { setDeptModalOpen(false); setEditDept(null); }} onOk={() => deptForm.submit()}>
         <Form form={deptForm} layout="vertical" onFinish={handleDeptSave}>
           <Form.Item name="name" label="部门名称" rules={[{ required: true, message: '请输入' }]}>
@@ -303,7 +304,7 @@ function OrgTab() {
       </Modal>
 
       {/* 分组编辑 Modal */}
-      <Modal title={editGroup ? '编辑分组' : '新增分组'} open={groupModalOpen}
+      <Modal title={editGroup ? '编辑分组' : '新增分组'} open={groupModalOpen} confirmLoading={saving}
         onCancel={() => { setGroupModalOpen(false); setEditGroup(null); }} onOk={() => groupForm.submit()}>
         <Form form={groupForm} layout="vertical" onFinish={handleGroupSave}>
           <Form.Item name="name" label="分组名称" rules={[{ required: true }]}>
@@ -341,6 +342,7 @@ function UserTab() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editItem, setEditItem] = useState<UserListItem | null>(null);
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
   const load = async () => {
@@ -430,7 +432,7 @@ function UserTab() {
       </Button>
       <Table rowKey="id" columns={columns} dataSource={data}
         pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: (t) => `共 ${t} 条` }} size="middle" />
-      <Modal title={editItem ? '编辑用户' : '新增用户'} open={modalOpen} width={600}
+      <Modal title={editItem ? '编辑用户' : '新增用户'} open={modalOpen} width={600} confirmLoading={saving}
         onCancel={() => { setModalOpen(false); setEditItem(null); }} onOk={() => form.submit()}>
         <Form form={form} layout="vertical" onFinish={handleSave}>
           <Row gutter={16}>
@@ -582,6 +584,7 @@ function ProjectTab() {
   const [editItem, setEditItem] = useState<any | null>(null);
   const [selectedProject, setSelectedProject] = useState<any>(null);
   const [projectSEs, setProjectSEs] = useState<ProjectSE[]>([]);
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
   const [seForm] = Form.useForm();
 
@@ -700,10 +703,10 @@ function ProjectTab() {
         onClick={() => { setEditItem(null); form.resetFields(); setModalOpen(true); }}>
         新增项目
       </Button>
-      <Table rowKey="id" columns={columns} dataSource={data} pagination={false} size="middle" />
+      <Table rowKey="id" columns={columns} dataSource={data} pagination={{ pageSize: 10 }} size="middle" />
 
       {/* 项目编辑 Modal */}
-      <Modal title={editItem ? '编辑项目' : '新增项目'} open={modalOpen}
+      <Modal title={editItem ? '编辑项目' : '新增项目'} open={modalOpen} confirmLoading={saving}
         onCancel={() => { setModalOpen(false); setEditItem(null); }} onOk={() => form.submit()}>
         <Form form={form} layout="vertical" onFinish={handleSave}>
           <Form.Item name="name" label="项目名称" rules={[{ required: true }]}>
@@ -726,7 +729,7 @@ function ProjectTab() {
       <Modal title={`配置模块SE - ${selectedProject?.name || ''}`} open={seModalOpen}
         onCancel={() => { setSeModalOpen(false); setSelectedProject(null); }} footer={null} width={600}>
         <Card size="small" title="已有SE" style={{ marginBottom: 16 }}>
-          <Table rowKey="id" columns={seColumns} dataSource={projectSEs} pagination={false} size="small"
+          <Table rowKey="id" columns={seColumns} dataSource={projectSEs} pagination={{ pageSize: 10 }} size="small"
             locale={{ emptyText: '暂无SE配置' }} />
         </Card>
         <PermissionGuard permission="project:update">
@@ -756,6 +759,7 @@ function ApprovalFlowTab() {
   const [flows, setFlows] = useState<ApprovalFlow[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editFlow, setEditFlow] = useState<ApprovalFlow | null>(null);
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
   const [users, setUsers] = useState<SimpleUser[]>([]);
 
@@ -859,9 +863,9 @@ function ApprovalFlowTab() {
         }}>
         新增审批流程
       </Button>
-      <Table rowKey="id" columns={columns} dataSource={flows} pagination={false} size="middle" />
+      <Table rowKey="id" columns={columns} dataSource={flows} pagination={{ pageSize: 10 }} size="middle" />
 
-      <Modal title={editFlow ? '编辑审批流程' : '新增审批流程'} open={modalOpen} width={700}
+      <Modal title={editFlow ? '编辑审批流程' : '新增审批流程'} open={modalOpen} width={700} confirmLoading={saving}
         onCancel={() => { setModalOpen(false); setEditFlow(null); }} onOk={() => form.submit()}>
         <Form form={form} layout="vertical" onFinish={handleSave}>
           <Row gutter={16}>
@@ -951,6 +955,7 @@ function AnnouncementTab() {
   const [statsOpen, setStatsOpen] = useState(false);
   const [stats, setStats] = useState<AnnouncementStats | null>(null);
   const [statsTitle, setStatsTitle] = useState('');
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
   const load = async () => {
@@ -1087,7 +1092,7 @@ function AnnouncementTab() {
         size="middle" />
 
       {/* 发布/编辑公告 Modal */}
-      <Modal title={editItem ? '编辑公告' : '发布公告'} open={modalOpen} width={640}
+      <Modal title={editItem ? '编辑公告' : '发布公告'} open={modalOpen} width={640} confirmLoading={saving}
         onCancel={() => { setModalOpen(false); setEditItem(null); }}
         onOk={() => form.submit()} okText={editItem ? '保存' : '发布'}>
         <Form form={form} layout="vertical" onFinish={handleSave}>

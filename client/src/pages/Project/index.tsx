@@ -186,7 +186,7 @@ export default function ProjectPage() {
             新增项目
           </Button>
         )}
-        <Table rowKey="id" columns={columns} dataSource={data} pagination={false} size="middle"
+        <Table rowKey="id" columns={columns} dataSource={data} pagination={{ pageSize: 10 }} size="middle"
           locale={{ emptyText: isAdmin ? '暂无项目' : '您暂无负责的项目' }} />
 
         {/* 项目编辑 Modal */}
@@ -225,7 +225,7 @@ export default function ProjectPage() {
         <Modal title={`配置模块SE - ${selectedProject?.name || ''}`} open={seModalOpen}
           onCancel={() => { setSeModalOpen(false); setSelectedProject(null); }} footer={null} width={600}>
           <Card size="small" title="已有SE" style={{ marginBottom: 16 }}>
-            <Table rowKey="id" columns={seColumns} dataSource={projectSEs} pagination={false} size="small"
+            <Table rowKey="id" columns={seColumns} dataSource={projectSEs} pagination={{ pageSize: 10 }} size="small"
               locale={{ emptyText: '暂无SE配置' }} />
           </Card>
           {selectedProject?.canAssignSE && (

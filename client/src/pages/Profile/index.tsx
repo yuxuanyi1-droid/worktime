@@ -43,12 +43,9 @@ export default function ProfilePage() {
   };
 
   const handleChangePassword = async () => {
-    const values = pwdForm.getFieldsValue();
-    if (values.newPassword !== values.confirmPassword) {
-      message.error('两次输入的密码不一致');
-      return;
-    }
     try {
+      // validateFields 触发表单校验（required/min length/两次一致），不通过则抛出
+      const values = await pwdForm.validateFields();
       await request.put('/auth/change-password', {
         oldPassword: values.oldPassword,
         newPassword: values.newPassword,
@@ -57,7 +54,10 @@ export default function ProfilePage() {
       setPwdModalOpen(false);
       pwdForm.resetFields();
     } catch (e: any) {
-      message.error(e?.response?.data?.message || '密码修改失败');
+      // validateFields 失败时 error.errorFields 存在，是表单校验错误，不弹 message
+      if (!e?.errorFields) {
+        message.error(e?.response?.data?.message || '密码修改失败');
+      }
     }
   };
 
@@ -116,7 +116,15 @@ export default function ProfilePage() {
           <Form.Item label="新密码" name="newPassword" rules={[{ required: true, min: 6, message: '密码至少6位' }]}>
             <Input.Password />
           </Form.Item>
-          <Form.Item label="确认新密码" name="confirmPassword" rules={[{ required: true }]}>
+          <Form.Item label="确认新密码" name="confirmPassword" dependencies={['newPassword']} rules={[
+            { required: true, message: '请确认新密码' },
+            ({ getFieldValue }) => ({
+              validator(_, value) {
+                if (!value || getFieldValue('newPassword') === value) return Promise.resolve();
+                return Promise.reject(new Error('两次输入的密码不一致'));
+              },
+            }),
+          ]}>
             <Input.Password />
           </Form.Item>
         </Form>

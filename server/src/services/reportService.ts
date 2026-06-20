@@ -43,6 +43,26 @@ function totalOfDates(byDate: Record<string, number>) {
   return Object.values(byDate).reduce((sum, hours) => sum + hours, 0);
 }
 
+/**
+ * 报表工时去重：按 (userId, date, projectId) 去重，排除 deprecated，保留 id 最大的记录。
+ * 抽成独立导出函数便于单元测试。
+ *
+ * 语义：同一条工时的多次提交/修改版本中，取最新非废弃的那一条，
+ * 确保报表统计与工时填报页口径一致（填报页 getByUser 也是同样的去重逻辑）。
+ */
+export function dedupReportTimesheets(records: Timesheet[]): Timesheet[] {
+  const map = new Map<string, Timesheet>();
+  for (const record of records) {
+    if (record.status === 'deprecated') continue;
+    const key = `${record.userId}_${record.date}_${record.projectId}`;
+    const existing = map.get(key);
+    if (!existing || record.id > existing.id) {
+      map.set(key, record);
+    }
+  }
+  return Array.from(map.values());
+}
+
 export class ReportService {
   constructor(private manager?: EntityManager) {}
 
@@ -51,16 +71,7 @@ export class ReportService {
   private get approvalService() { return new ApprovalService(this.manager); }
 
   private dedupTimesheets(records: Timesheet[]): Timesheet[] {
-    const map = new Map<string, Timesheet>();
-    for (const record of records) {
-      if (record.status === 'deprecated') continue;
-      const key = `${record.userId}_${record.date}_${record.projectId}`;
-      const existing = map.get(key);
-      if (!existing || record.id > existing.id) {
-        map.set(key, record);
-      }
-    }
-    return Array.from(map.values());
+    return dedupReportTimesheets(records);
   }
 
   private summarizeTimesheets(records: Timesheet[]) {

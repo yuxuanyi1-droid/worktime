@@ -1,7 +1,9 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, Index } from 'typeorm';
 import { User } from './User';
 
 @Entity('notifications')
+@Index('idx_notification_user_created', ['userId', 'createdAt'])
+@Index('idx_notification_user_read', ['userId', 'isRead'])
 export class Notification {
   @PrimaryGeneratedColumn()
   id!: number;

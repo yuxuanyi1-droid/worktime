@@ -32,19 +32,70 @@ export class OvertimeService {
   }
 
   async createAndSubmit(data: { userId: number; date?: string; overtimeType?: string; hours?: number; reason?: string; projectId?: number }) {
-    const record = await this.create(data);
-    try {
-      await this.submit([record.id], data.userId);
-    } catch (error) {
-      const latest = await this.repo.findOne({ where: { id: record.id } });
-      if (latest?.status === 'draft') {
-        await this.repo.delete(record.id);
+    // 整体事务：create + submit 原子化，任一失败整体回滚，避免孤儿记录或误删
+    const notifications: { approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string }[] = [];
+    let createdId: number;
+
+    await AppDataSource.transaction(async (manager) => {
+      const txService = new OvertimeService(manager);
+      // 1. 创建草稿
+      const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(data.userId);
+      const record = txService.repo.create({
+        userId: data.userId,
+        ...orgSnapshot,
+        date: data.date!,
+        overtimeType: data.overtimeType as OvertimeType,
+        hours: data.hours!,
+        reason: data.reason,
+        projectId: data.projectId ?? null,
+      });
+      const saved = await txService.repo.save(record);
+      createdId = saved.id;
+
+      // 2. 在同一事务内提交审批
+      const submitter = await txService.userRepo.findOneBy({ id: data.userId });
+      const resolved = await txService.approvalInstanceService.start({
+        targetType: 'overtime',
+        targetId: saved.id,
+        applicantId: data.userId,
+        projectId: saved.projectId,
+      });
+      Object.assign(saved, orgSnapshot);
+      if (resolved.status === 'submitted' && resolved.instance) {
+        await txService.repo.update(saved.id, {
+          status: 'submitted',
+          currentStep: resolved.instance.currentStepOrder || 1,
+          approvalFlowId: resolved.instance.flowId,
+          approvalInstanceId: resolved.instance.id,
+          totalSteps: resolved.instance.totalSteps,
+        });
+        if (submitter && resolved.firstApproverIds.length) {
+          notifications.push({
+            approverIds: resolved.firstApproverIds,
+            targetType: 'overtime',
+            targetId: saved.id,
+            applicantName: submitter.realName,
+            title: `加班审批 ${saved.hours}小时`,
+          });
+        }
+      } else {
+        await txService.repo.update(saved.id, {
+          status: 'approved',
+          currentStep: 0,
+          totalSteps: 0,
+          approvalInstanceId: resolved.instance?.id ?? null,
+        });
       }
-      throw error;
+    });
+
+    // 事务提交后发通知（失败不影响业务）
+    const notifier = new NotificationService();
+    for (const n of notifications) {
+      try { await notifier.notifyApprovalPending(n.approverIds, n.targetType, n.targetId, n.applicantName, n.title); } catch {}
     }
 
     return this.repo.findOne({
-      where: { id: record.id },
+      where: { id: createdId! },
       relations: ['project'],
     });
   }
@@ -158,7 +209,8 @@ export class OvertimeService {
       .select('o.overtimeType', 'type')
       .addSelect('SUM(o.hours)', 'totalHours')
       .addSelect('COUNT(o.id)', 'count')
-      .where('o.userId = :userId AND o.status = :status', { userId, status: 'approved' });
+      .where('o.userId = :userId', { userId })
+      .andWhere('o.status = :status', { status: 'approved' });
 
     if (month) {
       qb.andWhere("strftime('%Y', o.date) = :year AND strftime('%m', o.date) = :month", {

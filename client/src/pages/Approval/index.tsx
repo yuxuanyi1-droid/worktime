@@ -646,7 +646,7 @@ function MySubmissionsTab() {
   const [detailTarget, setDetailTarget] = useState<{ targetType: string; targetId: number } | null>(null);
   const navigate = useNavigate();
 
-  useEffect(() => { loadData(); }, [statusFilter, typeFilter]);
+  useEffect(() => { loadData(); }, [statusFilter, typeFilter, dateRange]);
 
   const loadData = async () => {
     setLoading(true);
@@ -749,6 +749,7 @@ function MySubmissionsTab() {
 function PendingApprovalTab() {
   const [data, setData] = useState<ApprovalItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
   const [selectedRows, setSelectedRows] = useState<React.Key[]>([]);
   const [comment, setComment] = useState('');
   const navigate = useNavigate();
@@ -769,11 +770,17 @@ function PendingApprovalTab() {
 
   const handleApprove = async (action: 'approve' | 'reject') => {
     if (selectedRows.length === 0) return message.warning('请选择审批项');
+    setActionLoading(true);
     try {
+      // 过滤掉找不到的项（数据可能在选中后被刷新），避免 item! 崩溃
       const items = selectedRows.map(key => {
         const item = data.find(d => (d.taskId ?? d.targetId) === key);
-        return { targetType: item!.targetType, targetId: item!.targetId, action, comment };
-      });
+        return item ? { targetType: item.targetType, targetId: item.targetId, action, comment } : null;
+      }).filter((x): x is NonNullable<typeof x> => x !== null);
+      if (items.length === 0) {
+        message.warning('所选审批项已失效，请刷新列表');
+        return;
+      }
       await approvalApi.approve(items);
       message.success(action === 'approve' ? '审批通过' : '已驳回');
       setSelectedRows([]);
@@ -781,6 +788,8 @@ function PendingApprovalTab() {
       loadData();
     } catch (error) {
       message.error(getErrorMessage(error, action === 'approve' ? '批量通过失败' : '批量驳回失败'));
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -845,11 +854,11 @@ function PendingApprovalTab() {
           rows={1}
         />
         <Button type="primary" icon={<CheckOutlined />} onClick={() => handleApprove('approve')}
-          disabled={selectedRows.length === 0}>
+          disabled={selectedRows.length === 0} loading={actionLoading}>
           批量通过 ({selectedRows.length})
         </Button>
         <Button danger icon={<CloseOutlined />} onClick={() => handleApprove('reject')}
-          disabled={selectedRows.length === 0}>
+          disabled={selectedRows.length === 0} loading={actionLoading}>
           批量驳回
         </Button>
       </div>

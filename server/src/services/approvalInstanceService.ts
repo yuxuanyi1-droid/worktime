@@ -203,13 +203,31 @@ export class ApprovalInstanceService {
     if (!actingTask) throw new BusinessError('您不是当前步骤的审批人');
 
     const now = new Date();
+    // 并发安全：用条件更新（WHERE id AND status='pending'），防止两人并发审批同一 task
+    // 导致重复审批记录/状态错乱。affected=0 说明 task 已被其它请求处理。
+    const updateResult = await this.taskRepo.update(
+      { id: actingTask.id, status: 'pending' },
+      {
+        status: params.action === 'approve' ? 'approved' : 'rejected',
+        action: params.action,
+        actedById: params.approverId,
+        actedByName: params.approverName,
+        comment: params.comment ?? null,
+        actedAt: now,
+      },
+    );
+    // better-sqlite3 返回 affected 为 number；若已被并发处理则 affected=0
+    const affected = (updateResult as any).affected ?? (updateResult as any).raw?.changes ?? 1;
+    if (affected === 0) {
+      throw new BusinessError('该审批任务已被处理，请刷新列表');
+    }
+    // 同步内存对象，供后续逻辑读取最新状态
     actingTask.status = params.action === 'approve' ? 'approved' : 'rejected';
     actingTask.action = params.action;
     actingTask.actedById = params.approverId;
     actingTask.actedByName = params.approverName;
     actingTask.comment = params.comment ?? null;
     actingTask.actedAt = now;
-    await this.taskRepo.save(actingTask);
 
     const skippedCurrentTasks = currentTasks.filter(task => task.id !== actingTask.id);
     if (skippedCurrentTasks.length) {

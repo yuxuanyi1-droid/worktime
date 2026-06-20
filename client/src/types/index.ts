@@ -101,7 +101,12 @@ export interface ProjectSE {
   userId: number;
   groupId: number;
   user?: { id: number; realName: string } | null;
-  group?: { id: number; name: string } | null;
+  group?: {
+    id: number;
+    name: string;
+    departmentId?: number | null;
+    department?: { id: number; name: string } | null;
+  } | null;
   userName?: string;
   groupName?: string;
 }
@@ -143,7 +148,7 @@ export interface OvertimeApplication {
   overtimeType: 'weekend' | 'holiday' | 'weekday';
   hours: number;
   reason?: string;
-  status: 'draft' | 'submitted' | 'approved' | 'rejected';
+  status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
   currentStep: number;
   totalSteps: number;
   createdAt: string;
@@ -159,7 +164,7 @@ export interface WeeklyReport {
   content?: string;
   summary?: string;
   totalHours: number;
-  status: 'draft' | 'submitted' | 'approved' | 'rejected';
+  status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
   currentStep: number;
   totalSteps: number;
   createdAt: string;

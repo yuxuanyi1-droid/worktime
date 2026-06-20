@@ -26,6 +26,7 @@ import { PermissionRequest } from '../entities/PermissionRequest';
 import { UserPermissionGrant } from '../entities/UserPermissionGrant';
 import { SubmissionSequence } from '../entities/SubmissionSequence';
 import { InitSchema1700000000000 } from '../migrations/1700000000000-InitSchema';
+import { PrecisionAndIndexes1700000000001 } from '../migrations/1700000000001-PrecisionAndIndexes';
 
 const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db');
 // 默认关闭 synchronize（防止生产环境自动改表丢数据）；
@@ -48,7 +49,7 @@ export const AppDataSource = new DataSource({
     PermissionRequest, UserPermissionGrant,
     SubmissionSequence,
   ],
-  migrations: [InitSchema1700000000000],
+  migrations: [InitSchema1700000000000, PrecisionAndIndexes1700000000001],
   subscribers: [],
   prepareDatabase: (db: any) => {
     db.pragma('journal_mode = WAL');

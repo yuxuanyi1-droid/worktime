@@ -1,7 +1,10 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, Index } from 'typeorm';
 import { User } from './User';
 
 @Entity('audit_logs')
+@Index('idx_audit_user_created', ['userId', 'createdAt'])
+@Index('idx_audit_action_target', ['action', 'target'])
+@Index('idx_audit_created', ['createdAt'])
 export class AuditLog {
   @PrimaryGeneratedColumn()
   id!: number;
