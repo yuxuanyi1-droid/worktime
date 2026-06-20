@@ -17,7 +17,7 @@ export class Department {
   sortOrder!: number;
 
   /** 部门负责人（默认审批人） */
-  @ManyToOne(() => User, { nullable: true })
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   leader!: User | null;
 
   @Column({ type: 'integer', nullable: true })

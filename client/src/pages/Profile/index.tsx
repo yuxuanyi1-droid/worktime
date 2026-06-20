@@ -35,8 +35,8 @@ export default function ProfilePage() {
         setAuth(token, profileRes.data);
       }
       message.success('个人信息已更新');
-    } catch {
-      message.error('更新失败');
+    } catch (e: any) {
+      message.error(e?.response?.data?.message || '更新失败');
     } finally {
       setLoading(false);
     }

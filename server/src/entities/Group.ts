@@ -32,7 +32,7 @@ export class Group {
   children!: Group[];
 
   /** 组负责人（默认审批人） */
-  @ManyToOne(() => User, { nullable: true })
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   leader!: User | null;
 
   @Column({ type: 'integer', nullable: true })
