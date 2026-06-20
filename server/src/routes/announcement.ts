@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { AnnouncementService } from '../services/announcementService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requirePermission, getUserOrgInfo } from '../middleware/permission';
+import { parsePagination } from '../utils/validation';
 
 const router = Router();
 const announcementService = new AnnouncementService();
@@ -13,10 +14,8 @@ router.use(authMiddleware);
 // 获取公告列表（管理端）
 router.get('/admin/list', requirePermission('system:announcement:view'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await announcementService.getList({
-      page: req.query.page ? Number(req.query.page) : 1,
-      pageSize: req.query.pageSize ? Number(req.query.pageSize) : 20,
-    });
+    const { page, pageSize } = parsePagination(req.query);
+    const data = await announcementService.getList({ page, pageSize });
     res.json({ code: 0, data });
   } catch (error) {
     next(error);
@@ -71,10 +70,11 @@ router.get('/admin/:id/stats', requirePermission('system:announcement:view'), as
 // 获取用户可见公告列表
 router.get('/my', async (req: AuthRequest, res, next) => {
   try {
+    const { page, pageSize } = parsePagination(req.query);
     const orgInfo = await getUserOrgInfo(req.user!.id);
     const data = await announcementService.getForUser(req.user!.id, orgInfo.departmentId, {
-      page: req.query.page ? Number(req.query.page) : 1,
-      pageSize: req.query.pageSize ? Number(req.query.pageSize) : 20,
+      page,
+      pageSize,
       isRead: req.query.isRead !== undefined ? req.query.isRead === 'true' : undefined,
     });
     res.json({ code: 0, data });

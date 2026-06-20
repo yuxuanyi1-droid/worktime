@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, Unique, Index } from 'typeorm';
 import { Project } from './Project';
 import { User } from './User';
 import { Group } from './Group';
@@ -8,6 +8,8 @@ import { Group } from './Group';
  * 每个SE绑定一个组，负责该组成员在此项目中的技术审批
  */
 @Entity('project_ses')
+@Unique('uq_project_se_group', ['projectId', 'groupId'])
+@Index('idx_project_se_project', ['projectId'])
 export class ProjectSE {
   @PrimaryGeneratedColumn()
   id!: number;

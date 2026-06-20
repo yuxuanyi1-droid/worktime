@@ -3,6 +3,7 @@ import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { ApprovalInstance, ApprovalInstanceStepSnapshot } from '../entities/ApprovalInstance';
 import { ApprovalTask } from '../entities/ApprovalTask';
+import { ApprovalRecord } from '../entities/ApprovalRecord';
 import { ApprovalTargetType } from '../entities/ApprovalFlowVersion';
 import { ApprovalFlowEngine } from './approvalFlowService';
 
@@ -11,6 +12,7 @@ export class ApprovalInstanceService {
 
   private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
   private get taskRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalTask); }
+  private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
   private get flowEngine() { return new ApprovalFlowEngine(this.manager); }
 
   async start(params: {
@@ -22,8 +24,37 @@ export class ApprovalInstanceService {
     const version = await this.flowEngine.getDefaultFlowVersion(params.targetType);
     const now = new Date();
 
+    // 无流程版本：直接创建已通过的 instance + auto_approve 记录（统一审计轨迹）
     if (!version || !version.steps?.length) {
-      return { status: 'approved' as const, instance: null, firstApproverIds: [] as number[] };
+      const autoInstance = await this.instanceRepo.save(this.instanceRepo.create({
+        targetType: params.targetType,
+        targetId: params.targetId,
+        applicantId: params.applicantId,
+        status: 'approved',
+        currentStepOrder: null,
+        totalSteps: 0,
+        flowId: version?.flowId ?? null,
+        flowVersionId: version?.id ?? null,
+        flowName: version?.flowName ?? '无审批流程',
+        flowVersionNumber: version?.version ?? 0,
+        stepsSnapshot: [],
+        submittedAt: now,
+        finishedAt: now,
+      }));
+      await this.recordRepo.save(this.recordRepo.create({
+        targetType: params.targetType as any,
+        targetId: params.targetId,
+        instanceId: autoInstance.id,
+        taskId: null,
+        approverId: params.applicantId,
+        approverName: '系统',
+        action: 'approve',
+        comment: '无审批流程，系统自动通过',
+        stepOrder: 0,
+        stepType: 'auto' as any,
+        stepLabel: '自动通过',
+      }));
+      return { status: 'approved' as const, instance: autoInstance, firstApproverIds: [] as number[] };
     }
 
     const steps: ApprovalInstanceStepSnapshot[] = [];
@@ -44,6 +75,7 @@ export class ApprovalInstanceService {
           stepType: sourceStep.stepType,
           label: sourceStep.label,
           approvers: Array.from(uniqueApprovers.entries()).map(([id, name]) => ({ id, name })),
+          requireAllApprovers: !!(sourceStep as any).requireAllApprovers,
         });
       }
     }
@@ -65,6 +97,20 @@ export class ApprovalInstanceService {
     }));
 
     if (!steps.length) {
+      // 自动通过：写一条 auto_approve 审批记录，保留审计轨迹（A5）
+      await this.recordRepo.save(this.recordRepo.create({
+        targetType: params.targetType as any,
+        targetId: params.targetId,
+        instanceId: instance.id,
+        taskId: null,
+        approverId: params.applicantId,
+        approverName: '系统',
+        action: 'approve',
+        comment: '无审批人，系统自动通过',
+        stepOrder: 0,
+        stepType: 'auto' as any,
+        stepLabel: '自动通过',
+      }));
       return { status: 'approved' as const, instance, firstApproverIds: [] as number[] };
     }
 
@@ -149,7 +195,11 @@ export class ApprovalInstanceService {
     const byInstance = new Map<number, ApprovalTask>();
     for (const task of tasks) {
       if (task.instance?.status !== 'pending') continue;
-      if (!byInstance.has(task.instanceId)) byInstance.set(task.instanceId, task);
+      // 只取当前步骤的 task（A7：避免跨步骤同审批人返回历史步骤的 task）
+      if (task.instance.currentStepOrder !== null && task.stepOrder !== task.instance.currentStepOrder) continue;
+      const existing = byInstance.get(task.instanceId);
+      // 优先保留当前步骤的；若已有当前步骤 task 则不覆盖
+      if (!existing) byInstance.set(task.instanceId, task);
     }
     return Array.from(byInstance.values());
   }
@@ -229,21 +279,14 @@ export class ApprovalInstanceService {
     actingTask.comment = params.comment ?? null;
     actingTask.actedAt = now;
 
-    const skippedCurrentTasks = currentTasks.filter(task => task.id !== actingTask.id);
-    if (skippedCurrentTasks.length) {
-      await this.taskRepo.update({ id: In(skippedCurrentTasks.map(task => task.id)) }, {
-        status: 'skipped',
-        action: 'skip',
-        actedById: params.approverId,
-        actedByName: params.approverName,
-        comment: `${params.approverName} 已处理该步骤`,
-        actedAt: now,
-      });
-    }
+    // 判断当前步骤是否为会签（requireAllApprovers）
+    const currentStepSnapshot = instance.stepsSnapshot?.find(s => s.stepOrder === instance.currentStepOrder);
+    const isCountersign = !!currentStepSnapshot?.requireAllApprovers;
 
     if (params.action === 'reject') {
+      // 驳回：清理当前步骤其余 pending task + 所有 waiting task（A12: 含 pending 防孤儿）
       await this.taskRepo.update(
-        { instanceId: instance.id, status: 'waiting' },
+        { instanceId: instance.id, status: In(['waiting', 'pending']) },
         {
           status: 'skipped',
           action: 'skip',
@@ -259,6 +302,32 @@ export class ApprovalInstanceService {
       return { status: 'rejected' as const, instance, task: actingTask, nextApproverIds: [] as number[] };
     }
 
+    // approve 分支
+    if (isCountersign) {
+      // 会签：跳过当前步骤其余 task（标记 skipped 不合适——他们没操作）。
+      // 会签语义：只有所有人都 approved 才推进。其余 task 仍保持 pending，等待各自处理。
+      const remainingPending = currentTasks.filter(t => t.id !== actingTask.id && t.status === 'pending');
+      if (remainingPending.length > 0) {
+        // 还有人没审批，停留在当前步骤，不推进
+        await this.instanceRepo.save(instance);
+        return { status: 'submitted' as const, instance, task: actingTask, nextApproverIds: [] as number[] };
+      }
+      // 所有人均已 approved，推进下一步（fall through 到下方的推进逻辑）
+    } else {
+      // 或签：任一通过即推进，跳过当前步骤其余 pending task
+      const skippedCurrentTasks = currentTasks.filter(task => task.id !== actingTask.id);
+      if (skippedCurrentTasks.length) {
+        await this.taskRepo.update({ id: In(skippedCurrentTasks.map(task => task.id)) }, {
+          status: 'skipped',
+          action: 'skip',
+          actedById: params.approverId,
+          actedByName: params.approverName,
+          comment: `${params.approverName} 已处理该步骤`,
+          actedAt: now,
+        });
+      }
+    }
+
     const nextTasks = await this.taskRepo.find({
       where: {
         instanceId: instance.id,
@@ -270,17 +339,27 @@ export class ApprovalInstanceService {
     const nextStepOrder = nextTasks[0]?.stepOrder ?? null;
 
     if (!nextStepOrder) {
+      // 乐观锁：条件更新，防止并发下重复推进
+      const r = await this.instanceRepo.update(
+        { id: instance.id, status: 'pending' },
+        { status: 'approved', currentStepOrder: null, finishedAt: now },
+      );
+      if (((r as any).affected ?? 1) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
       instance.status = 'approved';
       instance.currentStepOrder = null;
       instance.finishedAt = now;
-      await this.instanceRepo.save(instance);
       return { status: 'approved' as const, instance, task: actingTask, nextApproverIds: [] as number[] };
     }
 
     const stepTasks = nextTasks.filter(task => task.stepOrder === nextStepOrder);
     await this.taskRepo.update({ id: In(stepTasks.map(task => task.id)) }, { status: 'pending' });
+    // 乐观锁：推进 currentStepOrder 时校验未被并发改动
+    const r = await this.instanceRepo.update(
+      { id: instance.id, status: 'pending', currentStepOrder: instance.currentStepOrder as any },
+      { currentStepOrder: nextStepOrder },
+    );
+    if (((r as any).affected ?? 1) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
     instance.currentStepOrder = nextStepOrder;
-    await this.instanceRepo.save(instance);
 
     return {
       status: 'submitted' as const,
@@ -292,27 +371,25 @@ export class ApprovalInstanceService {
 
   async withdraw(targetType: string, targetId: number, userId: number, userName: string) {
     const instance = await this.getPendingInstance(targetType, targetId);
-    if (!instance) return null;
+    // 实例不存在或已结束（approved/rejected/withdrawn）——必须抛错，不能 return null，
+    // 否则上层会把已批准的 target 改回 draft（A4 状态不一致修复）
+    if (!instance) throw new BusinessError('审批实例不存在或已结束，无法撤回');
     const now = new Date();
+
+    // 原子更新：条件 WHERE status='pending'，affected=0 说明并发下已被审批人处理
+    const result = await this.instanceRepo.update(
+      { id: instance.id, status: 'pending' },
+      { status: 'withdrawn', currentStepOrder: null, finishedAt: now },
+    );
+    const affected = (result as any).affected ?? 1;
+    if (affected === 0) throw new BusinessError('审批已被处理，无法撤回');
 
     instance.status = 'withdrawn';
     instance.currentStepOrder = null;
     instance.finishedAt = now;
-    await this.instanceRepo.save(instance);
 
     await this.taskRepo.update(
-      { instanceId: instance.id, status: 'pending' },
-      {
-        status: 'withdrawn',
-        action: 'withdraw',
-        actedById: userId,
-        actedByName: userName,
-        comment: '申请人撤回审批',
-        actedAt: now,
-      },
-    );
-    await this.taskRepo.update(
-      { instanceId: instance.id, status: 'waiting' },
+      { instanceId: instance.id, status: In(['pending', 'waiting']) },
       {
         status: 'withdrawn',
         action: 'withdraw',

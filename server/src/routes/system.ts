@@ -178,6 +178,7 @@ function parseApprovalFlowPayload(body: Record<string, unknown>, partial = false
         label: parseString(step.label, `steps[${index}].label`, { required: true, max: 100 }),
         parentLevel: parseOptionalPositiveInt(step.parentLevel, `steps[${index}].parentLevel`, { max: 20 }) || 1,
         customApproverId: customApproverId ?? null,
+        requireAllApprovers: parseBooleanQuery(step.requireAllApprovers),
       };
     }, { min: partial ? 0 : 1, max: 20 });
 
@@ -387,11 +388,18 @@ router.delete('/users/:id', requirePermission('system:user:manage'), async (req,
 router.put('/users/:id/reset-password', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, 'id');
-    const password = parseString((req.body as Record<string, unknown>).password ?? '123456', 'password', { required: true, max: 128 })!;
+    const body = req.body as Record<string, unknown>;
+    // 未指定密码时生成随机密码（不再默认弱密码 123456）
+    let password = parseString(body.password, 'password', { max: 128 });
+    let generated = false;
+    if (!password) {
+      password = Math.random().toString(36).slice(2, 10) + Math.floor(Math.random() * 90 + 10);
+      generated = true;
+    }
     await systemService.resetPassword(id, password);
     const actor = (req as AuthRequest).user!;
     auditService.log({ userId: actor.id, action: 'user.reset_password', target: 'user', targetId: id, ip: req.ip });
-    res.json({ code: 0, message: '密码重置成功' });
+    res.json({ code: 0, message: '密码重置成功', data: generated ? { password } : undefined });
   } catch (error) {
     next(error);
   }

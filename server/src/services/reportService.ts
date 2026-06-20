@@ -4,6 +4,7 @@ import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { Between, Not } from 'typeorm';
 import { ApprovalService } from './approvalService';
+import { BusinessError } from '../utils/errors';
 
 type SummaryWithCount = { hours: number; count: number };
 type SummaryHours = { hours: number };
@@ -167,6 +168,11 @@ export class ReportService {
 
   async getOvertimeReport(params: { departmentId?: number; departmentIds?: number[]; groupId?: number; groupIds?: number[]; userId?: number; startDate: string; endDate: string; matchAnyScope?: boolean }) {
     const { departmentId, departmentIds, groupId, groupIds, userId, startDate, endDate, matchAnyScope } = params;
+    // 安全防护：无任何数据范围约束时拒绝执行，避免全表泄露（调用方必须保证至少一个范围）
+    const hasScope = departmentId || departmentIds?.length || groupId || groupIds?.length || userId;
+    if (!hasScope) {
+      throw new BusinessError('加班报表缺少数据范围约束');
+    }
     const qb = this.overtimeRepo.createQueryBuilder('o')
       .leftJoinAndSelect('o.user', 'u')
       .where('o.date BETWEEN :start AND :end', { start: startDate, end: endDate })

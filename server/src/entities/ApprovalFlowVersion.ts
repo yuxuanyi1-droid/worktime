@@ -10,6 +10,7 @@ export interface ApprovalFlowStepSnapshot {
   label: string;
   parentLevel: number;
   customApproverId: number | null;
+  requireAllApprovers?: boolean;
 }
 
 @Entity('approval_flow_versions')

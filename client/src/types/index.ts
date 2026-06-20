@@ -124,7 +124,7 @@ export interface Timesheet {
   date: string;
   hours: number;
   description?: string;
-  status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'deprecated';
+  status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'deprecated' | 'withdrawn';
   currentStep: number;
   totalSteps: number;
   approvalFlowId?: number | null;
@@ -237,6 +237,8 @@ export interface ApprovalFlowStep {
   label: string;
   parentLevel?: number;
   customApproverId?: number | null;
+  /** 是否会签（全部通过才推进），默认 false（或签） */
+  requireAllApprovers?: boolean;
 }
 
 // 报表

@@ -35,6 +35,13 @@ export default function Dashboard() {
     fetchData();
   }, []);
 
+  // 窗口重新获得焦点时刷新数据（从其它页面返回 Dashboard 后数据自动更新）
+  useEffect(() => {
+    const onFocus = () => fetchData();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 60 * 1000);
     return () => window.clearInterval(timer);

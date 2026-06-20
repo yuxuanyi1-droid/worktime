@@ -64,7 +64,9 @@ export default function NotificationCenter() {
         loadNotifications();
       } catch {}
     }
-    if (item.targetType && item.targetId) {
+    // 只有审批类通知才跳转详情页，其它类型（如 system）不跳
+    const approvalTypes = ['timesheet', 'overtime', 'weekly_report', 'permission_request'];
+    if (item.targetType && item.targetId && approvalTypes.includes(item.targetType)) {
       navigate(`/approval/detail/${item.targetType}/${item.targetId}`);
     }
   };
@@ -81,13 +83,21 @@ export default function NotificationCenter() {
   };
 
   const handleMarkAllReadNotif = async () => {
-    await notificationApi.markAllAsRead();
-    loadNotifications();
+    try {
+      await notificationApi.markAllAsRead();
+      loadNotifications();
+    } catch {
+      // 拦截器已弹 message.error
+    }
   };
 
   const handleMarkAllReadAnnoun = async () => {
-    await announcementApi.markAllAsRead();
-    loadAnnouncements();
+    try {
+      await announcementApi.markAllAsRead();
+      loadAnnouncements();
+    } catch {
+      // 拦截器已弹 message.error
+    }
   };
 
   const typeIcon = (type: string) => {

@@ -205,7 +205,8 @@ function PermissionRequestPage() {
   const [myRequests, setMyRequests] = useState<PermissionRequestItem[]>([]);
   const [allRequests, setAllRequests] = useState<PermissionRequestItem[]>([]);
   const [grants, setGrants] = useState<UserPermissionGrant[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(false);       // 我的申请列表
+  const [baseLoading, setBaseLoading] = useState(false); // 基础选项（权限定义/范围选项）
   const [submitLoading, setSubmitLoading] = useState(false);
   const [allLoading, setAllLoading] = useState(false);
   const [grantLoading, setGrantLoading] = useState(false);
@@ -262,7 +263,7 @@ function PermissionRequestPage() {
   }, [departments, groups, projects, selectedScopeType]);
 
   const loadBase = async () => {
-    setLoading(true);
+    setBaseLoading(true);
     try {
       const [permissionRes, deptRes, groupRes, projectRes] = await Promise.all([
         permissionRequestApi.getGrantablePermissions(),
@@ -277,7 +278,7 @@ function PermissionRequestPage() {
     } catch (error) {
       message.error(getErrorMessage(error, '权限申请基础数据加载失败'));
     } finally {
-      setLoading(false);
+      setBaseLoading(false);
     }
   };
 
@@ -515,7 +516,7 @@ function PermissionRequestPage() {
               rules={[{ required: true, message: '请选择要申请的权限' }]}
             >
               <Select
-                loading={loading}
+                loading={baseLoading}
                 showSearch
                 optionFilterProp="label"
                 placeholder="选择需要开通的权限"

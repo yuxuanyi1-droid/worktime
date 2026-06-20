@@ -78,8 +78,8 @@ export default function AppRouter() {
         <Route path="timesheet" element={<PermissionRoute permission="timesheet:read"><Timesheet /></PermissionRoute>} />
         <Route path="overtime" element={<PermissionRoute permission="overtime:read"><Overtime /></PermissionRoute>} />
         <Route path="weekly-report" element={<PermissionRoute permission="weekly_report:read"><WeeklyReportPage /></PermissionRoute>} />
-        <Route path="approval" element={<Approval />} />
-        <Route path="approval/detail/:targetType/:targetId" element={<ApprovalDetailPage />} />
+        <Route path="approval" element={<PermissionRoute permission="approval:access"><Approval /></PermissionRoute>} />
+        <Route path="approval/detail/:targetType/:targetId" element={<PermissionRoute permission="approval:access"><ApprovalDetailPage /></PermissionRoute>} />
         <Route path="report" element={<PermissionRoute permission="report:access"><Report /></PermissionRoute>} />
         <Route path="permission-request" element={<PermissionRoute permission="permission_request:access"><PermissionRequestPage /></PermissionRoute>} />
         <Route path="project" element={<ProjectPage />} />

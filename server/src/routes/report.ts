@@ -310,6 +310,9 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
         hasAllOvertimeScope = true;
         departmentIds = undefined;
         groupIds = undefined;
+      } else if (accessibleDepartmentIds.length === 0 && accessibleGroupIds.length === 0) {
+        // 有报表码但无任何可见范围（scope 仅 project/self 等），无数据可见，直接返回空
+        return res.json({ code: 0, data: { totalHours: 0, byType: {}, records: [] } });
       } else {
         departmentIds = accessibleDepartmentIds.length ? accessibleDepartmentIds : undefined;
         groupIds = accessibleGroupIds.length ? accessibleGroupIds : undefined;

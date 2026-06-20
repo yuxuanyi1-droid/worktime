@@ -108,11 +108,6 @@ async function seed() {
     techDept = deptRepo.create({ name: '技术研发部', description: '负责产品研发' });
     await deptRepo.save(techDept);
   }
-  let productDept = await deptRepo.findOne({ where: { name: '产品设计部' } });
-  if (!productDept) {
-    productDept = deptRepo.create({ name: '产品设计部', description: '负责产品设计和用户体验' });
-    await deptRepo.save(productDept);
-  }
   console.log('✅ 部门初始化完成');
 
   // 4. 创建多层级分组
@@ -121,18 +116,17 @@ async function seed() {
     let group = await groupRepo.findOne({ where: { name } });
     if (!group) {
       const level = parent ? (parent.level || 0) + 1 : 0;
-      const path = parent ? (parent.path ? `${parent.path}/${parent.id}` : `${parent.id}`) : '';
+      // path 先用父级的完整 path，保存拿到自身 id 后再拼接
+      const parentPath = parent?.path || '';
       group = groupRepo.create({
         name, department: dept, departmentId: dept.id,
         parent: parent || undefined, parentId: parent?.id || null,
-        level, path,
+        level, path: parentPath,
         leader: leader || undefined, leaderId: leader?.id || null,
       });
       await groupRepo.save(group);
-      // 更新 path
-      if (!group.path) {
-        group.path = `${group.id}`;
-      }
+      // path = 父级 path + 自身 id（语义：根到自身的完整 id 路径，如 "2/5"）
+      group.path = parentPath ? `${parentPath}/${group.id}` : `${group.id}`;
       await groupRepo.save(group);
     }
     return group;
@@ -375,7 +369,7 @@ async function seed() {
 
   await createDefaultFlow('permission_request', '权限申请审批流程（默认）', [
     { stepType: 'group_leader', label: '直属负责人审批' },
-    { stepType: 'custom', label: '系统管理员审批', customApproverId: adminUser.id },
+    { stepType: 'dept_leader', label: '部门负责人审批' },
   ]);
 
   console.log('✅ 审批流程初始化完成');

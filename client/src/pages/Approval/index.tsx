@@ -566,8 +566,8 @@ export function ApprovalDetailPage() {
         </Card>
       )}
 
-      {/* === 提交人操作区：撤回 + 抄送 === */}
-      {isSubmitted && isApplicant && !isCurrentApprover && !isAdmin && (
+      {/* === 提交人操作区：撤回 + 抄送（admin 申请人也可见） === */}
+      {isSubmitted && isApplicant && !isCurrentApprover && (
         <Card title="操作" size="small" style={{ marginTop: 16 }}>
           <div style={{ marginBottom: 12 }}>
             <Text type="secondary">
@@ -585,6 +585,15 @@ export function ApprovalDetailPage() {
       )}
 
       {/* === 已完成/已驳回状态提示 === */}
+      {/* === viewerContext 缺失兜底：无法确定角色时提示 === */}
+      {isSubmitted && !ctx && (
+        <Card size="small" style={{ marginTop: 16 }}>
+          <div style={{ textAlign: 'center', padding: '12px 0' }}>
+            <Text type="secondary">无法确定您的操作权限，请刷新页面重试</Text>
+          </div>
+        </Card>
+      )}
+
       {detail && !isSubmitted && (
         <Card size="small" style={{ marginTop: 16 }}>
           <div style={{ textAlign: 'center', padding: '12px 0' }}>
@@ -652,21 +661,14 @@ function MySubmissionsTab() {
     setLoading(true);
     try {
       const res = await approvalApi.getMySubmissions({
-        pageSize: 100,
+        pageSize: 20,
         status: statusFilter || undefined,
         targetType: typeFilter || undefined,
+        startDate: dateRange ? dateRange[0].format('YYYY-MM-DD') : undefined,
+        endDate: dateRange ? dateRange[1].format('YYYY-MM-DD') : undefined,
       });
       if (res.data) {
-        let list = res.data.list;
-        // 前端日期筛选（API 不支持日期参数）
-        if (dateRange) {
-          list = list.filter((item: any) => {
-            const d = item.createdAt ? new Date(item.createdAt) : null;
-            if (!d) return false;
-            return d >= dateRange[0].toDate() && d <= dateRange[1].endOf('day').toDate();
-          });
-        }
-        setData(list);
+        setData(res.data.list);
       }
     } catch (error) {
       message.error(getErrorMessage(error, '我的申请加载失败'));

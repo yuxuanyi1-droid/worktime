@@ -35,8 +35,13 @@ app.set('trust proxy', 1);
 app.use(pinoHttp({ logger, autoLogging: process.env.NODE_ENV !== 'test' }));
 // Prometheus 指标采集
 app.use(metricsMiddleware);
+// CORS origin 从环境变量读取（逗号分隔），生产环境应锁定为真实域名
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  origin: allowedOrigins,
   credentials: true,
 }));
 app.use(express.json({ limit: '10mb' }));
@@ -72,8 +77,17 @@ app.use('/api/v1/audit-logs', auditRoutes);
 app.use('/api/v1/announcements', announcementRoutes);
 app.use('/api/v1/permission-requests', permissionRequestRoutes);
 
-// Prometheus 指标端点
-app.get('/api/metrics', metricsHandler);
+// Prometheus 指标端点（生产应通过 METRICS_TOKEN 环境变量加 Bearer 校验）
+app.get('/api/metrics', async (req, res) => {
+  const metricsToken = process.env.METRICS_TOKEN;
+  if (metricsToken) {
+    const auth = req.headers.authorization;
+    if (auth !== `Bearer ${metricsToken}`) {
+      return res.status(401).json({ code: 401, message: 'Unauthorized' });
+    }
+  }
+  await metricsHandler(req, res);
+});
 
 // 健康检查（包含数据库状态）
 app.get('/api/health', (req, res) => {

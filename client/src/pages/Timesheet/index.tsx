@@ -71,6 +71,7 @@ export default function TimesheetPage() {
 
   // 系统设置：工时单位 days/hours
   const [unitMode, setUnitMode] = useState<'days' | 'hours'>('days');
+  const [settingsLoaded, setSettingsLoaded] = useState(false); // 设置加载完成前禁用工时输入，防竞态
 
   const { hasPermission } = usePermission();
   const canCreate = hasPermission('timesheet:create');
@@ -111,6 +112,8 @@ export default function TimesheetPage() {
       }
     } catch (error) {
       message.warning(getErrorMessage(error, '系统设置加载失败，已使用默认工时单位'));
+    } finally {
+      setSettingsLoaded(true);
     }
   };
 
@@ -220,12 +223,13 @@ export default function TimesheetPage() {
         }
         message.success('草稿已删除');
         loadHistory();
+        loadWeekDrafts(); // 同步刷新周表，避免 UI 与 DB 不一致
       } catch (error) {
         message.error(getErrorMessage(error, '删除失败'));
         return;
       }
     }
-    setRows(prev => prev.length <= 1 ? prev : prev.filter(r => r.key !== key));
+    setRows(prev => prev.length <= 1 ? [newRow()] : prev.filter(r => r.key !== key));
   };
 
   const updateRow = (key: string, field: Partial<WeekRow>) => {
@@ -256,9 +260,25 @@ export default function TimesheetPage() {
     ));
   };
 
-  const prevWeek = () => setCurrentWeekStart(prev => prev.subtract(7, 'day'));
-  const nextWeek = () => setCurrentWeekStart(prev => prev.add(7, 'day'));
-  const goThisWeek = () => setCurrentWeekStart(dayjs().isoWeekday(1));
+  // 切周前检查是否有未保存的草稿数据（避免切周丢失）
+  const hasUnsavedDraft = () => rows.some(r => weekDates.some(d => (r.hours[d] || 0) > 0) && r.originalStatus === 'draft');
+  const switchWeek = (newWeek: dayjs.Dayjs) => {
+    if (hasUnsavedDraft()) {
+      Modal.confirm({
+        title: '确认切换周次',
+        content: '当前周有未保存的草稿工时，切换后将丢失，是否继续？',
+        okText: '切换',
+        okType: 'danger',
+        cancelText: '取消',
+        onOk: () => setCurrentWeekStart(newWeek),
+      });
+    } else {
+      setCurrentWeekStart(newWeek);
+    }
+  };
+  const prevWeek = () => switchWeek(currentWeekStart.subtract(7, 'day'));
+  const nextWeek = () => switchWeek(currentWeekStart.add(7, 'day'));
+  const goThisWeek = () => switchWeek(dayjs().isoWeekday(1));
 
   /** 复制上周工时 */
   const handleCopyLastWeek = async () => {
@@ -780,6 +800,7 @@ export default function TimesheetPage() {
             size="small"
             value={row.hours[date] || null}
             onChange={(v) => updateHours(row.key, date, v)}
+            disabled={!settingsLoaded}
             style={{ width: '100%' }}
           />
         ),

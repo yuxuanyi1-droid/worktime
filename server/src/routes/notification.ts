@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { NotificationService } from '../services/notificationService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { parsePagination } from '../utils/validation';
 
 const router = Router();
 const notificationService = new NotificationService();
@@ -10,10 +11,11 @@ router.use(authMiddleware);
 // 获取通知列表
 router.get('/', async (req: AuthRequest, res, next) => {
   try {
+    const { page, pageSize } = parsePagination(req.query);
     const data = await notificationService.getByUser(req.user!.id, {
       isRead: req.query.isRead !== undefined ? req.query.isRead === 'true' : undefined,
-      page: req.query.page ? Number(req.query.page) : 1,
-      pageSize: req.query.pageSize ? Number(req.query.pageSize) : 20,
+      page,
+      pageSize,
     });
     res.json({ code: 0, data });
   } catch (error) {

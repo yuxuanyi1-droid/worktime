@@ -46,6 +46,14 @@ export class ApprovalFlowStep {
   @Column({ type: 'integer', nullable: true })
   customApproverId!: number | null;
 
+  /**
+   * 是否要求所有审批人都通过才推进（会签）。
+   * - false（默认）：或签，任一审批人通过即推进下一步，其余标记 skipped
+   * - true：会签，本步骤所有审批人都通过才推进
+   */
+  @Column({ type: 'boolean', default: false })
+  requireAllApprovers!: boolean;
+
   @CreateDateColumn()
   createdAt!: Date;
 

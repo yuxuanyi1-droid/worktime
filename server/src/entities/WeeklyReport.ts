@@ -1,9 +1,11 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, OneToMany, Unique, Index } from 'typeorm';
 import { User } from './User';
 import { ApprovalRecord } from './ApprovalRecord';
 import { ApprovalFlow } from './ApprovalFlow';
 
 @Entity('weekly_reports')
+@Unique('uq_weekly_report_user_week', ['userId', 'weekStart'])
+@Index('idx_weekly_report_user', ['userId'])
 export class WeeklyReport {
   @PrimaryGeneratedColumn()
   id!: number;

@@ -381,18 +381,19 @@ export class ApprovalService {
     }
   }
 
-  async getMySubmissions(userId: number, params: { targetType?: string; status?: string; page?: number; pageSize?: number }) {
-    const { targetType, status, page = 1, pageSize = 20 } = params;
+  async getMySubmissions(userId: number, params: { targetType?: string; status?: string; startDate?: string; endDate?: string; page?: number; pageSize?: number }) {
+    const { targetType, status, startDate, endDate, page = 1, pageSize = 20 } = params;
     const results: any[] = [];
 
     if (!targetType || targetType === 'timesheet') {
-      const items = await this.timesheetRepo
+      const qb = this.timesheetRepo
         .createQueryBuilder('t')
         .leftJoinAndSelect('t.project', 'p')
         .leftJoinAndSelect('t.user', 'u')
         .where('t.userId = :userId', { userId })
-        .andWhere('t.status != :deprecated', { deprecated: 'deprecated' })
-        .getMany();
+        .andWhere('t.status != :deprecated', { deprecated: 'deprecated' });
+      if (startDate && endDate) qb.andWhere('t.date BETWEEN :startDate AND :endDate', { startDate, endDate });
+      const items = await qb.getMany();
 
       const seenGroups = new Set<number>();
       const dedupItems: typeof items = [];
@@ -413,7 +414,8 @@ export class ApprovalService {
     if (!targetType || targetType === 'overtime') {
       const where: any = { userId };
       if (status) where.status = status;
-      const items = await this.overtimeRepo.find({ where });
+      let items = await this.overtimeRepo.find({ where });
+      if (startDate && endDate) items = items.filter(i => i.date >= startDate && i.date <= endDate);
       const instanceMap = await this.batchInstances('overtime', items);
       for (const item of items) {
         results.push(await this.buildListItem('overtime', item, instanceMap.get(item.id) ?? null));
@@ -423,7 +425,8 @@ export class ApprovalService {
     if (!targetType || targetType === 'weekly_report') {
       const where: any = { userId };
       if (status) where.status = status;
-      const items = await this.weeklyReportRepo.find({ where });
+      let items = await this.weeklyReportRepo.find({ where });
+      if (startDate && endDate) items = items.filter(i => i.weekStart >= startDate && i.weekStart <= endDate);
       const instanceMap = await this.batchInstances('weekly_report', items);
       for (const item of items) {
         results.push(await this.buildListItem('weekly_report', item, instanceMap.get(item.id) ?? null));
@@ -765,6 +768,19 @@ export class ApprovalService {
       else if (instance.status === 'pending' && instance.currentStepOrder === step.stepOrder) status = 'current';
       else if (instance.status === 'approved') status = 'approved';
 
+      // 每个审批人的独立状态（A9：区分实际处理人 / skipped / pending，避免或签下误导）
+      const approverStatuses = step.approvers.map(approver => {
+        const t = stepTasks.find(task => task.approverId === approver.id);
+        return {
+          id: approver.id,
+          name: approver.name,
+          status: t?.status || 'pending',
+          action: t?.action || null,
+          comment: t?.comment || null,
+          actedAt: t?.actedAt || null,
+        };
+      });
+
       return {
         stepOrder: step.stepOrder,
         sourceStepOrder: step.sourceStepOrder,
@@ -772,6 +788,8 @@ export class ApprovalService {
         label: step.label,
         approverIds: step.approvers.map(approver => approver.id),
         approverNames: step.approvers.map(approver => approver.name),
+        approverStatuses,
+        requireAllApprovers: step.requireAllApprovers,
         status,
         action: actedTask?.action || null,
         comment: actedTask?.comment || null,

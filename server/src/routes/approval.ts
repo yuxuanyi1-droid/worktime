@@ -10,6 +10,7 @@ import {
   parseArray,
   parseBooleanQuery,
   parseEnum,
+  parseOptionalDateString,
   parseOptionalEnum,
   parseOptionalPositiveInt,
   parsePagination,
@@ -53,6 +54,8 @@ router.get('/my-submissions', async (req: AuthRequest, res, next) => {
     const data = await approvalService.getMySubmissions(req.user!.id, {
       targetType: parseOptionalEnum(firstQueryValue(req.query.targetType), 'targetType', targetTypes),
       status: parseOptionalEnum(firstQueryValue(req.query.status), 'status', approvalStatuses),
+      startDate: parseOptionalDateString(firstQueryValue(req.query.startDate), 'startDate'),
+      endDate: parseOptionalDateString(firstQueryValue(req.query.endDate), 'endDate'),
       page,
       pageSize,
     });

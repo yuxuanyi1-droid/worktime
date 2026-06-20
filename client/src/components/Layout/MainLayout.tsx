@@ -26,6 +26,7 @@ import { usePermission } from '../../hooks/usePermission';
 import { useAppStore } from '../../stores/appStore';
 import { notificationApi, NotificationItem, announcementApi, AnnouncementItem } from '../../api/notification';
 import { systemApi } from '../../api/system';
+import { authApi } from '../../api/auth';
 import { useEffect, useState, useRef, useCallback } from 'react';
 
 interface MenuItem {
@@ -292,7 +293,9 @@ export default function MainLayout() {
     return true;
   });
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // 调用后端 logout 使 token 失效（tokenVersion+1）；失败不阻塞退出
+    try { await authApi.logout(); } catch {}
     clearAuth();
     navigate('/login');
   };
@@ -311,19 +314,9 @@ export default function MainLayout() {
   };
 
   const currentPath = location.pathname;
-  const visiblePaths = menuItems.map((i) => i.key);
-  const extraPaths = ['/profile', '/notifications'];
-  const isAllowed = visiblePaths.some((p) => p === '/' ? currentPath === '/' : currentPath === p || currentPath.startsWith(p + '/'))
-    || extraPaths.some((p) => currentPath === p || currentPath.startsWith(p + '/'));
 
-  const knownPaths = allMenuItems.map((i) => i.key).concat(extraPaths);
-  const isKnownRoute = knownPaths.some((p) => p === '/' ? currentPath === '/' : currentPath === p || currentPath.startsWith(p + '/'));
-
-  useEffect(() => {
-    if (isKnownRoute && currentPath !== '/' && !isAllowed) {
-      navigate('/', { replace: true });
-    }
-  }, [currentPath, isAllowed, isKnownRoute, navigate]);
+  // 注：路由级权限由 router/index.tsx 的 PermissionRoute 负责（显示 403 页面），
+  // 不再在此处做 isKnownRoute/isAllowed 重定向（避免与 PermissionRoute 职责重叠导致 UX 抖动）。
 
   // 监听 401 事件，软跳转到登录页（保留 SPA 状态，带 redirect 以便登录后返回）
   useEffect(() => {

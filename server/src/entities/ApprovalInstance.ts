@@ -20,6 +20,7 @@ export interface ApprovalInstanceStepSnapshot {
   stepType: ApprovalStepType;
   label: string;
   approvers: { id: number; name: string }[];
+  requireAllApprovers?: boolean;
 }
 
 @Entity('approval_instances')

@@ -452,7 +452,9 @@ export class AccessPolicyService {
   async canAccessUserData(viewer: AccessViewer, targetUserId: number, permissions: UserDataScopePermissions = {}) {
     if (targetUserId === viewer.id) return true;
     if (this.isAdmin(viewer)) return true;
-    if (await this.hasAnyPermission(viewer, permissions.allPermissions)) return true;
+    // allPermissions（如 report:view:all）必须校验 grant 的 scope 确为 global，
+    // 而非仅看权限码集合——防止 scopeType 配错的 grant 触发全员数据可见
+    if (permissions.allPermissions?.length && await this.hasGlobalGrant(viewer, permissions.allPermissions)) return true;
     if (await this.hasGlobalGrant(viewer, [
       ...(permissions.departmentPermissions || []),
       ...(permissions.groupPermissions || []),

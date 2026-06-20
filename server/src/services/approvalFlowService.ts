@@ -82,21 +82,20 @@ export class ApprovalFlowEngine {
 
       case 'parent_leader': {
         // 上级组长（向上查找 N 级）
-        const level = step.parentLevel || 1;
+        const level = Math.min(step.parentLevel || 1, 5); // 硬上限 5 级，防止配置错误导致过多查询
         let currentGroup = applicant.group;
+        const visited = new Set<number>(); // 环检测：记录已访问的 groupId
         for (let i = 0; i < level; i++) {
           if (!currentGroup) return [];
+          if (visited.has(currentGroup.id)) return []; // 检测到循环引用，终止
+          visited.add(currentGroup.id);
           const fresh = await this.groupRepo.findOne({
             where: { id: currentGroup.id },
             relations: ['parent', 'leader'],
           });
           if (!fresh?.parent) {
-            // 没有上级组了，用部门负责人
-            const dept = await this.deptRepo.findOne({
-              where: { id: applicant.department?.id ?? 0 },
-              relations: ['leader'],
-            });
-            if (dept?.leader) return [{ userId: dept.leader.id, userName: dept.leader.realName }];
+            // 没有上级组了：跳过该步骤（不再静默回退部门负责人，语义更可预测）
+            // 如需部门负责人审批，应在流程中显式配置 dept_leader 步骤
             return [];
           }
           currentGroup = fresh.parent;
@@ -225,6 +224,7 @@ export class ApprovalFlowEngine {
       label: step.label,
       parentLevel: step.parentLevel || 1,
       customApproverId: step.customApproverId ?? null,
+      requireAllApprovers: step.requireAllApprovers ?? false,
     };
   }
 
@@ -255,7 +255,7 @@ export class ApprovalFlowEngine {
     if (!flow) return null;
 
     let version = await this.versionRepo.findOne({
-      where: { flowId: flow.id },
+      where: { flowId: flow.id, enabled: true },
       order: { version: 'DESC' },
     });
     if (!version) {
@@ -282,6 +282,7 @@ export class ApprovalFlowEngine {
         label: s.label,
         parentLevel: s.parentLevel || 1,
         customApproverId: s.customApproverId || null,
+        requireAllApprovers: s.requireAllApprovers ?? false,
       })),
     });
     const saved = await this.flowRepo.save(flow);
@@ -311,6 +312,7 @@ export class ApprovalFlowEngine {
         label: s.label,
         parentLevel: s.parentLevel || 1,
         customApproverId: s.customApproverId || null,
+        requireAllApprovers: s.requireAllApprovers ?? false,
         flowId: id,
       }));
     }
