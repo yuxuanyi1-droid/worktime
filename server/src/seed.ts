@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { AppDataSource, ensureSchema } from './config/database';
 import { User } from './entities/User';
@@ -134,14 +135,26 @@ async function seed() {
 
   // 先创建用户（因为分组需要 leader）
   const userRepo = AppDataSource.getRepository(User);
-  const hash = (pw: string) => bcrypt.hash(pw, 10);
+  // bcrypt cost 提升至 12（原 10 在 2026 年偏弱）
+  const hash = (pw: string) => bcrypt.hash(pw, 12);
+  const isProd = process.env.NODE_ENV === 'production';
+  // 开发环境用固定弱密码 123456 便于测试；生产环境为每个账号生成强随机密码并打印。
+  const generatedPasswords: { username: string; password: string }[] = [];
+  const initialPassword = (username: string): string => {
+    if (isProd) {
+      const pw = crypto.randomBytes(12).toString('base64url');
+      generatedPasswords.push({ username, password: pw });
+      return pw;
+    }
+    return '123456';
+  };
 
   // 先创建必要的用户（不设分组，后面再更新）
   let adminUser = await userRepo.findOne({ where: { username: 'admin' } });
   if (!adminUser) {
     adminUser = userRepo.create({
-      username: 'admin', password: await hash('123456'), realName: '系统管理员',
-      department: techDept, roles: [adminRole],
+      username: 'admin', password: await hash(initialPassword('admin')), realName: '系统管理员',
+      department: techDept, roles: [adminRole], mustChangePassword: true,
     });
     await userRepo.save(adminUser);
   }
@@ -149,8 +162,8 @@ async function seed() {
   let managerUser = await userRepo.findOne({ where: { username: 'manager1' } });
   if (!managerUser) {
     managerUser = userRepo.create({
-      username: 'manager1', password: await hash('123456'), realName: '张经理',
-      department: techDept, roles: [managerRole],
+      username: 'manager1', password: await hash(initialPassword('manager1')), realName: '张经理',
+      department: techDept, roles: [managerRole], mustChangePassword: true,
     });
     await userRepo.save(managerUser);
   }
@@ -163,8 +176,8 @@ async function seed() {
   let leader1 = await userRepo.findOne({ where: { username: 'leader1' } });
   if (!leader1) {
     leader1 = userRepo.create({
-      username: 'leader1', password: await hash('123456'), realName: '李组长',
-      department: techDept, roles: [leaderRole],
+      username: 'leader1', password: await hash(initialPassword('leader1')), realName: '李组长',
+      department: techDept, roles: [leaderRole], mustChangePassword: true,
     });
     await userRepo.save(leader1);
   }
@@ -172,8 +185,8 @@ async function seed() {
   let leader2 = await userRepo.findOne({ where: { username: 'leader2' } });
   if (!leader2) {
     leader2 = userRepo.create({
-      username: 'leader2', password: await hash('123456'), realName: '王组长',
-      department: techDept, roles: [leaderRole],
+      username: 'leader2', password: await hash(initialPassword('leader2')), realName: '王组长',
+      department: techDept, roles: [leaderRole], mustChangePassword: true,
     });
     await userRepo.save(leader2);
   }
@@ -181,8 +194,8 @@ async function seed() {
   let subLeader1 = await userRepo.findOne({ where: { username: 'subleader1' } });
   if (!subLeader1) {
     subLeader1 = userRepo.create({
-      username: 'subleader1', password: await hash('123456'), realName: '陈副组长',
-      department: techDept, roles: [leaderRole],
+      username: 'subleader1', password: await hash(initialPassword('subleader1')), realName: '陈副组长',
+      department: techDept, roles: [leaderRole], mustChangePassword: true,
     });
     await userRepo.save(subLeader1);
   }
@@ -202,8 +215,8 @@ async function seed() {
   let emp1 = await userRepo.findOne({ where: { username: 'employee1' } });
   if (!emp1) {
     emp1 = userRepo.create({
-      username: 'employee1', password: await hash('123456'), realName: '王员工',
-      department: techDept, group: feReactGroup, roles: [employeeRole],
+      username: 'employee1', password: await hash(initialPassword('employee1')), realName: '王员工',
+      department: techDept, group: feReactGroup, roles: [employeeRole], mustChangePassword: true,
     });
     await userRepo.save(emp1);
   } else {
@@ -214,8 +227,8 @@ async function seed() {
   let emp2 = await userRepo.findOne({ where: { username: 'employee2' } });
   if (!emp2) {
     emp2 = userRepo.create({
-      username: 'employee2', password: await hash('123456'), realName: '赵员工',
-      department: techDept, group: beJavaGroup, roles: [employeeRole],
+      username: 'employee2', password: await hash(initialPassword('employee2')), realName: '赵员工',
+      department: techDept, group: beJavaGroup, roles: [employeeRole], mustChangePassword: true,
     });
     await userRepo.save(emp2);
   } else {
@@ -375,14 +388,23 @@ async function seed() {
   console.log('✅ 审批流程初始化完成');
 
   console.log('\n🎉 种子数据初始化完成！');
-  console.log('📝 默认账号：');
-  console.log('   管理员:  admin / 123456');
-  console.log('   经理:    manager1 / 123456 (技术研发部负责人)');
-  console.log('   组长:    leader1 / 123456 (前端组组长)');
-  console.log('   组长:    leader2 / 123456 (后端组组长)');
-  console.log('   副组长:  subleader1 / 123456 (React小组)');
-  console.log('   员工:    employee1 / 123456 (React小组)');
-  console.log('   员工:    employee2 / 123456 (Java小组)');
+  if (isProd && generatedPasswords.length > 0) {
+    console.log('🔒 生产环境已为每个账号生成强随机密码（请妥善保存，仅显示一次）：');
+    for (const { username, password } of generatedPasswords) {
+      console.log(`   ${username} / ${password}`);
+    }
+    console.log('⚠️  所有账号首次登录必须修改密码！');
+  } else {
+    console.log('📝 默认账号（密码均为 123456，首次登录必须修改）：');
+    console.log('   管理员:  admin');
+    console.log('   经理:    manager1 (技术研发部负责人)');
+    console.log('   组长:    leader1 (前端组组长)');
+    console.log('   组长:    leader2 (后端组组长)');
+    console.log('   副组长:  subleader1 (React小组)');
+    console.log('   员工:    employee1 (React小组)');
+    console.log('   员工:    employee2 (Java小组)');
+    console.log('⚠️  生产环境请改用 NODE_ENV=production 运行 seed 以生成随机密码！');
+  }
   console.log('\n📋 组织架构：');
   console.log('   技术研发部 (负责人: 张经理)');
   console.log('   ├── 前端组 (组长: 李组长)');

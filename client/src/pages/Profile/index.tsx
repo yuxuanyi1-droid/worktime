@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react';
 import { Card, Form, Input, Button, message, Typography, Divider, Descriptions, Modal } from 'antd';
 import { UserOutlined, LockOutlined } from '@ant-design/icons';
 import { useAuthStore } from '../../stores/authStore';
-import request from '../../utils/request';
+import request, { showError } from '../../utils/request';
 
 const { Title } = Typography;
 
 export default function ProfilePage() {
-  const { user, setAuth } = useAuthStore();
+  const { user, refreshUser } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [pwdModalOpen, setPwdModalOpen] = useState(false);
   const [form] = Form.useForm();
@@ -28,15 +28,11 @@ export default function ProfilePage() {
     setLoading(true);
     try {
       await request.put('/auth/profile', values);
-      // 更新本地用户信息
-      const profileRes = await request.get<any, { code: number; data: any }>('/auth/profile');
-      if (profileRes.data) {
-        const token = localStorage.getItem('token')!;
-        setAuth(token, profileRes.data);
-      }
+      // 更新本地用户信息（含最新权限快照）
+      await refreshUser();
       message.success('个人信息已更新');
     } catch (e: any) {
-      message.error(e?.response?.data?.message || '更新失败');
+      showError(e, '更新失败');
     } finally {
       setLoading(false);
     }
@@ -50,13 +46,16 @@ export default function ProfilePage() {
         oldPassword: values.oldPassword,
         newPassword: values.newPassword,
       });
-      message.success('密码修改成功');
+      // 改密后 tokenVersion+1 使当前 token 失效，需重新登录
+      message.success('密码修改成功，请使用新密码重新登录');
       setPwdModalOpen(false);
       pwdForm.resetFields();
+      useAuthStore.getState().clearAuth();
+      window.location.href = '/login';
     } catch (e: any) {
       // validateFields 失败时 error.errorFields 存在，是表单校验错误，不弹 message
       if (!e?.errorFields) {
-        message.error(e?.response?.data?.message || '密码修改失败');
+        showError(e, '密码修改失败');
       }
     }
   };
@@ -113,7 +112,11 @@ export default function ProfilePage() {
           <Form.Item label="原密码" name="oldPassword" rules={[{ required: true }]}>
             <Input.Password />
           </Form.Item>
-          <Form.Item label="新密码" name="newPassword" rules={[{ required: true, min: 6, message: '密码至少6位' }]}>
+          <Form.Item label="新密码" name="newPassword" rules={[
+            { required: true, message: '请输入新密码' },
+            { min: 8, message: '密码至少 8 位' },
+            { pattern: /(?=.*[a-zA-Z])(?=.*\d)/, message: '密码必须同时包含字母和数字' },
+          ]}>
             <Input.Password />
           </Form.Item>
           <Form.Item label="确认新密码" name="confirmPassword" dependencies={['newPassword']} rules={[

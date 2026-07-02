@@ -90,8 +90,12 @@ export const approvalApi = {
     request.post<any, { code: number }>('/approvals/approve', { items }),
   getHistory: (params: any) => request.get<any, { code: number; data: PageResult<ApprovalRecord> }>('/approvals/history', { params }),
   getMySubmissions: (params: any) => request.get<any, { code: number; data: PageResult<MySubmission> }>('/approvals/my-submissions', { params }),
-  getDetail: (targetType: string, targetId: number) =>
-    request.get<any, { code: number; data: ApprovalDetail }>(`/approvals/detail/${targetType}/${targetId}`),
+  getDetail: (targetType: string, targetId: number) => {
+    // R8：targetType 来自 URL 参数（用户可控），白名单校验避免路径注入
+    const allowed = ['timesheet', 'overtime', 'weekly_report', 'permission_request'];
+    if (!allowed.includes(targetType)) throw new Error(`非法的审批类型: ${targetType}`);
+    return request.get<any, { code: number; data: ApprovalDetail }>(`/approvals/detail/${targetType}/${targetId}`);
+  },
   withdraw: (targetType: string, targetId: number) =>
     request.post<any, { code: number }>('/approvals/withdraw', { targetType, targetId }),
   cc: (targetType: string, targetId: number, recipientIds: number[]) =>

@@ -122,7 +122,8 @@ export class ReportService {
       .leftJoinAndSelect('t.user', 'u')
       .leftJoinAndSelect('t.project', 'p')
       .where('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
-      .andWhere('t.status IN (:...statuses)', { statuses: ['approved', 'submitted'] });
+      // E8：报表统一只计 approved（与加班报表一致），避免未审批(submitted)工时虚增报表数据
+      .andWhere('t.status = :status', { status: 'approved' });
 
     if (filters.userId) qb.andWhere('t.userId = :userId', { userId: filters.userId });
     if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
@@ -154,7 +155,7 @@ export class ReportService {
       .leftJoinAndSelect('t.project', 'p')
       .where('p.id = :projectId', { projectId })
       .andWhere('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
-      .andWhere('t.status IN (:...statuses)', { statuses: ['approved', 'submitted'] });
+      .andWhere('t.status = :status', { status: 'approved' });
 
     if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
     else if (filters.departmentId) qb.andWhere('t.departmentSnapshotId = :departmentId', { departmentId: filters.departmentId });

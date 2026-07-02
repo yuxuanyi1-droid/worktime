@@ -22,11 +22,12 @@ import {
   ProjectOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '../../stores/authStore';
-import { usePermission } from '../../hooks/usePermission';
+import { usePermission, loadPermissionModel } from '../../hooks/usePermission';
 import { useAppStore } from '../../stores/appStore';
 import { notificationApi, NotificationItem, announcementApi, AnnouncementItem } from '../../api/notification';
 import { systemApi } from '../../api/system';
 import { authApi } from '../../api/auth';
+import ChangePasswordModal from '../ChangePasswordModal';
 import { useEffect, useState, useRef, useCallback } from 'react';
 
 interface MenuItem {
@@ -51,7 +52,7 @@ const allMenuItems: MenuItem[] = [
 export default function MainLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, clearAuth } = useAuthStore();
+  const { user, clearAuth, refreshUser } = useAuthStore();
   const { hasPermission, hasRole, isAdmin } = usePermission();
   const { systemName, loadSettings } = useAppStore();
 
@@ -64,7 +65,9 @@ export default function MainLayout() {
   const [notifLoading, setNotifLoading] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [notifTab, setNotifTab] = useState('notif');
-  const pollRef = useRef<ReturnType<typeof setInterval>>();
+  const pollRef = useRef<number | undefined>(undefined);
+  // 强制改密：用户首登/管理员重置后 mustChangePassword=true，必须先改密才能继续操作
+  const [pwdModalOpen, setPwdModalOpen] = useState(false);
 
   const totalUnread = notifUnread + announUnread;
 
@@ -119,7 +122,20 @@ export default function MainLayout() {
 
   useEffect(() => {
     loadSettings();
-  }, [loadSettings]);
+    // 进入系统时刷新一次权限快照：登录返回的 permissions 不含运行时通过 grant 授予的权限，
+    // 这里同步最新 profile，保证菜单/按钮可见性与后端实际权限一致。
+    refreshUser();
+    // 同步拉取后端权威权限模型（蕴含关系/别名），消除前后端硬编码漂移。
+    loadPermissionModel();
+  }, [loadSettings, refreshUser]);
+
+  // 强制改密：挂载时检查标志 + 监听 423 拦截事件
+  useEffect(() => {
+    if (user?.mustChangePassword) setPwdModalOpen(true);
+    const onMustChange = () => setPwdModalOpen(true);
+    window.addEventListener('must-change-password', onMustChange);
+    return () => window.removeEventListener('must-change-password', onMustChange);
+  }, [user?.mustChangePassword]);
 
   // 检查用户是否可以查看项目管理（管理员或被指定为项目管理员）
   useEffect(() => {
@@ -133,10 +149,40 @@ export default function MainLayout() {
     }
   }, [isAdmin]);
 
+  // 未读数轮询：页面可见时每 30s 刷新一次，切到后台时暂停（避免多 tab / 后台 tab 持续打接口），
+  // 重新可见时立即刷新一次。
   useEffect(() => {
     loadUnreadCounts();
-    pollRef.current = setInterval(loadUnreadCounts, 30000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+
+    let interval: number | undefined;
+    const start = () => {
+      if (interval !== undefined) return;
+      interval = window.setInterval(loadUnreadCounts, 30000);
+      pollRef.current = interval;
+    };
+    const stop = () => {
+      if (interval !== undefined) {
+        clearInterval(interval);
+        interval = undefined;
+        pollRef.current = undefined;
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        loadUnreadCounts();
+        start();
+      }
+    };
+
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [loadUnreadCounts]);
 
   useEffect(() => {
@@ -441,6 +487,11 @@ export default function MainLayout() {
           <Outlet />
         </ErrorBoundary>
       </div>
+      <ChangePasswordModal
+        open={pwdModalOpen}
+        forced
+        onClose={() => setPwdModalOpen(false)}
+      />
     </div>
   );
 }

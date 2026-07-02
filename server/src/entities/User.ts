@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToMany, ManyToOne, OneToMany, JoinTable } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToMany, ManyToOne, OneToMany, JoinTable, Index } from 'typeorm';
 import { Department } from './Department';
 import { Group } from './Group';
 import { Role } from './Role';
@@ -7,6 +7,7 @@ import { OvertimeApplication } from './OvertimeApplication';
 import { WeeklyReport } from './WeeklyReport';
 
 @Entity('users')
+@Index('idx_users_email_unique', ['email'], { unique: true })
 export class User {
   @PrimaryGeneratedColumn()
   id!: number;
@@ -32,6 +33,10 @@ export class User {
   /** token 版本号：改密码/登出时 +1，使旧 token 失效（中间件校验 version 不匹配即拒绝） */
   @Column({ type: 'integer', default: 0 })
   tokenVersion!: number;
+
+  /** 是否必须修改密码：seed 默认账号/管理员重置密码后置 true，下次登录强制改密，改密成功后置 false */
+  @Column({ type: 'boolean', default: false })
+  mustChangePassword!: boolean;
 
   @ManyToOne(() => Department, department => department.users, { nullable: true })
   department!: Department;

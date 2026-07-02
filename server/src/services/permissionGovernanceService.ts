@@ -12,6 +12,7 @@ import { User } from '../entities/User';
 import { PermissionScopeType, UserPermissionGrant } from '../entities/UserPermissionGrant';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationService } from './notificationService';
+import { AccessPolicyService } from './accessPolicyService';
 
 export type PermissionRequestPayload = {
   permissionCode: string;
@@ -210,6 +211,8 @@ export class PermissionGovernanceService {
     request.totalSteps = 0;
     request.approvalInstanceId = approvalInstanceId ?? request.approvalInstanceId;
     await this.requestRepo.save(request);
+    // 授权激活后立即失效该用户的 grant 缓存，使后续请求读到最新权限。
+    AccessPolicyService.invalidateGrantCache(request.applicantId);
     return grant;
   }
 
@@ -251,17 +254,20 @@ export class PermissionGovernanceService {
   }
 
   async revokeGrant(grantId: number, operatorId: number, reason?: string) {
-    return AppDataSource.transaction(async (manager) => {
+    const grant = await AppDataSource.transaction(async (manager) => {
       const txService = new PermissionGovernanceService(manager);
-      const grant = await txService.grantRepo.findOne({ where: { id: grantId } });
-      if (!grant) throw new BusinessError('授权记录不存在');
-      if (grant.status !== 'active') return grant;
-      grant.status = 'revoked';
-      grant.revokedAt = new Date();
-      grant.revokedById = operatorId;
-      grant.revokeReason = reason || null;
-      return txService.grantRepo.save(grant);
+      const g = await txService.grantRepo.findOne({ where: { id: grantId } });
+      if (!g) throw new BusinessError('授权记录不存在');
+      if (g.status !== 'active') return g;
+      g.status = 'revoked';
+      g.revokedAt = new Date();
+      g.revokedById = operatorId;
+      g.revokeReason = reason || null;
+      return txService.grantRepo.save(g);
     });
+    // 事务提交成功后才失效缓存；若事务回滚则抛异常跳过此处，缓存保持不变。
+    AccessPolicyService.invalidateGrantCache(grant.userId);
+    return grant;
   }
 
   async getRequestById(id: number) {

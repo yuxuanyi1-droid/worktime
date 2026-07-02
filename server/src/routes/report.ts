@@ -21,6 +21,43 @@ const timesheetRepo = () => AppDataSource.getRepository(Timesheet);
 
 type Viewer = NonNullable<AuthRequest['user']>;
 
+/**
+ * 通用 Excel 导出：把记录按列定义流式写入响应。
+ * 5 个导出路由共享相同的「建 workbook → 设列 → 表头样式 → 逐行写入 → 合计行 → 设响应头 → write」流程，
+ * 此处只保留差异部分（sheet 名、列、记录→行映射、合计行、文件名）。
+ */
+async function streamExcelReport(
+  res: any,
+  options: {
+    sheetName: string;
+    columns: { header: string; key: string; width: number }[];
+    records: any[];
+    mapRow: (record: any) => Record<string, any>;
+    summaryRow?: Record<string, any>;
+    filename: string;
+  },
+) {
+  const { sheetName, columns, records, mapRow, summaryRow, filename } = options;
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet(sheetName);
+  sheet.columns = columns;
+  sheet.getRow(1).font = { bold: true };
+  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
+
+  for (const record of records) {
+    sheet.addRow(mapRow(record));
+  }
+  if (summaryRow) {
+    sheet.addRow([]);
+    sheet.addRow(summaryRow);
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
 async function getProjectFilterOptions(projectId: number) {
   const records = await timesheetRepo().createQueryBuilder('t')
     .select([
@@ -364,37 +401,27 @@ router.get('/export/personal', requireAllPermissions('report:view:self', 'report
     }
 
     const data = await reportService.getPersonalReport(userId, startDate, endDate);
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('工时报表');
     const statusText: Record<string, string> = { draft: '草稿', submitted: '审批中', approved: '已通过', rejected: '已驳回' };
-
-    sheet.columns = [
-      { header: '日期', key: 'date', width: 14 },
-      { header: '项目', key: 'project', width: 20 },
-      { header: '工时(天)', key: 'hours', width: 12 },
-      { header: '工作内容', key: 'description', width: 40 },
-      { header: '状态', key: 'status', width: 10 },
-    ];
-    sheet.getRow(1).font = { bold: true };
-    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
-
-    for (const record of data.records as any[]) {
-      sheet.addRow({
+    await streamExcelReport(res, {
+      sheetName: '工时报表',
+      columns: [
+        { header: '日期', key: 'date', width: 14 },
+        { header: '项目', key: 'project', width: 20 },
+        { header: '工时(天)', key: 'hours', width: 12 },
+        { header: '工作内容', key: 'description', width: 40 },
+        { header: '状态', key: 'status', width: 10 },
+      ],
+      records: data.records,
+      mapRow: (record: any) => ({
         date: record.date,
         project: record.project?.name || '-',
         hours: record.hours,
         description: record.description || '',
         status: statusText[record.status] || record.status,
-      });
-    }
-
-    sheet.addRow([]);
-    sheet.addRow({ date: '合计', hours: data.totalHours });
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=timesheet-report-${startDate}-${endDate}.xlsx`);
-    await workbook.xlsx.write(res);
-    res.end();
+      }),
+      summaryRow: { date: '合计', hours: data.totalHours },
+      filename: `timesheet-report-${startDate}-${endDate}.xlsx`,
+    });
   } catch (error) {
     next(error);
   }
@@ -416,38 +443,28 @@ router.get('/export/department', requireAllPermissions('report:view:department',
 
     const groupIds = groupId ? await accessPolicy.getGroupAndDescendantIds([groupId]) : undefined;
     const data = await reportService.getDepartmentReport(departmentId, startDate, endDate, { groupId, groupIds });
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('部门工时报表');
-
-    sheet.columns = [
-      { header: '人员', key: 'user', width: 14 },
-      { header: '部门', key: 'department', width: 16 },
-      { header: '组别', key: 'group', width: 16 },
-      { header: '项目', key: 'project', width: 20 },
-      { header: '工时(天)', key: 'hours', width: 12 },
-      { header: '日期', key: 'date', width: 14 },
-    ];
-    sheet.getRow(1).font = { bold: true };
-    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
-
-    for (const record of data.records as any[]) {
-      sheet.addRow({
+    await streamExcelReport(res, {
+      sheetName: '部门工时报表',
+      columns: [
+        { header: '人员', key: 'user', width: 14 },
+        { header: '部门', key: 'department', width: 16 },
+        { header: '组别', key: 'group', width: 16 },
+        { header: '项目', key: 'project', width: 20 },
+        { header: '工时(天)', key: 'hours', width: 12 },
+        { header: '日期', key: 'date', width: 14 },
+      ],
+      records: data.records,
+      mapRow: (record: any) => ({
         user: record.user?.realName || '-',
         department: record.departmentSnapshotName || '-',
         group: record.groupSnapshotName || '-',
         project: record.project?.name || '-',
         hours: record.hours,
         date: record.date,
-      });
-    }
-
-    sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=dept-report-${startDate}-${endDate}.xlsx`);
-    await workbook.xlsx.write(res);
-    res.end();
+      }),
+      summaryRow: { user: '合计', hours: data.totalHours },
+      filename: `dept-report-${startDate}-${endDate}.xlsx`,
+    });
   } catch (error) {
     next(error);
   }
@@ -466,35 +483,26 @@ router.get('/export/group', requireAllPermissions('report:view:group', 'report:e
 
     const groupIds = await accessPolicy.getGroupAndDescendantIds([groupId]);
     const data = await reportService.getGroupReport(groupId, startDate, endDate, groupIds);
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('组别工时报表');
-
-    sheet.columns = [
-      { header: '人员', key: 'user', width: 14 },
-      { header: '组别', key: 'group', width: 16 },
-      { header: '项目', key: 'project', width: 20 },
-      { header: '工时(天)', key: 'hours', width: 12 },
-      { header: '日期', key: 'date', width: 14 },
-    ];
-    sheet.getRow(1).font = { bold: true };
-    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
-
-    for (const record of data.records as any[]) {
-      sheet.addRow({
+    await streamExcelReport(res, {
+      sheetName: '组别工时报表',
+      columns: [
+        { header: '人员', key: 'user', width: 14 },
+        { header: '组别', key: 'group', width: 16 },
+        { header: '项目', key: 'project', width: 20 },
+        { header: '工时(天)', key: 'hours', width: 12 },
+        { header: '日期', key: 'date', width: 14 },
+      ],
+      records: data.records,
+      mapRow: (record: any) => ({
         user: record.user?.realName || '-',
         group: record.groupSnapshotName || '-',
         project: record.project?.name || '-',
         hours: record.hours,
         date: record.date,
-      });
-    }
-    sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=group-report-${startDate}-${endDate}.xlsx`);
-    await workbook.xlsx.write(res);
-    res.end();
+      }),
+      summaryRow: { user: '合计', hours: data.totalHours },
+      filename: `group-report-${startDate}-${endDate}.xlsx`,
+    });
   } catch (error) {
     next(error);
   }
@@ -515,35 +523,26 @@ router.get('/export/project', requireAllPermissions('report:view:project', 'repo
 
     const { reportFilters } = await getProjectScopedFilters(projectId, departmentId, groupId);
     const data = await reportService.getProjectReport(projectId, startDate, endDate, reportFilters);
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('项目工时报表');
-
-    sheet.columns = [
-      { header: '人员', key: 'user', width: 14 },
-      { header: '部门', key: 'department', width: 16 },
-      { header: '组别', key: 'group', width: 16 },
-      { header: '工时(天)', key: 'hours', width: 12 },
-      { header: '日期', key: 'date', width: 14 },
-    ];
-    sheet.getRow(1).font = { bold: true };
-    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
-
-    for (const record of data.records as any[]) {
-      sheet.addRow({
+    await streamExcelReport(res, {
+      sheetName: '项目工时报表',
+      columns: [
+        { header: '人员', key: 'user', width: 14 },
+        { header: '部门', key: 'department', width: 16 },
+        { header: '组别', key: 'group', width: 16 },
+        { header: '工时(天)', key: 'hours', width: 12 },
+        { header: '日期', key: 'date', width: 14 },
+      ],
+      records: data.records,
+      mapRow: (record: any) => ({
         user: record.user?.realName || '-',
         department: record.departmentSnapshotName || '-',
         group: record.groupSnapshotName || '-',
         hours: record.hours,
         date: record.date,
-      });
-    }
-    sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=project-report-${startDate}-${endDate}.xlsx`);
-    await workbook.xlsx.write(res);
-    res.end();
+      }),
+      summaryRow: { user: '合计', hours: data.totalHours },
+      filename: `project-report-${startDate}-${endDate}.xlsx`,
+    });
   } catch (error) {
     next(error);
   }
@@ -583,36 +582,27 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
       departmentId, departmentIds, groupId, groupIds, userId, startDate, endDate,
       matchAnyScope: !!departmentIds?.length && !!groupIds?.length,
     });
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('加班统计报表');
-
-    sheet.columns = [
-      { header: '人员', key: 'user', width: 14 },
-      { header: '日期', key: 'date', width: 14 },
-      { header: '加班类型', key: 'type', width: 14 },
-      { header: '加班时长(小时)', key: 'hours', width: 16 },
-      { header: '原因', key: 'reason', width: 30 },
-    ];
-    sheet.getRow(1).font = { bold: true };
-    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E0FF' } };
-
     const typeText: Record<string, string> = { weekend: '周末加班', holiday: '节假日加班', weekday: '工作日加班' };
-    for (const record of data.records as any[]) {
-      sheet.addRow({
+    await streamExcelReport(res, {
+      sheetName: '加班统计报表',
+      columns: [
+        { header: '人员', key: 'user', width: 14 },
+        { header: '日期', key: 'date', width: 14 },
+        { header: '加班类型', key: 'type', width: 14 },
+        { header: '加班时长(小时)', key: 'hours', width: 16 },
+        { header: '原因', key: 'reason', width: 30 },
+      ],
+      records: data.records,
+      mapRow: (record: any) => ({
         user: record.user?.realName || '-',
         date: record.date,
         type: typeText[record.overtimeType] || record.overtimeType,
         hours: record.hours,
         reason: record.reason || '',
-      });
-    }
-    sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=overtime-report-${startDate}-${endDate}.xlsx`);
-    await workbook.xlsx.write(res);
-    res.end();
+      }),
+      summaryRow: { user: '合计', hours: data.totalHours },
+      filename: `overtime-report-${startDate}-${endDate}.xlsx`,
+    });
   } catch (error) {
     next(error);
   }

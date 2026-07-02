@@ -38,7 +38,8 @@ router.post('/admin', requirePermission('system:announcement:create'), async (re
 // 更新公告
 router.put('/admin/:id', requirePermission('system:announcement:update'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await announcementService.update(Number(req.params.id), req.body);
+    const user = req.user!;
+    const data = await announcementService.update(Number(req.params.id), req.body, user.id, user.roles.includes('admin'));
     res.json({ code: 0, data });
   } catch (error) {
     next(error);
@@ -48,7 +49,8 @@ router.put('/admin/:id', requirePermission('system:announcement:update'), async 
 // 删除公告
 router.delete('/admin/:id', requirePermission('system:announcement:delete'), async (req: AuthRequest, res, next) => {
   try {
-    await announcementService.delete(Number(req.params.id));
+    const user = req.user!;
+    await announcementService.delete(Number(req.params.id), user.id, user.roles.includes('admin'));
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);

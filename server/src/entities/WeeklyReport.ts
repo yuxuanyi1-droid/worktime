@@ -32,7 +32,8 @@ export class WeeklyReport {
   totalHours!: number;
 
   @Column({ type: 'varchar', length: 20, default: 'draft' })
-  status!: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
+  // 'submitting' 是乐观锁抢占时的瞬态状态，仅在事务内存在，提交前会被覆盖为 submitted/approved
+  status!: 'draft' | 'submitting' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
 
   @Column({ type: 'integer', default: 0 })
   currentStep!: number;

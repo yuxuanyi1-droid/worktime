@@ -9,6 +9,7 @@ import {
   parsePagination,
   parsePositiveInt,
   parseString,
+  validateWeekStartMonday,
 } from '../utils/validation';
 import { canAccessUserData } from '../utils/accessControl';
 
@@ -17,7 +18,8 @@ const weeklyReportService = new WeeklyReportService();
 
 function parseWeeklyReportPayload(body: Record<string, unknown>) {
   return {
-    weekStart: parseDateString(body.weekStart, 'weekStart'),
+    // R13：weekStart 必须是周一（周锚点），避免周数据桶错位
+    weekStart: validateWeekStartMonday(body.weekStart, 'weekStart'),
     weekEnd: parseDateString(body.weekEnd, 'weekEnd'),
     content: parseString(body.content, 'content', { max: 20000 }),
     summary: parseString(body.summary, 'summary', { max: 2000 }),
@@ -44,7 +46,7 @@ router.get('/my', async (req: AuthRequest, res, next) => {
 // 查看指定周的周报
 router.get('/week', requirePermission('weekly_report:read'), async (req: AuthRequest, res, next) => {
   try {
-    const weekStart = parseDateString(firstQueryValue(req.query.weekStart), 'weekStart');
+    const weekStart = validateWeekStartMonday(firstQueryValue(req.query.weekStart), 'weekStart');
     const userId = firstQueryValue(req.query.userId)
       ? parsePositiveInt(firstQueryValue(req.query.userId), 'userId')
       : req.user!.id;

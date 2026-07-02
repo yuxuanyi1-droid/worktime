@@ -413,11 +413,22 @@ function UserTab() {
             form.setFieldsValue({ ...record, departmentId: record.department?.id, groupId: record.group?.id, roleIds: record.roles.map(r => r.id) });
             setModalOpen(true);
           }}>编辑</Button>
-          <Popconfirm title="确定重置密码为123456?" onConfirm={async () => { await systemApi.resetPassword(record.id, '123456'); message.success('密码已重置'); }}>
+          <Popconfirm title="重置为随机密码？" description="将生成随机密码并强制该用户下次登录改密" onConfirm={async () => {
+            const res = await systemApi.resetPassword(record.id);
+            const pwd = (res as any)?.data?.password;
+            if (pwd) {
+              Modal.info({
+                title: '密码已重置',
+                content: <div><p>新随机密码（仅显示一次）：</p><p style={{ fontFamily: 'monospace', fontSize: 16, padding: 8, background: '#f5f5f5' }}>{pwd}</p><p style={{ color: '#999' }}>该用户下次登录需使用此密码并强制修改。</p></div>,
+              });
+            } else {
+              message.success('密码已重置');
+            }
+          }}>
             <Button type="link" size="small">重置密码</Button>
           </Popconfirm>
-          <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteUser(record.id); message.success('删除成功'); load(); }}>
-            <Button type="link" size="small" danger>删除</Button>
+          <Popconfirm title="确定禁用该用户？" description="禁用后该用户无法登录且当前会话立即失效" onConfirm={async () => { await systemApi.deleteUser(record.id); message.success('已禁用'); load(); }} disabled={record.status !== 1}>
+            <Button type="link" size="small" danger disabled={record.status !== 1}>禁用</Button>
           </Popconfirm>
         </Space>
       ),

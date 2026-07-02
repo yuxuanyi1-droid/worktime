@@ -12,6 +12,7 @@ import { systemApi } from '../../api/system';
 import { statusMap } from '../../types';
 import type { Timesheet as TimesheetData, Project } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
+import { showError } from '../../utils/request';
 
 dayjs.extend(isoWeek);
 
@@ -28,11 +29,6 @@ interface WeekRow {
 }
 
 const dayLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-
-function getErrorMessage(error: unknown, fallback: string) {
-  const e = error as { response?: { data?: { message?: string } }; message?: string };
-  return e?.response?.data?.message || e?.message || fallback;
-}
 
 /** 获取某周周一到周日的日期数组 */
 function getWeekDates(weekStart: dayjs.Dayjs): string[] {
@@ -68,6 +64,7 @@ export default function TimesheetPage() {
   const [editing, setEditing] = useState(false); // 编辑模式：控制已提交/已审批行是否可编辑
   const rowSnapshotRef = useRef<Map<string, WeekRow>>(new Map()); // 编辑模式开始时的行快照
   const weekLoadReqId = useRef(0); // 切周请求竞态守卫：只接受最新一次的响应
+  const historyReqId = useRef(0); // 历史列表请求竞态守卫：日期范围快速切换时只接受最新响应
 
   // 系统设置：工时单位 days/hours
   const [unitMode, setUnitMode] = useState<'days' | 'hours'>('days');
@@ -111,7 +108,8 @@ export default function TimesheetPage() {
         setUnitMode(res.data.settings.timesheet_unit === 'hours' ? 'hours' : 'days');
       }
     } catch (error) {
-      message.warning(getErrorMessage(error, '系统设置加载失败，已使用默认工时单位'));
+      const e = error as { response?: { data?: { message?: string } }; message?: string };
+      message.warning(e?.response?.data?.message || e?.message || '系统设置加载失败，已使用默认工时单位');
     } finally {
       setSettingsLoaded(true);
     }
@@ -122,11 +120,12 @@ export default function TimesheetPage() {
       const res = await systemApi.getActiveProjects();
       if (res.data) setProjects(res.data as any);
     } catch (error) {
-      message.error(getErrorMessage(error, '项目列表加载失败'));
+      showError(error, '项目列表加载失败');
     }
   };
 
   const loadHistory = async () => {
+    const reqId = ++historyReqId.current;
     setHistoryLoading(true);
     try {
       const res = await timesheetApi.getMy({
@@ -135,9 +134,11 @@ export default function TimesheetPage() {
         pageSize: 100,
         includeAll: 'true',
       });
+      if (reqId !== historyReqId.current) return; // 已有更新的请求，丢弃本次响应
       if (res.data) setHistoryData(res.data.list);
     } catch (error) {
-      message.error(getErrorMessage(error, '工时历史加载失败'));
+      if (reqId !== historyReqId.current) return;
+      showError(error, '工时历史加载失败');
       setHistoryData([]);
     }
     setHistoryLoading(false);
@@ -193,7 +194,7 @@ export default function TimesheetPage() {
         setRows([newRow()]);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '本周工时加载失败'));
+      showError(error, '本周工时加载失败');
       setRows([newRow()]);
     }
   };
@@ -225,7 +226,7 @@ export default function TimesheetPage() {
         loadHistory();
         loadWeekDrafts(); // 同步刷新周表，避免 UI 与 DB 不一致
       } catch (error) {
-        message.error(getErrorMessage(error, '删除失败'));
+        showError(error, '删除失败');
         return;
       }
     }
@@ -260,8 +261,12 @@ export default function TimesheetPage() {
     ));
   };
 
-  // 切周前检查是否有未保存的草稿数据（避免切周丢失）
-  const hasUnsavedDraft = () => rows.some(r => weekDates.some(d => (r.hours[d] || 0) > 0) && r.originalStatus === 'draft');
+  // 切周前检查是否有未保存的草稿数据（避免切周丢失）。
+  // 新增行（newRow）的 originalStatus 是 undefined，但用户可能已填入工时，必须一并纳入判断，
+  // 否则切周会静默丢弃这些未保存的新行数据。
+  const hasUnsavedDraft = () => rows.some(r =>
+    weekDates.some(d => (r.hours[d] || 0) > 0) && (r.originalStatus === 'draft' || r.originalStatus === undefined)
+  );
   const switchWeek = (newWeek: dayjs.Dayjs) => {
     if (hasUnsavedDraft()) {
       Modal.confirm({
@@ -333,7 +338,7 @@ export default function TimesheetPage() {
         doCopy();
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '复制上周工时失败'));
+      showError(error, '复制上周工时失败');
     }
   };
 
@@ -421,7 +426,7 @@ export default function TimesheetPage() {
         loadWeekDrafts();
         loadHistory();
       } catch (error) {
-        message.error(getErrorMessage(error, '修改工时保存失败'));
+        showError(error, '修改工时保存失败');
       }
       setSaving(false);
       return;
@@ -467,7 +472,7 @@ export default function TimesheetPage() {
       loadWeekDrafts();
       loadHistory();
     } catch (error) {
-      message.error(getErrorMessage(error, '草稿保存失败'));
+      showError(error, '草稿保存失败');
     }
     setSaving(false);
   };
@@ -544,7 +549,7 @@ export default function TimesheetPage() {
           loadWeekDrafts();
           loadHistory();
         } catch (error) {
-          message.error(getErrorMessage(error, '提交审批失败'));
+          showError(error, '提交审批失败');
         }
         setSaving(false);
       },
@@ -725,7 +730,7 @@ export default function TimesheetPage() {
                   loadHistory();
                   loadWeekDrafts();
                 } catch (error) {
-                  message.error(getErrorMessage(error, '删除失败'));
+                  showError(error, '删除失败');
                 }
               }}
             >

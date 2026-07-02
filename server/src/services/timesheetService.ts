@@ -10,6 +10,7 @@ import { User } from '../entities/User';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { AccessPolicyService, OrgSnapshot } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
+import { validateDailyHours } from '../utils/validation';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 dayjs.extend(isoWeek);
@@ -188,7 +189,7 @@ export class TimesheetService {
               targetType: 'timesheet',
               targetId: r.id,
               applicantName: submitter.realName,
-              title: `工时审批 ${r.hours}天`,
+              title: `工时审批 ${r.hours}小时`,
             });
           }
         } else {
@@ -407,7 +408,7 @@ export class TimesheetService {
                 targetType: 'timesheet',
                 targetId,
                 applicantName: submitter.realName,
-                title: `工时审批 ${totalHours}天`,
+                title: `工时审批 ${totalHours}小时`,
               });
             }
           }
@@ -433,6 +434,14 @@ export class TimesheetService {
   async modifySubmitted(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; hours: number }[] }[]) {
     if (!rows?.length) throw new BusinessError('请提供要修改的记录');
 
+    // F2：月份锁定校验（与 submitByRows 一致），防止通过修改已提交工时绕过提交窗口
+    const allDates = rows.flatMap(r => r.entries.map(e => e.date));
+    await this.checkTimesheetLock(allDates);
+
+    // E4：每日工时≤24 校验（与 submitByRows 一致）
+    validateDailyHours(rows.flatMap(r => r.entries));
+
+    const notifications: PendingNotification[] = [];
     await AppDataSource.transaction(async (manager) => {
       const txService = new TimesheetService(manager);
       const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(userId);
@@ -470,13 +479,21 @@ export class TimesheetService {
         }
       }
 
+      // submitted 记录已在上方走 withdraw 审批撤回流程，这里只需归零草稿字段。
+      // approved 记录不得单方面降级为 draft（否则已审批数据被无声篡改、无审计/通知），
+      // 应置为 deprecated 保留历史，由后续按 rows 重建新记录走审批，与 submitByRows 语义一致。
       for (const e of activeRecords) {
-        if (e.status === 'submitted' || e.status === 'approved') {
+        if (e.status === 'approved') {
+          e.status = 'deprecated';
+          e.previousGroupId = previousGroupId;
+          await txService.repo.save(e);
+        } else if (e.status === 'submitted') {
           e.status = 'draft';
           e.currentStep = 0;
           e.approvalFlowId = null;
           e.approvalInstanceId = null;
           e.totalSteps = 0;
+          e.submissionGroupId = null; // F1：清除旧提交组，使其能被后续重新提交逻辑捕获（否则 !r.submissionGroupId 过滤会排除它）
           e.previousGroupId = previousGroupId;
           await txService.repo.save(e);
         }
@@ -550,7 +567,70 @@ export class TimesheetService {
           }, orgSnapshot));
         }
       }
+
+      // E3：修改已审批/已提交工时后，自动重新提交审批（与 submitByRows 语义一致）。
+      // 否则新记录停在 draft，已审批数据被修改后不再走审批，造成"改了不审批"的数据不一致。
+      // 按 projectId 分组，每组分配一个 submissionGroupId 并启动审批实例。
+      const newActiveRecords = (await txService.repo.find({
+        where: { userId, date: Between(weekStart, weekEnd), status: 'draft' },
+      })).filter(r => !r.submissionGroupId);
+
+      if (newActiveRecords.length > 0) {
+        const submitter = await txService.userRepo.findOneBy({ id: userId });
+        // 按 projectId 分组提交
+        const byProject = new Map<number, typeof newActiveRecords>();
+        for (const r of newActiveRecords) {
+          const arr = byProject.get(r.projectId) ?? [];
+          arr.push(r);
+          byProject.set(r.projectId, arr);
+        }
+
+        for (const [projectId, groupRecords] of byProject) {
+          const nextGroupId = await txService.nextSubmissionGroupId();
+          for (const r of groupRecords) r.submissionGroupId = nextGroupId;
+          await txService.repo.save(groupRecords);
+
+          const targetId = groupRecords[0].id;
+          const resolved = await txService.approvalInstanceService.start({
+            targetType: 'timesheet',
+            targetId,
+            applicantId: userId,
+            projectId,
+          });
+          if (resolved.status === 'submitted' && resolved.instance) {
+            await txService.repo.update(
+              { id: In(groupRecords.map(r => r.id)) },
+              {
+                status: 'submitted',
+                currentStep: resolved.instance.currentStepOrder || 1,
+                approvalFlowId: resolved.instance.flowId,
+                approvalInstanceId: resolved.instance.id,
+                totalSteps: resolved.instance.totalSteps,
+              },
+            );
+            if (resolved.firstApproverIds.length && submitter) {
+              const totalHours = groupRecords.reduce((s, r) => s + Number(r.hours), 0);
+              notifications.push({
+                kind: 'pending',
+                approverIds: resolved.firstApproverIds,
+                targetType: 'timesheet',
+                targetId,
+                applicantName: submitter.realName,
+                title: `工时审批 ${totalHours}小时`,
+              });
+            }
+          } else {
+            await txService.repo.update(
+              { id: In(groupRecords.map(r => r.id)) },
+              { status: 'approved', currentStep: 0, totalSteps: 0, approvalInstanceId: resolved.instance?.id ?? null },
+            );
+          }
+        }
+      }
     });
+
+    // E6：modifySubmitted 撤回/修改后通知原审批人（原先完全静默）
+    await this.flushNotifications(notifications);
 
     return true;
   }

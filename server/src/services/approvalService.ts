@@ -61,6 +61,7 @@ export class ApprovalService {
   constructor(private manager?: EntityManager) {}
 
   private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
+  private get taskRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalTask); }
   private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
   private get overtimeRepo() { return (this.manager ?? AppDataSource).getRepository(OvertimeApplication); }
   private get weeklyReportRepo() { return (this.manager ?? AppDataSource).getRepository(WeeklyReport); }
@@ -215,6 +216,13 @@ export class ApprovalService {
     const allTasks = (await this.approvalInstanceService.getPendingTasks(approverId, { targetType, isAdmin }))
       .filter(task => task.instance?.applicantId !== approverId);
 
+    // 用与最终展示一致的排序键（instance.submittedAt，回退 task.updatedAt）排序后再分页，
+    // 否则分页（task.updatedAt）与最终重排（createdAt=instance.submittedAt）排序键不一致，
+    // 会导致条目在不同页之间漂移、翻页时出现重复或遗漏。
+    const sortKey = (task: typeof allTasks[number]) =>
+      task.instance?.submittedAt ? new Date(task.instance.submittedAt).getTime() : new Date(task.updatedAt).getTime();
+    allTasks.sort((a, b) => sortKey(b) - sortKey(a));
+
     const total = allTasks.length;
     // 先取当前页的任务再组装，避免组装全部记录
     const pageTasks = allTasks.slice((page - 1) * pageSize, page * pageSize);
@@ -262,6 +270,7 @@ export class ApprovalService {
       results.push(item);
     }
 
+    // 页内按 createdAt 稳定排序（pageTasks 已在上游按相同语义排序，此处保证最终展示顺序一致）。
     results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return { list: results, total, page, pageSize };
   }
@@ -278,6 +287,23 @@ export class ApprovalService {
   async approve(approverId: number, approverName: string, items: { targetType: string; targetId: number; action: 'approve' | 'reject'; comment?: string }[]) {
     const isAdmin = await this.isAdminUser(approverId);
     const notifications: PendingNotification[] = [];
+
+    // 预校验：在进入事务前一次性检查所有 item 的存在性与状态，避免“第 99 条失败导致前 98 条全部回滚”。
+    // 仅做只读校验，不修改任何数据；并发场景下仍由事务保证最终一致性。
+    const errors: string[] = [];
+    for (const item of items) {
+      const { target } = await this.getTargetInfo(item.targetType, item.targetId);
+      if (!target) {
+        errors.push(`${item.targetType}#${item.targetId} 不存在`);
+        continue;
+      }
+      if (target.status !== 'submitted') {
+        errors.push(`${item.targetType}#${item.targetId} 不是待审批状态（当前：${target.status}）`);
+      }
+    }
+    if (errors.length > 0) {
+      throw new BusinessError(`批量审批存在无效项，已拒绝全部：\n${errors.join('\n')}`);
+    }
 
     await AppDataSource.transaction(async (manager) => {
       const txService = new ApprovalService(manager);
@@ -392,13 +418,14 @@ export class ApprovalService {
         .leftJoinAndSelect('t.user', 'u')
         .where('t.userId = :userId', { userId })
         .andWhere('t.status != :deprecated', { deprecated: 'deprecated' });
+      if (status) qb.andWhere('t.status = :status', { status });
       if (startDate && endDate) qb.andWhere('t.date BETWEEN :startDate AND :endDate', { startDate, endDate });
       const items = await qb.getMany();
 
+      // submissionGroupId 去重：同一提交组的多条记录只展示一条（与原内存过滤行为一致）
       const seenGroups = new Set<number>();
       const dedupItems: typeof items = [];
       for (const item of items) {
-        if (status && item.status !== status) continue;
         if (item.submissionGroupId) {
           if (seenGroups.has(item.submissionGroupId)) continue;
           seenGroups.add(item.submissionGroupId);
@@ -412,10 +439,11 @@ export class ApprovalService {
     }
 
     if (!targetType || targetType === 'overtime') {
-      const where: any = { userId };
-      if (status) where.status = status;
-      let items = await this.overtimeRepo.find({ where });
-      if (startDate && endDate) items = items.filter(i => i.date >= startDate && i.date <= endDate);
+      // 日期过滤下推到 SQL，避免全量取出再内存 filter
+      const qb = this.overtimeRepo.createQueryBuilder('o').where('o.userId = :userId', { userId });
+      if (status) qb.andWhere('o.status = :status', { status });
+      if (startDate && endDate) qb.andWhere('o.date BETWEEN :startDate AND :endDate', { startDate, endDate });
+      const items = await qb.getMany();
       const instanceMap = await this.batchInstances('overtime', items);
       for (const item of items) {
         results.push(await this.buildListItem('overtime', item, instanceMap.get(item.id) ?? null));
@@ -423,10 +451,11 @@ export class ApprovalService {
     }
 
     if (!targetType || targetType === 'weekly_report') {
-      const where: any = { userId };
-      if (status) where.status = status;
-      let items = await this.weeklyReportRepo.find({ where });
-      if (startDate && endDate) items = items.filter(i => i.weekStart >= startDate && i.weekStart <= endDate);
+      // 日期过滤下推到 SQL，避免全量取出再内存 filter
+      const qb = this.weeklyReportRepo.createQueryBuilder('w').where('w.userId = :userId', { userId });
+      if (status) qb.andWhere('w.status = :status', { status });
+      if (startDate && endDate) qb.andWhere('w.weekStart BETWEEN :startDate AND :endDate', { startDate, endDate });
+      const items = await qb.getMany();
       const instanceMap = await this.batchInstances('weekly_report', items);
       for (const item of items) {
         results.push(await this.buildListItem('weekly_report', item, instanceMap.get(item.id) ?? null));
@@ -524,13 +553,21 @@ export class ApprovalService {
 
     const list: ApprovalRecord[] = [];
     const permissionCache = new Map<string, boolean>();
+    // 预按 key 分组 records，避免循环内反复 records.filter（原为 O(n²)）
+    const recordsByKey = new Map<string, ApprovalRecord[]>();
+    for (const r of records) {
+      const k = `${r.targetType}_${r.targetId}`;
+      const bucket = recordsByKey.get(k) ?? [];
+      bucket.push(r);
+      recordsByKey.set(k, bucket);
+    }
 
     for (const record of records) {
       const key = `${record.targetType}_${record.targetId}`;
       let canView = permissionCache.get(key);
       if (canView === undefined) {
         const target = targetMap.get(key);
-        canView = !!target && await this.canViewApprovalTarget(record.targetType, target, record.targetId, viewerId, records.filter(r => r.targetType === record.targetType && r.targetId === record.targetId));
+        canView = !!target && await this.canViewApprovalTarget(record.targetType, target, record.targetId, viewerId, recordsByKey.get(key));
         permissionCache.set(key, canView);
       }
       if (canView) list.push(record);
@@ -542,6 +579,9 @@ export class ApprovalService {
   }
 
   async withdraw(userId: number, targetType: string, targetId: number) {
+    let pendingApproverIds: number[] = [];
+    const submitterName = (await this.userRepo.findOneBy({ id: userId }))?.realName || '';
+
     await AppDataSource.transaction(async (manager) => {
       const txService = new ApprovalService(manager);
       const { target, repo } = await txService.getTargetInfo(targetType, targetId);
@@ -550,6 +590,14 @@ export class ApprovalService {
       if (target.status !== 'submitted') throw new BusinessError('只能撤回审批中的申请');
 
       const submitter = await txService.userRepo.findOneBy({ id: userId });
+      // E6：撤回前收集当前 pending task 的审批人，事务后通知（否则审批人看到任务消失无信号）
+      if (target.approvalInstanceId) {
+        const pendingTasks = await txService.taskRepo.find({
+          where: { instanceId: target.approvalInstanceId, status: 'pending' },
+        });
+        pendingApproverIds = [...new Set(pendingTasks.map((t: ApprovalTask) => t.approverId))];
+      }
+
       const instance = await txService.approvalInstanceService.withdraw(targetType, targetId, userId, submitter?.realName || '');
       await txService.recordRepo.save(txService.recordRepo.create({
         targetType: targetType as TargetType,
@@ -578,6 +626,24 @@ export class ApprovalService {
         await repo!.update(targetId, updateData);
       }
     });
+
+    // E6：事务提交后通知原审批人（申请已撤回）
+    if (pendingApproverIds.length > 0) {
+      const notifier = new NotificationService();
+      const labels: Record<string, string> = { timesheet: '工时', overtime: '加班', weekly_report: '周报', permission_request: '权限申请' };
+      const label = labels[targetType] || '申请';
+      try {
+        await notifier.createBatch(pendingApproverIds, {
+          type: 'system',
+          title: `${label}申请已撤回`,
+          content: `${submitterName} 撤回了一个 ${label} 申请（待您审批的条目已移除）`,
+          targetType,
+          targetId,
+        });
+      } catch {
+        // 通知失败不影响业务
+      }
+    }
 
     return { success: true };
   }

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import { SystemService } from '../services/systemService';
 import { ApprovalFlowEngine } from '../services/approvalFlowService';
 import { AuditService } from '../services/auditService';
@@ -389,11 +390,12 @@ router.put('/users/:id/reset-password', requirePermission('system:user:manage'),
   try {
     const id = parsePositiveInt(req.params.id, 'id');
     const body = req.body as Record<string, unknown>;
-    // 未指定密码时生成随机密码（不再默认弱密码 123456）
+    // 未指定密码时生成符合策略的强随机密码（含字母+数字，至少 12 位）
     let password = parseString(body.password, 'password', { max: 128 });
     let generated = false;
     if (!password) {
-      password = Math.random().toString(36).slice(2, 10) + Math.floor(Math.random() * 90 + 10);
+      // base64url 字符集含字母数字，长度 12 足以满足 min 8 + 字母数字混合要求
+      password = crypto.randomBytes(12).toString('base64url');
       generated = true;
     }
     await systemService.resetPassword(id, password);
@@ -645,8 +647,6 @@ router.delete('/approval-flows/:id', requirePermission('system:approval_flow:man
   }
 });
 
-export const systemRoutes = router;
-
 // ========== 系统设置 ==========
 // 所有登录用户可读设置
 router.get('/settings', async (_req, res, next) => {
@@ -693,3 +693,6 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
     next(error);
   }
 });
+
+// 导出必须在所有路由注册之后，否则 app.use 读取的 router 可能缺失后续挂载的路由。
+export const systemRoutes = router;

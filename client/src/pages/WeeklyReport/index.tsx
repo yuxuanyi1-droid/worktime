@@ -8,6 +8,8 @@ import { timesheetApi } from '../../api/timesheet';
 import type { Timesheet, WeeklyReport } from '../../types';
 import { Input } from 'antd';
 import { usePermission } from '../../hooks/usePermission';
+import { sanitizeHtml } from '../../utils/sanitize';
+import { showError } from '../../utils/request';
 
 dayjs.extend(isoWeek);
 
@@ -37,8 +39,10 @@ function RichTextEditor({
   const editorRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (editorRef.current && editorRef.current.innerHTML !== value) {
-      editorRef.current.innerHTML = value;
+    // 渲染前净化：服务端返回的内容可能含恶意 HTML（存储型 XSS），用 DOMPurify 过滤后再写入
+    const safe = sanitizeHtml(value);
+    if (editorRef.current && editorRef.current.innerHTML !== safe) {
+      editorRef.current.innerHTML = safe;
     }
   }, [value]);
 
@@ -91,6 +95,8 @@ export default function WeeklyReportPage() {
   const [summary, setSummary] = useState('');
   const [weekHours, setWeekHours] = useState<any>(null);
   const [saving, setSaving] = useState(false);
+  // 竞态守卫：快速切周时只接受最新一次请求的响应，避免旧响应覆盖新周数据
+  const loadReqId = useRef(0);
   const { hasPermission } = usePermission();
 
   const canCreate = hasPermission('weekly_report:create');
@@ -98,13 +104,16 @@ export default function WeeklyReportPage() {
 
   useEffect(() => {
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekStart]);
 
   const loadData = async () => {
+    const reqId = ++loadReqId.current;
     const ws = weekStart.format('YYYY-MM-DD');
     const we = weekStart.add(6, 'day').format('YYYY-MM-DD');
     try {
       const res = await weeklyReportApi.getByWeek(ws);
+      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃本次响应
       if (res.data) {
         setReport(res.data);
         setContent(res.data.content || '');
@@ -116,8 +125,10 @@ export default function WeeklyReportPage() {
       }
       // 加载本周工时
       const hoursRes = await timesheetApi.getWeeklySummary(ws, we);
+      if (reqId !== loadReqId.current) return; // 防止 getWeeklySummary 旧响应覆盖新周统计
       if (hoursRes.data) setWeekHours(hoursRes.data);
     } catch (e: any) {
+      if (reqId !== loadReqId.current) return;
       message.error(e?.response?.data?.message || '周报数据加载失败');
     }
   };
@@ -130,7 +141,8 @@ export default function WeeklyReportPage() {
       await weeklyReportApi.save({
         weekStart: ws,
         weekEnd: we,
-        content,
+        // 保存前净化（纵深防御）：入库即干净，审批人/查看者渲染时无需担心 XSS
+        content: sanitizeHtml(content),
         summary,
         totalHours: weekHours?.totalHours || 0,
       });
@@ -156,10 +168,6 @@ export default function WeeklyReportPage() {
     }
   };
 
-  const getErrorMessage = (error: unknown, fallback: string) => {
-    const e = error as { response?: { data?: { message?: string } }; message?: string };
-    return e?.response?.data?.message || e?.message || fallback;
-  };
 
   const prevWeek = () => setWeekStart(prev => prev.subtract(7, 'day'));
   const nextWeek = () => setWeekStart(prev => prev.add(7, 'day'));
@@ -195,7 +203,7 @@ export default function WeeklyReportPage() {
       setContent(generated);
       message.success('已从当前周工时生成摘要');
     } catch (error) {
-      message.error(getErrorMessage(error, '工时摘要生成失败'));
+      showError(error, '工时摘要生成失败');
     }
   };
 

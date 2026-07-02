@@ -11,9 +11,10 @@ import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { WeeklyReport } from '../entities/WeeklyReport';
 import bcrypt from 'bcryptjs';
-import { In } from 'typeorm';
+import { In, Like } from 'typeorm';
 import { permissionDefinitions } from '../config/permissionDefinitions';
 import { BusinessError } from '../utils/errors';
+import { validatePassword } from '../utils/validation';
 
 export class SystemService {
   constructor(private manager?: EntityManager) {}
@@ -53,8 +54,16 @@ export class SystemService {
   }
 
   async deleteDepartment(id: number) {
+    // M5：检查用户 + 子组（原实现只查用户，删除有子组的部门会留悬挂引用）
     const userCount = await this.userRepo.count({ where: { department: { id } } });
     if (userCount > 0) throw new BusinessError('该部门下还有用户，无法删除');
+    const groupCount = await this.groupRepo.count({ where: { departmentId: id } });
+    if (groupCount > 0) throw new BusinessError('该部门下还有分组，无法删除');
+    // 检查是否有项目 SE 分配到该部门的分组
+    const seQb = this.projectSERepo.createQueryBuilder('se')
+      .innerJoin('se.group', 'g', 'g.departmentId = :deptId', { deptId: id });
+    const seCount = await seQb.getCount();
+    if (seCount > 0) throw new BusinessError('该部门分组下还有项目 SE 分配，无法删除');
     return this.deptRepo.delete(id);
   }
 
@@ -216,10 +225,22 @@ export class SystemService {
   }
 
   async deleteGroup(id: number) {
+    const group = await this.groupRepo.findOne({ where: { id } });
+    if (!group) throw new BusinessError('分组不存在');
+    // M5：检查直接子组（已覆盖）+ 后代组（沿 path 树，原实现只查一级 parentId 会漏掉孙级）
     const childCount = await this.groupRepo.count({ where: { parentId: id } });
     if (childCount > 0) throw new BusinessError('该分组下还有子分组，无法删除');
+    if (group.path) {
+      const descendantCount = await this.groupRepo.count({
+        where: { path: Like(`${group.path}/%`) },
+      });
+      if (descendantCount > 0) throw new BusinessError('该分组下还有后代分组，无法删除');
+    }
     const userCount = await this.userRepo.count({ where: { group: { id } } });
     if (userCount > 0) throw new BusinessError('该分组下还有用户，无法删除');
+    // 检查是否有项目 SE 分配到该组（删除会留悬挂引用）
+    const seCount = await this.projectSERepo.count({ where: { groupId: id } });
+    if (seCount > 0) throw new BusinessError('该分组下还有项目 SE 分配，无法删除');
     return this.groupRepo.delete(id);
   }
 
@@ -265,27 +286,46 @@ export class SystemService {
   }
 
   async createUser(data: { username: string; password: string; realName: string; email?: string; phone?: string; departmentId?: number; groupId?: number; roleIds?: number[] }) {
+    // 密码策略校验
+    const policyError = validatePassword(data.password);
+    if (policyError) throw new BusinessError(policyError);
+
     const existing = await this.userRepo.findOne({ where: { username: data.username } });
     if (existing) throw new BusinessError('用户名已存在');
 
-    return AppDataSource.transaction(async (manager) => {
-      const txService = new SystemService(manager);
-      const userData: any = {
-        username: data.username,
-        password: await bcrypt.hash(data.password, 10),
-        realName: data.realName,
-        email: data.email,
-        phone: data.phone,
-      };
-      if (data.departmentId) userData.department = { id: data.departmentId };
-      if (data.groupId) userData.group = { id: data.groupId };
-      if (data.roleIds?.length) {
-        userData.roles = await txService.roleRepo.findBy({ id: In(data.roleIds) });
-      }
+    try {
+      return await AppDataSource.transaction(async (manager) => {
+        const txService = new SystemService(manager);
+        const userData: any = {
+          username: data.username,
+          password: await bcrypt.hash(data.password, 12),
+          realName: data.realName,
+          email: data.email,
+          phone: data.phone,
+          // 管理员创建的用户，首次登录必须改密（避免管理员设定的初始密码长期留存）
+          mustChangePassword: true,
+        };
+        if (data.departmentId) userData.department = { id: data.departmentId };
+        if (data.groupId) userData.group = { id: data.groupId };
+        if (data.roleIds?.length) {
+          userData.roles = await txService.roleRepo.findBy({ id: In(data.roleIds) });
+        }
 
-      const user = txService.userRepo.create(userData);
-      return txService.userRepo.save(user);
-    });
+        const user = txService.userRepo.create(userData);
+        return txService.userRepo.save(user);
+      });
+    } catch (e: any) {
+      // 并发创建同名用户时，应用层 findOne 检查可能被绕过，依赖 username unique index 兜底。
+      // 精确判断是 username 冲突（而非 email 等其他唯一约束），避免误报。
+      const msg = String(e?.message || '');
+      if (msg.includes('UNIQUE constraint failed') && msg.includes('users.username')) {
+        throw new BusinessError('用户名已存在');
+      }
+      if (msg.includes('UNIQUE constraint failed') && msg.includes('users.email')) {
+        throw new BusinessError('邮箱已被使用');
+      }
+      throw e;
+    }
   }
 
   async updateUser(id: number, data: { realName?: string; email?: string; phone?: string; status?: number; departmentId?: number; groupId?: number; roleIds?: number[] }) {
@@ -304,23 +344,35 @@ export class SystemService {
     });
   }
 
+  /**
+   * 禁用用户（软删除）：status=0 使其无法登录，tokenVersion+1 使已签发 token 立即失效。
+   * 不做硬删除——SQLite 无法 ALTER 已有外键约束，硬删除会因 11+ 张关联表（审计日志、通知、
+   * 公告、审批记录等）缺 onDelete 而触发 FK constraint failed；且硬删除会丢失历史数据。
+   * 软删除保留全部历史记录，是安全且可逆的方案（可通过 updateUser 重新启用）。
+   */
   async deleteUser(id: number) {
-    // 检查关联工时/加班/周报，避免硬删除导致历史数据断裂或外键报错
-    const [timesheetCount, overtimeCount, weeklyCount] = await Promise.all([
-      this.timesheetRepo.count({ where: { userId: id } }),
-      this.overtimeRepo.count({ where: { userId: id } }),
-      this.weeklyReportRepo.count({ where: { userId: id } }),
-    ]);
-    if (timesheetCount + overtimeCount + weeklyCount > 0) {
-      throw new BusinessError('该用户存在工时/加班/周报记录，无法删除（建议改为禁用）');
-    }
-    return this.userRepo.delete(id);
+    return AppDataSource.transaction(async (manager) => {
+      const txService = new SystemService(manager);
+      const user = await txService.userRepo.findOne({ where: { id } });
+      if (!user) throw new BusinessError('用户不存在');
+      if (user.status === 0) return user; // 已禁用，幂等
+      user.status = 0;
+      user.tokenVersion += 1; // 立即踢下线，使其现有会话失效
+      return txService.userRepo.save(user);
+    });
   }
 
   async resetPassword(id: number, newPassword: string) {
+    // 密码策略校验
+    const policyError = validatePassword(newPassword);
+    if (policyError) throw new BusinessError(policyError);
+
     const user = await this.userRepo.findOne({ where: { id } });
     if (!user) throw new BusinessError('用户不存在');
-    user.password = await bcrypt.hash(newPassword, 10);
+    user.password = await bcrypt.hash(newPassword, 12);
+    // 管理员重置密码后：强制该用户下次登录改密，并使旧会话立即失效
+    user.mustChangePassword = true;
+    user.tokenVersion += 1;
     return this.userRepo.save(user);
   }
 
@@ -344,13 +396,18 @@ export class SystemService {
   }
 
   async initPermissions() {
+    // L2：批量化，避免循环内逐条 findOne+save 的 N 次 round trip
+    const existing = await this.permRepo.find();
+    const existingMap = new Map(existing.map(p => [p.code, p]));
+    const toInsert: any[] = [];
+    const toUpdate: any[] = [];
     for (const def of permissionDefinitions) {
-      const existing = await this.permRepo.findOne({ where: { code: def.code } });
-      if (!existing) {
-        await this.permRepo.save(this.permRepo.create(def));
+      const cur = existingMap.get(def.code);
+      if (!cur) {
+        toInsert.push(this.permRepo.create(def));
       } else {
-        await this.permRepo.save({
-          ...existing,
+        toUpdate.push({
+          ...cur,
           name: def.name,
           module: def.module,
           action: def.action,
@@ -359,6 +416,8 @@ export class SystemService {
         });
       }
     }
+    if (toInsert.length) await this.permRepo.save(toInsert);
+    if (toUpdate.length) await this.permRepo.save(toUpdate);
     return this.permRepo.find();
   }
 

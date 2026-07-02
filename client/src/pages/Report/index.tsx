@@ -20,7 +20,7 @@ import { DownloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { reportApi } from '../../api/report';
 import { DepartmentReport, GroupReport, OvertimeReport, PersonalReport, ProjectReport, ReportScope } from '../../types';
-import request from '../../utils/request';
+import request, { showError } from '../../utils/request';
 import LazyEChart from '../../components/Charts/LazyEChart';
 
 const { Title, Text } = Typography;
@@ -517,7 +517,7 @@ export default function Report() {
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      message.error(getErrorMessage(err, '导出失败'));
+      showError(err, '导出失败');
     }
   };
 
@@ -540,7 +540,7 @@ export default function Report() {
                 style={{ width: 200 }}
                 options={(scope?.groups || []).map((group) => ({ label: group.name, value: group.id }))}
                 value={selectedGroup}
-                onChange={setSelectedGroup}
+                onChange={(v) => { setSelectedGroup(v); setLoadedTabs(new Set()); }}
               />
             </Col>
           )}
@@ -556,6 +556,7 @@ export default function Report() {
                   onChange={(value) => {
                     setSelectedDept(value);
                     setSelectedDeptGroup(undefined);
+                    setLoadedTabs(new Set());
                   }}
                 />
               </Col>
@@ -567,7 +568,7 @@ export default function Report() {
                   disabled={tabKey === 'department' && !selectedDept}
                   options={groupsForDept(selectedDept).map((group) => ({ label: group.name, value: group.id }))}
                   value={selectedDeptGroup}
-                  onChange={setSelectedDeptGroup}
+                  onChange={(v) => { setSelectedDeptGroup(v); setLoadedTabs(new Set()); }}
                 />
               </Col>
             </>
@@ -584,6 +585,7 @@ export default function Report() {
                     setSelectedProj(value);
                     setSelectedProjDept(undefined);
                     setSelectedProjGroup(undefined);
+                    setLoadedTabs(new Set());
                     setProjData(null);
                   }}
                 />
@@ -598,6 +600,7 @@ export default function Report() {
                   onChange={(value) => {
                     setSelectedProjDept(value);
                     setSelectedProjGroup(undefined);
+                    setLoadedTabs(new Set());
                   }}
                 />
               </Col>
@@ -608,7 +611,7 @@ export default function Report() {
                   allowClear
                   options={projectGroups.map((group) => ({ label: group.name, value: group.id }))}
                   value={selectedProjGroup}
-                  onChange={setSelectedProjGroup}
+                  onChange={(v) => { setSelectedProjGroup(v); setLoadedTabs(new Set()); }}
                 />
               </Col>
             </>

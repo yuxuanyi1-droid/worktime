@@ -15,11 +15,12 @@ const WEAK_SECRETS = new Set([
   'jwt-secret',
   'your-secret-key',
   'changeme',
+  'please-generate-a-strong-random-secret-at-least-32-chars-long', // .env.example 占位串
 ]);
 if (WEAK_SECRETS.has(jwtSecret)) {
   throw new Error(`JWT_SECRET 是已知的弱密钥/占位符（${jwtSecret}），请生成一个至少 32 字符的随机密钥`);
 }
-if (jwtSecret.length < 16) {
+if (jwtSecret.length < 32) {
   throw new Error(`JWT_SECRET 长度不足（${jwtSecret.length} 字符），请使用至少 32 字符的随机密钥`);
 }
 

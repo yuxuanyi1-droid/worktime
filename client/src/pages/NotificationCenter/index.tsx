@@ -158,7 +158,12 @@ export default function NotificationCenter() {
           )}
           <Button type="link" size="small" danger onClick={async () => {
             await notificationApi.delete(r.id);
-            loadNotifications();
+            // 删除后若当前页变空（删的是该页最后一条），回退到上一页，避免停留在空页
+            if (notifications.length <= 1 && notifPage > 1) {
+              setNotifPage((p) => p - 1);
+            } else {
+              loadNotifications();
+            }
           }}>删除</Button>
         </Space>
       ),

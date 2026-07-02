@@ -22,5 +22,5 @@ export const loginLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { code: 429, message: '登录尝试过于频繁，请稍后再试' },
+  message: { code: 429, message: '当前网络登录请求过多，请稍后再试（IP 限流）' },
 });

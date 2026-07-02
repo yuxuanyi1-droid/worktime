@@ -17,6 +17,8 @@ export interface UserInfo {
   group: { id: number; name: string } | null;
   roles: { id: number; name: string; label: string }[];
   permissions: string[];
+  /** 是否需要修改初始密码（seed 默认账号 / 管理员重置密码后为 true） */
+  mustChangePassword?: boolean;
 }
 
 export interface LoginResult {

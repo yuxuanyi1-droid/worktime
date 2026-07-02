@@ -3,10 +3,13 @@ import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { OvertimeApplication, OvertimeType } from '../entities/OvertimeApplication';
 import { Between, In } from 'typeorm';
+import { SystemSetting } from '../entities/SystemSetting';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationService } from './notificationService';
 import { User } from '../entities/User';
 import { AccessPolicyService } from './accessPolicyService';
+import { validateDailyHours, validateNotFutureDate } from '../utils/validation';
+import dayjs from 'dayjs';
 
 export class OvertimeService {
   constructor(private manager?: EntityManager) {}
@@ -16,8 +19,39 @@ export class OvertimeService {
   private get notificationService() { return new NotificationService(this.manager); }
   private get accessPolicy() { return new AccessPolicyService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get settingRepo() { return (this.manager ?? AppDataSource).getRepository(SystemSetting); }
+
+  /**
+   * E5：加班业务校验——月份锁定（复用 timesheet_lock_day 设置）、未来日期拦截、单条≤24h。
+   * 与工时锁定逻辑一致，避免加班绕过提交窗口限制。
+   */
+  private async validateOvertime(data: { date?: string; hours?: number }) {
+    if (!data.date) throw new BusinessError('加班日期不能为空');
+    if (typeof data.hours !== 'number' || data.hours <= 0) throw new BusinessError('加班时长必须大于0');
+    if (data.hours > 24) throw new BusinessError('单条加班时长不能超过24小时');
+    // 未来日期拦截
+    validateNotFutureDate(data.date, '加班日期');
+    // 月份锁定
+    const lockSetting = await this.settingRepo.findOne({ where: { key: 'timesheet_lock_day' } });
+    if (lockSetting?.value) {
+      const lockDay = parseInt(lockSetting.value, 10);
+      if (!isNaN(lockDay) && lockDay >= 1 && lockDay <= 28) {
+        const now = dayjs();
+        const currentMonthStart = now.startOf('month');
+        const previousMonthStart = currentMonthStart.subtract(1, 'month');
+        const d = dayjs(data.date);
+        const isOlderThanPreviousMonth = d.isBefore(previousMonthStart, 'day');
+        const isPreviousMonthAfterLockDay = d.isBefore(currentMonthStart, 'day') && now.date() > lockDay;
+        if (isOlderThanPreviousMonth || isPreviousMonthAfterLockDay) {
+          throw new BusinessError(`${data.date} 是上月的加班，每月${lockDay}号后不允许提交上月加班`);
+        }
+      }
+    }
+  }
 
   async create(data: { userId: number; date?: string; overtimeType?: string; hours?: number; reason?: string; projectId?: number }) {
+    // E5：加班业务校验
+    await this.validateOvertime(data);
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
     const record = this.repo.create({
       userId: data.userId,
@@ -32,6 +66,8 @@ export class OvertimeService {
   }
 
   async createAndSubmit(data: { userId: number; date?: string; overtimeType?: string; hours?: number; reason?: string; projectId?: number }) {
+    // E5：加班业务校验（事务前校验，避免无效数据进入事务）
+    await this.validateOvertime(data);
     // 整体事务：create + submit 原子化，任一失败整体回滚，避免孤儿记录或误删
     const notifications: { approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string }[] = [];
     let createdId: number;
@@ -105,6 +141,10 @@ export class OvertimeService {
     if (!record) throw new BusinessError('记录不存在');
     if (record.userId !== userId) throw new BusinessError('只能修改自己的加班记录');
     if (record.status !== 'draft') throw new BusinessError('仅草稿状态可修改');
+
+    // F3：对变更后的 date/hours 校验（防止通过 update 绕过未来日期/锁定/时长限制）
+    const effectiveData = { date: data.date ?? record.date, hours: data.hours ?? record.hours };
+    await this.validateOvertime(effectiveData);
 
     if (data.date !== undefined) record.date = data.date;
     if (data.overtimeType !== undefined) record.overtimeType = data.overtimeType as OvertimeType;

@@ -27,7 +27,7 @@ export class ApprovalRecord {
   approverName!: string;
 
   @Column({ type: 'varchar', length: 20 })
-  action!: 'approve' | 'reject' | 'cc' | 'withdraw';
+  action!: 'approve' | 'reject' | 'cc' | 'withdraw' | 'skip';
 
   @Column({ type: 'text', nullable: true })
   comment!: string;

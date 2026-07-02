@@ -36,6 +36,7 @@ import {
   statusMap,
 } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
+import { showError } from '../../utils/request';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -64,11 +65,6 @@ const grantStatusMap: Record<string, { label: string; color: string }> = {
   revoked: { label: '已撤销', color: 'default' },
   expired: { label: '已过期', color: 'warning' },
 };
-
-function getErrorMessage(error: unknown, fallback: string) {
-  const e = error as { response?: { data?: { message?: string } }; message?: string };
-  return e?.response?.data?.message || e?.message || fallback;
-}
 
 function scopeText(scopeType?: string, scopeName?: string | null) {
   if (!scopeType) return '-';
@@ -276,7 +272,7 @@ function PermissionRequestPage() {
       if (groupRes.data) setGroups(groupRes.data);
       if (projectRes.data) setProjects(projectRes.data as Project[]);
     } catch (error) {
-      message.error(getErrorMessage(error, '权限申请基础数据加载失败'));
+      showError(error, '权限申请基础数据加载失败');
     } finally {
       setBaseLoading(false);
     }
@@ -288,7 +284,7 @@ function PermissionRequestPage() {
       const res = await permissionRequestApi.getMyRequests({ pageSize: 100 });
       if (res.data) setMyRequests(res.data.list);
     } catch (error) {
-      message.error(getErrorMessage(error, '我的权限申请加载失败'));
+      showError(error, '我的权限申请加载失败');
       setMyRequests([]);
     } finally {
       setLoading(false);
@@ -302,7 +298,7 @@ function PermissionRequestPage() {
       const res = await permissionRequestApi.getAllRequests({ pageSize: 100 });
       if (res.data) setAllRequests(res.data.list);
     } catch (error) {
-      message.error(getErrorMessage(error, '全部权限申请加载失败'));
+      showError(error, '全部权限申请加载失败');
       setAllRequests([]);
     } finally {
       setAllLoading(false);
@@ -316,6 +312,7 @@ function PermissionRequestPage() {
       if (res.data) setUsers(res.data);
     } catch {
       setUsers([]);
+      message.error('用户列表加载失败，授权用户筛选可能不可用');
     }
   };
 
@@ -330,7 +327,7 @@ function PermissionRequestPage() {
       });
       if (res.data) setGrants(res.data.list);
     } catch (error) {
-      message.error(getErrorMessage(error, '授权记录加载失败'));
+      showError(error, '授权记录加载失败');
       setGrants([]);
     } finally {
       setGrantLoading(false);
@@ -378,7 +375,7 @@ function PermissionRequestPage() {
           await loadMyRequests();
           setTabKey('my');
         } catch (error) {
-          message.error(getErrorMessage(error, '权限申请提交失败'));
+          showError(error, '权限申请提交失败');
         } finally {
           setSubmitLoading(false);
         }
@@ -393,7 +390,7 @@ function PermissionRequestPage() {
       await loadMyRequests();
       if (canViewAll) await loadAllRequests();
     } catch (error) {
-      message.error(getErrorMessage(error, '撤回失败'));
+      showError(error, '撤回失败');
     }
   };
 
@@ -403,7 +400,7 @@ function PermissionRequestPage() {
       message.success('授权已撤销');
       await loadGrants();
     } catch (error) {
-      message.error(getErrorMessage(error, '撤销授权失败'));
+      showError(error, '撤销授权失败');
     }
   };
 

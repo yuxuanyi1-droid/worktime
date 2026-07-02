@@ -35,6 +35,47 @@ export class AccessPolicyService {
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
   private get grantRepo() { return (this.manager ?? AppDataSource).getRepository(UserPermissionGrant); }
 
+  /**
+   * 进程内 active grants 缓存：key=userId，value={grants, expireAt}。
+   * 仅对默认连接（非事务）的 service 实例生效——单例实例（auth/permission/accessControl 中间件等）
+   * 跨请求复用，本缓存让一次请求内对同一用户的多次权限/作用域检查（原本是按 permissionCode 循环查询，
+   * 典型报表接口可达上百次）退化为「首次 1 次查询 + 后续内存过滤」。
+   * 事务内创建的 service 实例（new AccessPolicyService(manager)）不共享本缓存，避免读到事务快照脏数据。
+   * TTL 保证权限授予/撤销在最多 TTL 后对所有人可见。
+   */
+  private static readonly GRANT_CACHE_TTL_MS = 30_000;
+  private static grantCache = new Map<number, { grants: UserPermissionGrant[]; expireAt: number }>();
+
+  /** 读取某用户的全部 active grants（带 TTL 缓存，仅默认连接生效）。 */
+  private async loadAllActiveGrants(userId: number): Promise<UserPermissionGrant[]> {
+    // 事务内不使用缓存：事务连接读到的数据快照与默认连接不同，缓存会引入脏读。
+    if (!this.manager) {
+      const cached = AccessPolicyService.grantCache.get(userId);
+      const now = Date.now();
+      if (cached && cached.expireAt > now) return cached.grants;
+      const grants = await this.grantRepo.createQueryBuilder('grant')
+        .where('grant.userId = :userId', { userId })
+        .andWhere('grant.status = :status', { status: 'active' })
+        .andWhere('(grant.startsAt IS NULL OR grant.startsAt <= :now)', { now: new Date() })
+        .andWhere('(grant.expiresAt IS NULL OR grant.expiresAt > :now)', { now: new Date() })
+        .getMany();
+      AccessPolicyService.grantCache.set(userId, { grants, expireAt: now + AccessPolicyService.GRANT_CACHE_TTL_MS });
+      return grants;
+    }
+    return this.grantRepo.createQueryBuilder('grant')
+      .where('grant.userId = :userId', { userId })
+      .andWhere('grant.status = :status', { status: 'active' })
+      .andWhere('(grant.startsAt IS NULL OR grant.startsAt <= :now)', { now: new Date() })
+      .andWhere('(grant.expiresAt IS NULL OR grant.expiresAt > :now)', { now: new Date() })
+      .getMany();
+  }
+
+  /** 权限授予发生变更时由 governance 层调用，使下一次读取反映最新状态。 */
+  static invalidateGrantCache(userId?: number) {
+    if (userId === undefined) AccessPolicyService.grantCache.clear();
+    else AccessPolicyService.grantCache.delete(userId);
+  }
+
   isAdmin(viewer: AccessViewer) {
     return viewer.roles.includes('admin');
   }
@@ -115,21 +156,15 @@ export class AccessPolicyService {
   private async hasGlobalGrant(viewer: AccessViewer, codes: string[] = []) {
     if (!codes.length) return false;
     if (this.isAdmin(viewer)) return true;
-    for (const code of codes) {
-      const grants = await this.getActiveGrants(viewer.id, code);
-      if (grants.some((grant) => grant.scopeType === 'global')) return true;
-    }
-    return false;
+    const codeSet = new Set(codes);
+    const grants = await this.getActiveGrants(viewer.id);
+    return grants.some((grant) => codeSet.has(grant.permissionCode) && grant.scopeType === 'global');
   }
 
   async getActiveGrants(userId: number, permissionCode?: string) {
-    const grants = await this.grantRepo.createQueryBuilder('grant')
-      .where('grant.userId = :userId', { userId })
-      .andWhere('grant.status = :status', { status: 'active' })
-      .andWhere('(grant.startsAt IS NULL OR grant.startsAt <= :now)', { now: new Date() })
-      .andWhere('(grant.expiresAt IS NULL OR grant.expiresAt > :now)', { now: new Date() });
-    if (permissionCode) grants.andWhere('grant.permissionCode = :permissionCode', { permissionCode });
-    return grants.getMany();
+    const grants = await this.loadAllActiveGrants(userId);
+    if (!permissionCode) return grants;
+    return grants.filter((grant) => grant.permissionCode === permissionCode);
   }
 
   async hasScopedGrant(viewer: AccessViewer, permissionCode: string, scopeType: string, scopeId?: number | null) {
@@ -144,12 +179,14 @@ export class AccessPolicyService {
 
   private async getGrantScopeIds(userId: number, permissionCodes: string[], scopeType: 'department' | 'group' | 'project') {
     const ids = new Set<number>();
-    for (const permissionCode of permissionCodes) {
-      const grants = await this.getActiveGrants(userId, permissionCode);
-      for (const grant of grants) {
-        if (grant.scopeType === 'global') return null;
-        if (grant.scopeType === scopeType && grant.scopeId) ids.add(grant.scopeId);
-      }
+    // 一次性取该用户全部 active grants（带缓存），在内存里按 codes 集合过滤，
+    // 避免对每个 permissionCode 各发一次查询。
+    const codeSet = new Set(permissionCodes);
+    const grants = await this.getActiveGrants(userId);
+    for (const grant of grants) {
+      if (!codeSet.has(grant.permissionCode)) continue;
+      if (grant.scopeType === 'global') return null;
+      if (grant.scopeType === scopeType && grant.scopeId) ids.add(grant.scopeId);
     }
     return ids;
   }

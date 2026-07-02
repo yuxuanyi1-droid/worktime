@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Alert, Tag, Typography } from 'antd';
+import { Alert, Tag, Typography, Spin } from 'antd';
 import {
   ClockCircleOutlined,
   CheckCircleOutlined,
@@ -136,6 +136,7 @@ export default function Dashboard() {
   ].filter(Boolean) as { icon: React.ReactNode; value: string; label: string; color: string; bg: string }[];
 
   return (
+    <Spin spinning={loading}>
     <div>
       {error && (
         <Alert
@@ -312,5 +313,6 @@ export default function Dashboard() {
         </div>
       </div>
     </div>
+    </Spin>
   );
 }

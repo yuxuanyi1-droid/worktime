@@ -5,6 +5,7 @@ import { ApprovalInstance, ApprovalInstanceStepSnapshot } from '../entities/Appr
 import { ApprovalTask } from '../entities/ApprovalTask';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
 import { ApprovalTargetType } from '../entities/ApprovalFlowVersion';
+import { User } from '../entities/User';
 import { ApprovalFlowEngine } from './approvalFlowService';
 
 export class ApprovalInstanceService {
@@ -13,6 +14,7 @@ export class ApprovalInstanceService {
   private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
   private get taskRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalTask); }
   private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
+  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
   private get flowEngine() { return new ApprovalFlowEngine(this.manager); }
 
   async start(params: {
@@ -128,10 +130,38 @@ export class ApprovalInstanceService {
     })));
     await this.taskRepo.save(tasks);
 
+    // R5：检查首步审批人是否全部已禁用。若是，自动跳过首步并推进（避免实例一启动就卡死）。
+    const firstStepApprovers = steps[0].approvers.map(a => a.id);
+    const activeFirstApprovers = await this.filterActiveApprovers(firstStepApprovers);
+    if (activeFirstApprovers.length === 0 && steps.length > 0) {
+      const firstStepOrder = steps[0].stepOrder;
+      const firstTasks = tasks.filter(t => t.stepOrder === firstStepOrder);
+      await this.taskRepo.update(
+        { id: In(firstTasks.map(t => t.id)) },
+        { status: 'skipped', action: 'skip', comment: '审批人已禁用，自动跳过', actedAt: new Date() },
+      );
+      await this.recordSkipAudit(instance, firstTasks[0], new Date());
+      // 若有后续步骤则推进；否则自动通过
+      if (steps.length > 1) {
+        const secondStepOrder = steps[1].stepOrder;
+        const secondTasks = tasks.filter(t => t.stepOrder === secondStepOrder);
+        await this.taskRepo.update({ id: In(secondTasks.map(t => t.id)) }, { status: 'pending' });
+        await this.instanceRepo.update({ id: instance.id }, { currentStepOrder: secondStepOrder });
+        instance.currentStepOrder = secondStepOrder;
+        const secondActive = await this.filterActiveApprovers(secondTasks.map(t => t.approverId));
+        return { status: 'submitted' as const, instance, firstApproverIds: secondActive };
+      }
+      // 只有一个步骤且审批人全禁用：自动通过
+      await this.instanceRepo.update({ id: instance.id }, { status: 'approved', currentStepOrder: null, finishedAt: new Date() });
+      instance.status = 'approved';
+      instance.currentStepOrder = null;
+      return { status: 'approved' as const, instance, firstApproverIds: [] as number[] };
+    }
+
     return {
       status: 'submitted' as const,
       instance,
-      firstApproverIds: steps[0].approvers.map(approver => approver.id),
+      firstApproverIds: activeFirstApprovers.length ? activeFirstApprovers : steps[0].approvers.map(approver => approver.id),
     };
   }
 
@@ -361,12 +391,109 @@ export class ApprovalInstanceService {
     if (((r as any).affected ?? 1) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
     instance.currentStepOrder = nextStepOrder;
 
+    // R5：自动跳过已禁用（status=0）的审批人，避免实例因审批人被禁用而永久卡死。
+    // 若本步骤所有审批人都已禁用，则整步骤自动通过并递归推进到下一步。
+    const activeApproverIds = await this.filterActiveApprovers(stepTasks.map(t => t.approverId));
+    if (activeApproverIds.length === 0) {
+      // 所有审批人均已禁用：标记本步骤 task 为 auto-skipped，并写 ApprovalRecord 补全审计轨迹
+      await this.taskRepo.update(
+        { id: In(stepTasks.map(t => t.id)) },
+        { status: 'skipped', action: 'skip', comment: '审批人已禁用，自动跳过', actedAt: now },
+      );
+      await this.recordSkipAudit(instance, stepTasks[0], now);
+      return this.advanceAfterStep(instance, now, actingTask);
+    }
+
     return {
       status: 'submitted' as const,
       instance,
       task: actingTask,
-      nextApproverIds: stepTasks.map(task => task.approverId),
+      nextApproverIds: activeApproverIds,
     };
+  }
+
+  /**
+   * 过滤出仍启用（status=1）的审批人 id。用于推进步骤时跳过已禁用的审批人。
+   */
+  private async filterActiveApprovers(approverIds: number[]): Promise<number[]> {
+    if (!approverIds.length) return [];
+    const users = await this.userRepo.find({
+      where: { id: In(approverIds), status: 1 },
+      select: ['id'],
+    });
+    return users.map(u => u.id);
+  }
+
+  /**
+   * E1：为自动跳过的步骤写一条 ApprovalRecord，补全审计轨迹（否则审批历史会有步骤缺口）。
+   * 与 start 的 auto-pass 路径写 record 的行为一致。
+   */
+  private async recordSkipAudit(instance: ApprovalInstance, task: ApprovalTask, _now: Date) {
+    await this.recordRepo.save(this.recordRepo.create({
+      instanceId: instance.id,
+      targetType: instance.targetType,
+      targetId: instance.targetId,
+      approverId: 0, // 0 表示系统自动操作
+      approverName: '系统',
+      action: 'skip',
+      comment: '审批人已禁用，自动跳过',
+      stepOrder: task.stepOrder,
+      stepType: task.stepType,
+      stepLabel: task.stepLabel || '自动跳过',
+      // createdAt 由 @CreateDateColumn 自动填充
+    }));
+  }
+
+  /**
+   * R5：当前步骤因审批人全部禁用而自动跳过后，递归推进到下一步。
+   * 逻辑复用 act() 末尾的推进流程，以系统身份（actedByName='系统'）自动完成流转。
+   */
+  private async advanceAfterStep(
+    instance: ApprovalInstance,
+    now: Date,
+    actingTask: ApprovalTask,
+  ): Promise<{ status: 'approved' | 'submitted'; instance: ApprovalInstance; task: ApprovalTask; nextApproverIds: number[] }> {
+    // currentStepOrder 此时一定有值（刚由 act 推进设置），非空断言安全
+    const currentOrder = instance.currentStepOrder!;
+    const nextTasks = await this.taskRepo.find({
+      where: { instanceId: instance.id, stepOrder: MoreThan(currentOrder), status: 'waiting' },
+      order: { stepOrder: 'ASC', id: 'ASC' },
+    });
+    const nextStepOrder = nextTasks[0]?.stepOrder ?? null;
+
+    if (!nextStepOrder) {
+      const r = await this.instanceRepo.update(
+        { id: instance.id, status: 'pending' },
+        { status: 'approved', currentStepOrder: null, finishedAt: now },
+      );
+      if (((r as any).affected ?? 1) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
+      instance.status = 'approved';
+      instance.currentStepOrder = null;
+      instance.finishedAt = now;
+      return { status: 'approved', instance, task: actingTask, nextApproverIds: [] };
+    }
+
+    const stepTasks = nextTasks.filter(t => t.stepOrder === nextStepOrder);
+    await this.taskRepo.update({ id: In(stepTasks.map(t => t.id)) }, { status: 'pending' });
+    const r = await this.instanceRepo.update(
+      { id: instance.id, status: 'pending', currentStepOrder: currentOrder },
+      { currentStepOrder: nextStepOrder },
+    );
+    if (((r as any).affected ?? 1) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
+    instance.currentStepOrder = nextStepOrder;
+
+    // 再次检查新步骤审批人是否全部禁用（递归）
+    const activeApproverIds = await this.filterActiveApprovers(stepTasks.map(t => t.approverId));
+    if (activeApproverIds.length === 0) {
+      await this.taskRepo.update(
+        { id: In(stepTasks.map(t => t.id)) },
+        { status: 'skipped', action: 'skip', comment: '审批人已禁用，自动跳过', actedAt: now },
+      );
+      await this.recordSkipAudit(instance, stepTasks[0], now);
+      return this.advanceAfterStep(instance, now, actingTask);
+    }
+
+    return { status: 'submitted', instance, task: actingTask, nextApproverIds: activeApproverIds };
   }
 
   async withdraw(targetType: string, targetId: number, userId: number, userName: string) {

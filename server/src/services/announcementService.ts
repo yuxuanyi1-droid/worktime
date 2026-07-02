@@ -53,88 +53,99 @@ export class AnnouncementService {
     return this.announceRepo.save(announcement);
   }
 
-  /** 获取所有公告（管理端） */
+  /** 获取所有公告（管理端）。E14：映射 createdByName，不泄漏完整 user 对象，与 getForUser 一致 */
   async getList(params: { page?: number; pageSize?: number }) {
     const { page = 1, pageSize = 20 } = params;
-    const [list, total] = await this.announceRepo.findAndCount({
+    const [records, total] = await this.announceRepo.findAndCount({
       relations: ['createdBy'],
       order: { createdAt: 'DESC' },
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
+    const list = records.map(a => ({ ...a, createdBy: undefined, createdByName: a.createdBy?.realName || '' }));
     return { list, total, page, pageSize };
   }
 
-  /** 获取公告详情 */
+  /** 获取公告详情。E14：映射 createdByName */
   async getById(id: number) {
-    return this.announceRepo.findOne({ where: { id }, relations: ['createdBy'] });
+    const a = await this.announceRepo.findOne({ where: { id }, relations: ['createdBy'] });
+    if (!a) return null;
+    return { ...a, createdBy: undefined, createdByName: a.createdBy?.realName || '' };
   }
 
-  /** 更新公告 */
-  async update(id: number, data: Partial<Announcement>) {
+  /** 更新公告（M1：校验作者或 admin，防越权改他人公告） */
+  async update(id: number, data: Partial<Announcement>, operatorId: number, isAdmin: boolean) {
+    const announcement = await this.announceRepo.findOne({ where: { id } });
+    if (!announcement) throw new BusinessError('公告不存在');
+    if (!isAdmin && announcement.createdById !== operatorId) {
+      throw new BusinessError('只能修改自己创建的公告');
+    }
     await this.announceRepo.update(id, data);
-    return this.announceRepo.findOne({ where: { id } });
+    // F5：返回值映射 createdByName，不泄漏完整 user 对象（与 getList/getById 一致）
+    const updated = await this.announceRepo.findOne({ where: { id }, relations: ['createdBy'] });
+    if (!updated) return null;
+    return { ...updated, createdBy: undefined, createdByName: updated.createdBy?.realName || '' };
   }
 
-  /** 删除公告 */
-  async delete(id: number) {
-    await this.readRepo.delete({ announcementId: id });
-    await this.announceRepo.delete(id);
+  /** 删除公告（M1：校验作者或 admin；M2：事务化两步删除避免不一致） */
+  async delete(id: number, operatorId: number, isAdmin: boolean) {
+    const announcement = await this.announceRepo.findOne({ where: { id } });
+    if (!announcement) throw new BusinessError('公告不存在');
+    if (!isAdmin && announcement.createdById !== operatorId) {
+      throw new BusinessError('只能删除自己创建的公告');
+    }
+    await AppDataSource.transaction(async (manager) => {
+      await manager.getRepository(AnnouncementRead).delete({ announcementId: id });
+      await manager.getRepository(Announcement).delete(id);
+    });
   }
 
-  /** 获取用户可见的公告列表（含已读状态）。可见性下推 SQL，避免全表扫。 */
+  /**
+   * 获取用户可见的公告列表（含已读状态）。
+   * M4：可见性 + isRead 过滤 + 分页全部下推 SQL，避免全量加载到内存再 slice。
+   */
   async getForUser(userId: number, userDeptId: number | null, params: { page?: number; pageSize?: number; isRead?: boolean }) {
     const { page = 1, pageSize = 20, isRead } = params;
     const { where, params: whereParams } = this.buildVisibleWhere(userId, userDeptId);
 
-    // 先拿可见公告 id（带分页前先算 total）
-    const visibleQb = this.announceRepo.createQueryBuilder('a')
-      .select(['a.id'])
-      .where(where, whereParams)
-      .orderBy('a.createdAt', 'DESC');
+    // LEFT JOIN 已读表，r.id IS NULL 表示未读；LEFT JOIN createdBy 以取发布人名称
+    const qb = this.announceRepo.createQueryBuilder('a')
+      .leftJoinAndSelect('a.createdBy', 'creator')
+      .leftJoin(AnnouncementRead, 'r', 'r.announcementId = a.id AND r.userId = :readUserId', { readUserId: userId })
+      .where(`(${where})`, whereParams);
+    if (isRead === true) qb.andWhere('r.id IS NOT NULL');
+    else if (isRead === false) qb.andWhere('r.id IS NULL');
 
-    const allVisible = await visibleQb.getMany();
-    const visibleIds = allVisible.map(a => a.id);
-    if (visibleIds.length === 0) return { list: [], total: 0, page, pageSize };
+    const [announcements, total] = await qb
+      .orderBy('a.createdAt', 'DESC')
+      .skip((page - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
 
-    // 已读状态
-    const reads = await this.readRepo.find({ where: { userId, announcementId: In(visibleIds) } });
+    // 批量查已读状态（仅当前页）
+    const pageIds = announcements.map(a => a.id);
+    const reads = pageIds.length ? await this.readRepo.find({ where: { userId, announcementId: In(pageIds) } }) : [];
     const readSet = new Set(reads.map(r => r.announcementId));
-
-    let filteredIds = visibleIds;
-    if (isRead === true) filteredIds = visibleIds.filter(id => readSet.has(id));
-    else if (isRead === false) filteredIds = visibleIds.filter(id => !readSet.has(id));
-
-    const total = filteredIds.length;
-    const pagedIds = filteredIds.slice((page - 1) * pageSize, page * pageSize);
-    if (pagedIds.length === 0) return { list: [], total, page, pageSize };
-
-    const announcements = await this.announceRepo.find({
-      where: { id: In(pagedIds) },
-      relations: ['createdBy'],
-      order: { createdAt: 'DESC' },
-    });
 
     const list = announcements.map(a => ({
       ...a,
-      isRead: readSet.has(a.id),
-      createdBy: undefined,
+      createdBy: undefined, // 不向前端泄漏完整 user 对象
       createdByName: a.createdBy?.realName || '',
+      isRead: readSet.has(a.id),
     }));
 
     return { list, total, page, pageSize };
   }
 
-  /** 获取用户未读公告数量（SQL 下推可见性 + LEFT JOIN 已读，单次查询） */
+  /** 获取用户未读公告数量（SQL COUNT 聚合，不再 materialize 全部行） */
   async getUnreadCount(userId: number, userDeptId: number | null) {
     const { where, params } = this.buildVisibleWhere(userId, userDeptId);
-    const visible = await this.announceRepo.createQueryBuilder('a')
+    const result = await this.announceRepo.createQueryBuilder('a')
       .leftJoin(AnnouncementRead, 'r', 'r.announcementId = a.id AND r.userId = :readUserId', { readUserId: userId })
-      .select(['a.id'])
-      .where(where, params)
+      .where(`(${where})`, params)
       .andWhere('r.id IS NULL')
-      .getRawMany<{ id: number }>();
-    return visible.length;
+      .getCount();
+    return result;
   }
 
   /** 标记公告已读 */

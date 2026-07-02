@@ -38,3 +38,7 @@ Thumbs.db
 # Local assistant notes and accidental files
 .learnings/
 _nul
+# Windows: redirected stdout/stderr to `nul` outside cmd creates a real file named "nul"
+nul
+client/nul
+server/nul

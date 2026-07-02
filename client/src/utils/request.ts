@@ -34,6 +34,14 @@ request.interceptors.response.use(
       if (window.location.pathname !== '/login') {
         window.dispatchEvent(new CustomEvent('unauthorized'));
       }
+      // R9：标记已处理，调用方据此跳过 message.error，避免与跳转/弹框双重提示
+      (error as any).__handled = true;
+      return Promise.reject(error);
+    }
+    // 423 Locked：必须先修改初始密码。派发事件让 MainLayout 弹出强制改密框
+    if (error.response?.status === 423) {
+      window.dispatchEvent(new CustomEvent('must-change-password'));
+      (error as any).__handled = true;
       return Promise.reject(error);
     }
     const msg = error.response?.data?.message || error.message || '网络错误';
@@ -43,4 +51,15 @@ request.interceptors.response.use(
 );
 
 export default request;
+
+/**
+ * 统一错误提示：从 axios error 提取后端 message，若已被拦截器标记 __handled（401/423 已弹框/跳转）则不重复提示。
+ * 替代各页面重复的 getErrorMessage + message.error 组合。
+ */
+export function showError(error: unknown, fallback: string) {
+  const e = error as { __handled?: boolean; response?: { data?: { message?: string } }; message?: string };
+  if (e?.__handled) return; // 401/423 已由拦截器处理，跳过避免双重提示
+  const msg = e?.response?.data?.message || e?.message || fallback;
+  message.error(msg);
+}
 

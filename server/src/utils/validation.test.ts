@@ -10,6 +10,10 @@ import {
   parseArray,
   parsePagination,
   firstQueryValue,
+  validatePassword,
+  validateDailyHours,
+  validateNotFutureDate,
+  validateWeekStartMonday,
 } from './validation';
 import { BusinessError } from './errors';
 
@@ -167,5 +171,67 @@ describe('firstQueryValue', () => {
 
   it('undefined 透传', () => {
     expect(firstQueryValue(undefined)).toBeUndefined();
+  });
+});
+
+describe('validatePassword 密码策略', () => {
+  it('合法密码通过', () => {
+    expect(validatePassword('abc12345')).toBeNull();
+    expect(validatePassword('Passw0rd!')).toBeNull();
+  });
+  it('太短被拒', () => {
+    expect(validatePassword('ab123')).not.toBeNull();
+  });
+  it('缺数字被拒', () => {
+    expect(validatePassword('abcdefgh')).not.toBeNull();
+  });
+  it('缺字母被拒', () => {
+    expect(validatePassword('12345678')).not.toBeNull();
+  });
+  it('太长被拒', () => {
+    expect(validatePassword('a'.repeat(129))).not.toBeNull();
+  });
+});
+
+describe('validateDailyHours 每日时长上限', () => {
+  it('正常时长通过', () => {
+    expect(() => validateDailyHours([{ date: '2026-01-15', hours: 8 }])).not.toThrow();
+    expect(() => validateDailyHours([
+      { date: '2026-01-15', hours: 8 },
+      { date: '2026-01-15', hours: 8 },
+    ])).not.toThrow();
+  });
+  it('超过24h被拒', () => {
+    expect(() => validateDailyHours([
+      { date: '2026-01-15', hours: 16 },
+      { date: '2026-01-15', hours: 10 },
+    ])).toThrow(/超过24小时上限/);
+  });
+  it('自定义上限', () => {
+    expect(() => validateDailyHours([{ date: '2026-01-15', hours: 5 }], 4)).toThrow(/超过4小时上限/);
+  });
+});
+
+describe('validateNotFutureDate 未来日期拦截', () => {
+  it('过去日期通过', () => {
+    const past = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    expect(() => validateNotFutureDate(past)).not.toThrow();
+  });
+  it('未来日期被拒', () => {
+    const future = new Date(Date.now() + 86400000 * 30).toISOString().slice(0, 10);
+    expect(() => validateNotFutureDate(future)).toThrow(/未来日期/);
+  });
+});
+
+describe('validateWeekStartMonday 周锚点校验', () => {
+  it('周一通过', () => {
+    // 2026-01-12 是周一
+    expect(() => validateWeekStartMonday('2026-01-12')).not.toThrow();
+  });
+  it('非周一被拒', () => {
+    // 2026-01-13 是周二
+    expect(() => validateWeekStartMonday('2026-01-13')).toThrow(/周一/);
+    // 2026-01-18 是周日
+    expect(() => validateWeekStartMonday('2026-01-18')).toThrow(/周一/);
   });
 });

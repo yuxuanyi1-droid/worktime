@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { UserInfo } from '../types';
+import request from '../utils/request';
 
 interface AuthState {
   token: string | null;
@@ -7,6 +8,8 @@ interface AuthState {
   setAuth: (token: string, user: UserInfo) => void;
   clearAuth: () => void;
   isLoggedIn: () => boolean;
+  /** 从后端拉取最新 profile（含运行时通过 grant 授予的权限）并刷新本地快照。 */
+  refreshUser: () => Promise<void>;
 }
 
 function getStoredUser(): UserInfo | null {
@@ -39,6 +42,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   isLoggedIn: () => !!get().token,
+
+  refreshUser: async () => {
+    const { token } = get();
+    if (!token) return;
+    try {
+      const res = await request.get<any, { code: number; data: UserInfo }>('/auth/profile');
+      if (res.code === 0 && res.data) {
+        localStorage.setItem('user', JSON.stringify(res.data));
+        set({ user: res.data });
+      }
+    } catch {
+      // 刷新失败（如网络抖动）不阻断主流程，沿用旧快照即可。
+    }
+  },
 }));
 
 /**

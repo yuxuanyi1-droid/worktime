@@ -12,10 +12,12 @@ export class PermissionRequest {
   @PrimaryGeneratedColumn()
   id!: number;
 
-  @ManyToOne(() => User, { nullable: false, onDelete: 'CASCADE' })
-  applicant!: User;
+  // SET NULL 保留权限申请历史（审计轨迹）；用户禁用走软删除，正常流程不会触发，applicantId 运行时总有值。
+  // 实体列 nullable:true 是为了让 SET NULL 在 DB 层语义正确（直接 DB 删用户时不报 FK 错），TS 类型保持非空。
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  applicant!: User | null;
 
-  @Column({ type: 'integer' })
+  @Column({ type: 'integer', nullable: true })
   applicantId!: number;
 
   @ManyToOne(() => Permission, { nullable: true, onDelete: 'SET NULL' })

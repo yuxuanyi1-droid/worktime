@@ -22,9 +22,15 @@ const NotificationCenter = lazy(() => import('../pages/NotificationCenter'));
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token);
+  const user = useAuthStore((s) => s.user);
   const location = useLocation();
   if (!token) {
     return <Navigate to={`/login?redirect=${encodeURIComponent(location.pathname + location.search)}`} replace />;
+  }
+  // R10：mustChangePassword 为 true 时，强制用户停留在 profile 页改密，避免通过 URL 访问其他页面看到空壳。
+  // profile 页的接口在 423 白名单内可正常加载，MainLayout 的强制改密弹框也会显示。
+  if (user?.mustChangePassword && location.pathname !== '/profile') {
+    return <Navigate to="/profile" replace />;
   }
   return <>{children}</>;
 }
@@ -33,22 +39,6 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 function PermissionRoute({ children, permission }: { children: React.ReactNode; permission: string }) {
   const { hasPermission } = usePermission();
   if (!hasPermission(permission)) {
-    return (
-      <Result
-        status="403"
-        title="无权限"
-        subTitle="您没有访问此页面的权限，请联系管理员"
-        extra={<Button type="primary" onClick={() => window.history.back()}>返回</Button>}
-      />
-    );
-  }
-  return <>{children}</>;
-}
-
-/** 角色路由守卫 */
-function RoleRoute({ children, roles }: { children: React.ReactNode; roles: string[] }) {
-  const { hasRole } = usePermission();
-  if (!hasRole(...roles)) {
     return (
       <Result
         status="403"

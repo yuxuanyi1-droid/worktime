@@ -5,6 +5,7 @@ import { authConfig } from '../config/auth';
 import { User } from '../entities/User';
 import { AccessPolicyService } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
+import { validatePassword } from '../utils/validation';
 
 export class AuthService {
   private userRepo = AppDataSource.getRepository(User);
@@ -46,6 +47,7 @@ export class AuthService {
         group: user.group ? { id: user.group.id, name: user.group.name } : null,
         roles: user.roles.map(r => ({ id: r.id, name: r.name, label: r.label })),
         permissions,
+        mustChangePassword: user.mustChangePassword === true,
       },
     };
   }
@@ -72,6 +74,7 @@ export class AuthService {
       group: user.group ? { id: user.group.id, name: user.group.name } : null,
       roles: user.roles.map(r => ({ id: r.id, name: r.name, label: r.label })),
       permissions,
+      mustChangePassword: user.mustChangePassword === true,
     };
   }
 
@@ -82,9 +85,17 @@ export class AuthService {
     const isValid = await bcrypt.compare(oldPassword, user.password);
     if (!isValid) throw new BusinessError('原密码错误');
 
-    user.password = await bcrypt.hash(newPassword, 10);
-    // tokenVersion+1：使改密前签发的所有 token 失效，强制重新登录
+    // 校验新密码是否符合策略
+    const policyError = validatePassword(newPassword);
+    if (policyError) throw new BusinessError(policyError);
+    // 新密码不能与旧密码相同
+    if (oldPassword === newPassword) {
+      throw new BusinessError('新密码不能与原密码相同');
+    }
+
+    user.password = await bcrypt.hash(newPassword, 12);
     user.tokenVersion += 1;
+    user.mustChangePassword = false; // 改密成功后清除强制改密标志
     await this.userRepo.save(user);
     return true;
   }

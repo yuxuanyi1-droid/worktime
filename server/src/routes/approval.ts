@@ -92,7 +92,7 @@ router.post('/approve', async (req: AuthRequest, res, next) => {
         action: parseEnum(item.action, `items[${index}].action`, approvalActions),
         comment: parseString(item.comment, `items[${index}].comment`, { max: 1000 }),
       };
-    }, { min: 1, max: 100 });
+    }, { min: 1, max: 20 });
     const data = await approvalService.approve(req.user!.id, req.user!.realName, items);
     // 审计：记录每条审批决策
     for (const item of items) {

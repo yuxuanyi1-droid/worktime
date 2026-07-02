@@ -14,6 +14,8 @@ dayjs.extend(isoWeek);
 import { approvalApi, MySubmission, ApprovalDetail } from '../../api/approval';
 import { ApprovalItem, ApprovalRecord, statusMap, stepTypeMap } from '../../types';
 import { useNavigate, useParams } from 'react-router-dom';
+import { sanitizeHtml } from '../../utils/sanitize';
+import { showError } from '../../utils/request';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -53,26 +55,13 @@ const statusOptions = [
   { label: '已驳回', value: 'rejected' },
 ];
 
-function getErrorMessage(error: unknown, fallback: string) {
-  const e = error as { response?: { data?: { message?: string } }; message?: string };
-  return e?.response?.data?.message || e?.message || fallback;
-}
-
-function sanitizeWeeklyHtml(value?: string) {
-  if (!value) return '';
-  return value
-    .replace(/<(?!\/?(strong|b|br)\b)[^>]*>/gi, '')
-    .replace(/<(strong|b)\b[^>]*>/gi, '<strong>')
-    .replace(/<\/(strong|b)>/gi, '</strong>')
-    .replace(/<br\s*\/?>/gi, '<br />');
-}
-
+// 富文本净化改用统一的 sanitizeHtml（DOMPurify），替代原先不健壮的正则白名单 sanitizeWeeklyHtml。
 function RichTextValue({ value }: { value?: string }) {
   if (!value) return <span>-</span>;
   return (
     <div
       style={{ whiteSpace: 'pre-wrap' }}
-      dangerouslySetInnerHTML={{ __html: sanitizeWeeklyHtml(value) }}
+      dangerouslySetInnerHTML={{ __html: sanitizeHtml(value) }}
     />
   );
 }
@@ -384,7 +373,7 @@ function ApprovalDetailModal({ targetType, targetId, open, onClose }: {
       const res = await approvalApi.getDetail(targetType, targetId);
       if (res.data) setDetail(res.data);
     } catch (error) {
-      message.error(getErrorMessage(error, '审批详情加载失败'));
+      showError(error, '审批详情加载失败');
       setDetail(null);
     }
     setLoading(false);
@@ -438,7 +427,7 @@ export function ApprovalDetailPage() {
       const res = await approvalApi.getDetail(targetType!, Number(targetId));
       if (res.data) setDetail(res.data);
     } catch (error) {
-      message.error(getErrorMessage(error, '审批详情加载失败'));
+      showError(error, '审批详情加载失败');
       setDetail(null);
     }
     setLoading(false);
@@ -457,7 +446,7 @@ export function ApprovalDetailPage() {
       setComment('');
       loadDetail();
     } catch (error) {
-      message.error(getErrorMessage(error, action === 'approve' ? '审批通过失败' : '审批驳回失败'));
+      showError(error, action === 'approve' ? '审批通过失败' : '审批驳回失败');
     }
     setActionLoading(false);
   };
@@ -469,7 +458,7 @@ export function ApprovalDetailPage() {
       message.success('已撤回');
       loadDetail();
     } catch (error) {
-      message.error(getErrorMessage(error, '撤回失败'));
+      showError(error, '撤回失败');
     }
     setActionLoading(false);
   };
@@ -481,7 +470,7 @@ export function ApprovalDetailPage() {
         const res = await approvalApi.getUsers();
         if (res.data) setAllUsers(res.data);
       } catch (error) {
-        message.error(getErrorMessage(error, '抄送人列表加载失败'));
+        showError(error, '抄送人列表加载失败');
       }
     }
   };
@@ -496,7 +485,7 @@ export function ApprovalDetailPage() {
       setCcModalOpen(false);
       loadDetail();
     } catch (error) {
-      message.error(getErrorMessage(error, '抄送失败'));
+      showError(error, '抄送失败');
     }
     setActionLoading(false);
   };
@@ -634,7 +623,7 @@ export function ApprovalDetailPage() {
             setCcUsers(allUsers.filter(u => ids.includes(u.id)));
           }}
           options={allUsers.map(u => ({
-            label: `${u.realName}（${u.department || ''}）`,
+            label: `${u.realName}（${typeof u.department === 'string' ? u.department : ''}）`,
             value: u.id,
           }))}
           showSearch
@@ -671,7 +660,7 @@ function MySubmissionsTab() {
         setData(res.data.list);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '我的申请加载失败'));
+      showError(error, '我的申请加载失败');
       setData([]);
     }
     setLoading(false);
@@ -764,7 +753,7 @@ function PendingApprovalTab() {
       const res = await approvalApi.getPending({ pageSize: 100 });
       if (res.data) setData(res.data.list);
     } catch (error) {
-      message.error(getErrorMessage(error, '待审批列表加载失败'));
+      showError(error, '待审批列表加载失败');
       setData([]);
     }
     setLoading(false);
@@ -772,6 +761,11 @@ function PendingApprovalTab() {
 
   const handleApprove = async (action: 'approve' | 'reject') => {
     if (selectedRows.length === 0) return message.warning('请选择审批项');
+    // 与后端批量审批上限保持一致，避免提交后被服务端整体拒绝
+    const BATCH_LIMIT = 20;
+    if (selectedRows.length > BATCH_LIMIT) {
+      return message.warning(`单次最多批量审批 ${BATCH_LIMIT} 项，请减少选择数量`);
+    }
     setActionLoading(true);
     try {
       // 过滤掉找不到的项（数据可能在选中后被刷新），避免 item! 崩溃
@@ -789,7 +783,7 @@ function PendingApprovalTab() {
       setComment('');
       loadData();
     } catch (error) {
-      message.error(getErrorMessage(error, action === 'approve' ? '批量通过失败' : '批量驳回失败'));
+      showError(error, action === 'approve' ? '批量通过失败' : '批量驳回失败');
     } finally {
       setActionLoading(false);
     }
@@ -887,7 +881,7 @@ function ApprovedByMeTab() {
       });
       if (res.data) setData(res.data.list);
     } catch (error) {
-      message.error(getErrorMessage(error, '已审批列表加载失败'));
+      showError(error, '已审批列表加载失败');
       setData([]);
     }
     setLoading(false);
@@ -900,9 +894,13 @@ function ApprovedByMeTab() {
     },
     {
       title: '审批结果', dataIndex: 'action', key: 'action', width: 100,
-      render: (action: string) => (
-        <Tag color={action === 'approve' ? 'green' : 'red'}>{action === 'approve' ? '已通过' : '已驳回'}</Tag>
-      ),
+      render: (action: string) => {
+        // F9：精确匹配 action，避免 skip/cc/withdraw 被误标为"已驳回"
+        if (action === 'approve') return <Tag color="green">已通过</Tag>;
+        if (action === 'reject') return <Tag color="red">已驳回</Tag>;
+        if (action === 'skip') return <Tag color="default">已跳过</Tag>;
+        return <Tag color="default">{action || '-'}</Tag>;
+      },
     },
     { title: '步骤', dataIndex: 'stepLabel', key: 'stepLabel', width: 140, render: (v: string) => v || '-' },
     { title: '审批意见', dataIndex: 'comment', key: 'comment', ellipsis: true, render: (v: string) => v || '-' },
@@ -954,7 +952,7 @@ function MyCcTab() {
       const res = await approvalApi.getMyCc({ pageSize: 100 });
       if (res.data) setData(res.data.list);
     } catch (error) {
-      message.error(getErrorMessage(error, '抄送列表加载失败'));
+      showError(error, '抄送列表加载失败');
       setData([]);
     }
     setLoading(false);

@@ -3,6 +3,7 @@ import { AuthRequest } from './auth';
 import { AppDataSource } from '../config/database';
 import { User } from '../entities/User';
 import { AccessPolicyService } from '../services/accessPolicyService';
+import { logger } from '../utils/logger';
 
 const accessPolicy = new AccessPolicyService();
 
@@ -40,6 +41,8 @@ export const requirePermission = (...requiredPermissions: string[]) => {
       }
       next();
     } catch (error) {
+      // R7：记录服务端日志，便于排查权限查询异常（DB 故障/grant 数据损坏等），原先静默吞错导致运维盲区
+      logger.error({ err: error, userId: req.user?.id, path: req.path }, '权限校验异常');
       return res.status(500).json({ code: 500, message: '权限校验失败' });
     }
   };
@@ -61,6 +64,8 @@ export const requireAllPermissions = (...requiredPermissions: string[]) => {
       }
       next();
     } catch (error) {
+      // R7：记录服务端日志，便于排查权限查询异常（DB 故障/grant 数据损坏等），原先静默吞错导致运维盲区
+      logger.error({ err: error, userId: req.user?.id, path: req.path }, '权限校验异常');
       return res.status(500).json({ code: 500, message: '权限校验失败' });
     }
   };
@@ -81,6 +86,8 @@ export const requireRole = (...roles: string[]) => {
       }
       next();
     } catch (error) {
+      // R7：记录服务端日志，便于排查权限查询异常（DB 故障/grant 数据损坏等），原先静默吞错导致运维盲区
+      logger.error({ err: error, userId: req.user?.id, path: req.path }, '权限校验异常');
       return res.status(500).json({ code: 500, message: '权限校验失败' });
     }
   };
