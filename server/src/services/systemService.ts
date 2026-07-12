@@ -239,7 +239,7 @@ export class SystemService {
       .leftJoinAndSelect('u.roles', 'role');
 
     if (keyword) {
-      qb.andWhere('(u.username LIKE :kw OR u.realName LIKE :kw OR u.email LIKE :kw)', { kw: `%${keyword}%` });
+      qb.andWhere('(LOWER(u.username) LIKE LOWER(:kw) OR LOWER(u.realName) LIKE LOWER(:kw) OR LOWER(u.email) LIKE LOWER(:kw))', { kw: `%${keyword}%` });
     }
     if (departmentId) {
       qb.andWhere('u.departmentId = :deptId', { deptId: departmentId });

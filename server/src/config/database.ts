@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { DataSource } from 'typeorm';
+import { DataSource, DataSourceOptions } from 'typeorm';
 import path from 'path';
 import { User } from '../entities/User';
 import { Department } from '../entities/Department';
@@ -32,35 +32,69 @@ import { PrecisionAndIndexes1700000000001 } from '../migrations/1700000000001-Pr
 import { CountersignSupport1700000000002 } from '../migrations/1700000000002-CountersignSupport';
 import { RootGroupId1700000000003 } from '../migrations/1700000000003-RootGroupId';
 
-const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db');
-// 默认关闭 synchronize（防止生产环境自动改表丢数据）；
-// 仅当显式设置 TYPEORM_SYNCHRONIZE=true 时才开启（开发临时调试用）。
-// 首次建表由 ensureSchema() 负责（空库时同步一次，已有库不干预）；
-// schema 变更走 migration（见 src/migrations/）。
+/**
+ * 数据库类型：'sqlite'（默认，零配置单文件）或 'postgres'（生产，高并发）。
+ * 通过 .env 的 DB_TYPE 切换。
+ */
+const dbType = (process.env.DB_TYPE || 'sqlite').toLowerCase() as 'sqlite' | 'postgres';
+
 const shouldSynchronize = process.env.TYPEORM_SYNCHRONIZE === 'true';
 
-export const AppDataSource = new DataSource({
-  type: 'better-sqlite3',
-  database: dbPath,
-  synchronize: shouldSynchronize,
-  logging: false,
-  entities: [
-    User, Department, Group, Role, Permission, Project,
-    Timesheet, OvertimeApplication, WeeklyReport,
-    ApprovalRecord, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep,
-    ApprovalFlowVersion, ApprovalInstance, ApprovalTask,
-    SystemSetting, Notification, AuditLog, Announcement, AnnouncementRead,
-    PermissionRequest, UserPermissionGrant,
-    SubmissionSequence,
-    UserExternalIdentity,
-  ],
-  migrations: [InitSchema1700000000000, PrecisionAndIndexes1700000000001, CountersignSupport1700000000002, RootGroupId1700000000003],
-  subscribers: [],
-  prepareDatabase: (db: any) => {
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-  },
-});
+const entities = [
+  User, Department, Group, Role, Permission, Project,
+  Timesheet, OvertimeApplication, WeeklyReport,
+  ApprovalRecord, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep,
+  ApprovalFlowVersion, ApprovalInstance, ApprovalTask,
+  SystemSetting, Notification, AuditLog, Announcement, AnnouncementRead,
+  PermissionRequest, UserPermissionGrant,
+  SubmissionSequence,
+  UserExternalIdentity,
+];
+
+const migrations = [
+  InitSchema1700000000000, PrecisionAndIndexes1700000000001,
+  CountersignSupport1700000000002, RootGroupId1700000000003,
+];
+
+/**
+ * 根据数据库类型构造 DataSourceOptions。
+ * - sqlite: 单文件路径，WAL + foreign_keys pragma
+ * - postgres: 标准网络连接参数
+ */
+function buildDataSourceOptions(): DataSourceOptions {
+  const common = { entities, migrations, synchronize: shouldSynchronize, logging: false };
+
+  if (dbType === 'postgres') {
+    return {
+      ...common,
+      type: 'postgres',
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432', 10),
+      username: process.env.DB_USERNAME || 'postgres',
+      password: process.env.DB_PASSWORD || '',
+      database: process.env.DB_DATABASE || 'worktime',
+      // 生产建议开启 ssl（按云服务商配置调整）
+      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    };
+  }
+
+  // 默认 sqlite
+  const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db');
+  return {
+    ...common,
+    type: 'better-sqlite3',
+    database: dbPath,
+    prepareDatabase: (db: any) => {
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+    },
+  };
+}
+
+export const AppDataSource = new DataSource(buildDataSourceOptions());
+
+/** 当前数据库类型（供其他模块按库做语法兼容判断） */
+export const databaseType = dbType;
 
 /**
  * 确保 schema 存在：
@@ -69,13 +103,12 @@ export const AppDataSource = new DataSource({
  * - 始终运行 migration（补齐新增实体表，如 submission_sequences）
  *
  * 应在 AppDataSource.initialize() 之后、业务逻辑之前调用（见 app.ts / seed.ts）。
- * 这取代了原先常开的 synchronize，做到「首次自动建表 + 后续不自动改表 + migration 平滑升级」。
  */
 export async function ensureSchema(): Promise<void> {
   const queryRunner = AppDataSource.createQueryRunner();
   try {
     const tables = await queryRunner.getTables();
-    // 排除 TypeORM 系统表（migrations 记录、typeorm_metadata、sqlite_sequence）
+    // 排除 TypeORM 系统表（各数据库不同：sqlite 有 sqlite_sequence，postgres 无）
     const SYSTEM_TABLES = new Set(['migrations', 'typeorm_metadata', 'sqlite_sequence']);
     const hasEntityTable = tables.some((t) => !SYSTEM_TABLES.has(t.name));
     if (!hasEntityTable) {

@@ -14,7 +14,7 @@ export class CountersignSupport1700000000002 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
     // SQLite 不支持 ADD COLUMN IF NOT EXISTS，用 catch 兜底（列已存在则跳过）
     try {
-      await queryRunner.query(`ALTER TABLE "approval_flow_steps" ADD COLUMN "requireAllApprovers" boolean NOT NULL DEFAULT (0)`);
+      await queryRunner.query(`ALTER TABLE "approval_flow_steps" ADD COLUMN "requireAllApprovers" boolean NOT NULL DEFAULT false`);
     } catch {
       // 列已存在，跳过
     }
