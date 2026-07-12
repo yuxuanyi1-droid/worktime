@@ -60,6 +60,7 @@ async function loadEntities() {
   const { WeeklyReport } = await import('../entities/WeeklyReport');
   const { ApprovalRecord } = await import('../entities/ApprovalRecord');
   const { ProjectSE } = await import('../entities/ProjectSE');
+  const { ProjectWorkloadAllocation } = await import('../entities/ProjectWorkloadAllocation');
   const { ApprovalFlow } = await import('../entities/ApprovalFlow');
   const { ApprovalFlowStep } = await import('../entities/ApprovalFlowStep');
   const { ApprovalFlowVersion } = await import('../entities/ApprovalFlowVersion');
@@ -72,12 +73,14 @@ async function loadEntities() {
   const { AnnouncementRead } = await import('../entities/AnnouncementRead');
   const { PermissionRequest } = await import('../entities/PermissionRequest');
   const { UserPermissionGrant } = await import('../entities/UserPermissionGrant');
+  const { UserExternalIdentity } = await import('../entities/UserExternalIdentity');
   return [
     User, Department, Group, Role, Permission, Project,
     Timesheet, OvertimeApplication, WeeklyReport,
-    ApprovalRecord, ProjectSE, ApprovalFlow, ApprovalFlowStep,
+    ApprovalRecord, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep,
     ApprovalFlowVersion, ApprovalInstance, ApprovalTask,
     SystemSetting, Notification, AuditLog, Announcement, AnnouncementRead,
     PermissionRequest, UserPermissionGrant, SubmissionSequence,
+    UserExternalIdentity,
   ];
 }

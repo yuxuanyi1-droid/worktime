@@ -2,6 +2,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 import { Timesheet } from './Timesheet';
 import { User } from './User';
 import { ProjectSE } from './ProjectSE';
+import { ProjectWorkloadAllocation } from './ProjectWorkloadAllocation';
 
 @Entity('projects')
 export class Project {
@@ -35,6 +36,10 @@ export class Project {
 
   @OneToMany(() => ProjectSE, projectSE => projectSE.project)
   moduleSEs!: ProjectSE[];
+
+  /** 项目工时配额（按组配置，单位人/天） */
+  @OneToMany(() => ProjectWorkloadAllocation, allocation => allocation.project)
+  workloadAllocations!: ProjectWorkloadAllocation[];
 
   @CreateDateColumn()
   createdAt!: Date;

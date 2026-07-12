@@ -13,6 +13,7 @@ import {
   parseArray,
   parseBooleanQuery,
   parseEnum,
+  parseNonNegativeNumber,
   parseOptionalEnum,
   parseOptionalPositiveInt,
   parsePagination,
@@ -50,6 +51,12 @@ async function mapProjectForViewer(project: any, viewer: AuthRequest['user']) {
       ...se,
       user: se.user ? { id: se.user.id, realName: se.user.realName } : null,
       group: se.group ? { id: se.group.id, name: se.group.name } : null,
+    })),
+    workloadAllocations: (project.workloadAllocations || []).map((a: any) => ({
+      id: a.id,
+      groupId: a.groupId,
+      groupName: a.group?.name || a.groupName || '',
+      allocation: Number(a.allocation),
     })),
     canUpdate: await accessPolicy.canUpdateProject(user, project.id),
     canAssignSE: await accessPolicy.canAssignProjectSE(user, project.id),
@@ -205,6 +212,13 @@ function parseProjectSEPayload(body: Record<string, unknown>) {
   return {
     userId: parsePositiveInt(body.userId, 'userId'),
     groupId: parsePositiveInt(body.groupId, 'groupId'),
+  };
+}
+
+function parseProjectAllocationPayload(body: Record<string, unknown>) {
+  return {
+    groupId: parsePositiveInt(body.groupId, 'groupId'),
+    allocation: parseNonNegativeNumber(body.allocation, 'allocation'),
   };
 }
 
@@ -594,6 +608,57 @@ router.delete('/projects/ses/:id', async (req: AuthRequest, res, next) => {
   }
 });
 
+// ========== 项目工时配额（按组配置，单位人/天） ==========
+router.get('/projects/:projectId/allocations', async (req: AuthRequest, res, next) => {
+  try {
+    const projectId = parsePositiveInt(req.params.projectId, 'projectId');
+    if (!await accessPolicy.canAccessProject(req.user!, projectId)) {
+      return res.status(403).json({ code: 403, message: '无此操作权限' });
+    }
+    const data = await systemService.getProjectAllocations(projectId);
+    res.json({ code: 0, data: data.map(a => ({
+      id: a.id,
+      groupId: a.groupId,
+      groupName: a.group?.name || a.groupName || '',
+      allocation: Number(a.allocation),
+    })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/projects/:projectId/allocations', async (req: AuthRequest, res, next) => {
+  try {
+    const projectId = parsePositiveInt(req.params.projectId, 'projectId');
+    // 复用 project:update 权限（与编辑项目一致）
+    if (!await accessPolicy.canUpdateProject(req.user!, projectId)) {
+      return res.status(403).json({ code: 403, message: '无此操作权限' });
+    }
+    const data = await systemService.addProjectAllocation({
+      projectId,
+      ...parseProjectAllocationPayload(req.body as Record<string, unknown>),
+    });
+    res.json({ code: 0, data, message: '保存成功' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/projects/allocations/:id', async (req: AuthRequest, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    const allocation = await systemService.getProjectAllocationById(id);
+    if (!allocation) return res.status(404).json({ code: 404, message: '配额记录不存在' });
+    if (!await accessPolicy.canUpdateProject(req.user!, allocation.projectId)) {
+      return res.status(403).json({ code: 403, message: '无此操作权限' });
+    }
+    await systemService.removeProjectAllocation(id);
+    res.json({ code: 0, message: '删除成功' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ========== 审批流程 ==========
 router.get('/approval-flows', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
   try {
@@ -668,7 +733,11 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
     const key = parseEnum(req.params.key, 'key', settingKeys);
     const rawValue = (req.body as Record<string, unknown>).value;
     let value = parseString(rawValue, 'value', { max: 200 }) ?? '';
-    if (key === 'timesheet_unit') value = parseEnum(value, 'value', ['days', 'hours']);
+    if (key === 'timesheet_unit') {
+      // 工时填报单位（天步长）：兼容老值 days(=0.5) / hours(=0.5)
+      if (value === 'days' || value === 'hours') value = '0.5';
+      value = parseEnum(value, 'value', ['0.1', '0.2', '0.25', '0.5']);
+    }
     if (key === 'timesheet_lock_day' && value) {
       value = String(parsePositiveInt(value, 'value', { max: 28 }));
     }

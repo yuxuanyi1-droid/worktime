@@ -8,6 +8,7 @@ import { ApprovalFlow } from './ApprovalFlow';
 @Index('idx_timesheet_user_date', ['userId', 'date'])
 @Index('idx_timesheet_user_status', ['userId', 'status'])
 @Index('idx_timesheet_submission_group', ['submissionGroupId'])
+@Index('idx_timesheet_root_group', ['rootGroupId'])
 @Index('idx_timesheet_date_status', ['date', 'status'])
 export class Timesheet {
   @PrimaryGeneratedColumn()
@@ -47,7 +48,7 @@ export class Timesheet {
   description!: string;
 
   @Column({ type: 'varchar', length: 20, default: 'draft' })
-  status!: 'draft' | 'submitted' | 'approved' | 'rejected' | 'deprecated';
+  status!: 'draft' | 'submitted' | 'approved' | 'rejected' | 'deprecated' | 'withdrawn';
 
   /** 当前审批步骤（0=未提交，1+=审批中第N步） */
   @Column({ type: 'integer', default: 0 })
@@ -74,6 +75,11 @@ export class Timesheet {
   /** 修改前的原始提交分组ID（用于追溯修改链，关联原审批记录） */
   @Column({ type: 'integer', nullable: true })
   previousGroupId!: number | null;
+
+  /** 修改链的根提交分组ID：同一条工时的所有版本（含原始提交）共享此值，
+   *  用于一次性查询整条修改链（v1→v2→v3…）。首次提交时 = 自身 submissionGroupId。 */
+  @Column({ type: 'integer', nullable: true })
+  rootGroupId!: number | null;
 
   @OneToMany(() => ApprovalRecord, record => record.timesheet)
   approvalRecords!: ApprovalRecord[];

@@ -30,6 +30,51 @@ cd .. && npm run dev
 - 前端：http://localhost:5173
 - 后端：http://localhost:3000
 
+### 修改端口
+
+前后端端口在**仓库根 `.env`**（单一真相源）中配置，前后端、CORS、代理会自动联动：
+
+```bash
+# 根 .env
+PORT=3000        # 后端 API 端口
+CLIENT_PORT=5173 # 前端开发服务器端口
+```
+
+> 首次使用复制 `.env.example` 为 `.env`。后端业务配置（JWT、DB_PATH 等）仍在 `server/.env`。
+
+### 子路径部署
+
+整个应用可挂在固定子路径下（如 `https://your-domain.com/worktime/`），由根 `.env` 的 `BASE_PATH` 统一驱动，前后端自动联动：
+
+```bash
+# 根 .env
+BASE_PATH=/worktime   # 必须以 / 开头，不带尾斜杠；留空 = 根路径部署（默认）
+```
+
+**部署步骤：**
+
+1. 后端：在根 `.env` 设置 `BASE_PATH=/worktime`，重启 `node dist/app.js`，API 路由自动变为 `/worktime/api/v1`。
+2. 前端：用相同 `BASE_PATH` 构建一次（base 是构建期固化的）：
+   ```bash
+   cd client && npm run build   # 产物的静态资源引用自动带 /worktime/ 前缀
+   ```
+3. Nginx（示例）：
+   ```nginx
+   # 前端静态资源
+   location /worktime/ {
+       alias /path/to/client/dist/;
+       try_files $uri $uri/ /worktime/index.html;
+   }
+   # 后端 API 反代
+   location /worktime/api/ {
+       proxy_pass http://127.0.0.1:3000;   # 注意：后端已自带 /worktime/api 前缀，proxy_pass 不带尾路径
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+   }
+   ```
+
+> 开发期（`npm run dev`）`BASE_PATH` 留空即可，仍为根路径，不受影响。
+
 ## 默认账号
 
 | 角色 | 用户名 | 密码 |

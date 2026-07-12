@@ -322,6 +322,8 @@ export class AccessPolicyService {
       .leftJoinAndSelect('se.user', 'seUser')
       .leftJoinAndSelect('se.group', 'seGroup')
       .leftJoinAndSelect('seGroup.department', 'seGroupDepartment')
+      .leftJoinAndSelect('project.workloadAllocations', 'alloc')
+      .leftJoinAndSelect('alloc.group', 'allocGroup')
       .orderBy('project.createdAt', 'DESC');
 
     if (!this.isAdmin(viewer)) {

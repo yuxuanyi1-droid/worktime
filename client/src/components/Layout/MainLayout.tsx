@@ -302,7 +302,6 @@ export default function MainLayout() {
 
   const userMenuItems = [
     { key: 'profile', icon: <UserOutlined />, label: '个人信息' },
-    { key: 'password', icon: <KeyOutlined />, label: '修改密码' },
     { key: 'divider', type: 'divider' as const },
     { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', danger: true },
   ];
@@ -310,7 +309,6 @@ export default function MainLayout() {
   const handleUserMenu = ({ key }: { key: string }) => {
     if (key === 'logout') handleLogout();
     else if (key === 'profile') navigate('/profile');
-    else if (key === 'password') navigate('/profile');
   };
 
   const currentPath = location.pathname;

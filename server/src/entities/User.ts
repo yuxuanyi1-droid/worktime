@@ -5,6 +5,7 @@ import { Role } from './Role';
 import { Timesheet } from './Timesheet';
 import { OvertimeApplication } from './OvertimeApplication';
 import { WeeklyReport } from './WeeklyReport';
+import { UserExternalIdentity } from './UserExternalIdentity';
 
 @Entity('users')
 export class User {
@@ -55,6 +56,10 @@ export class User {
 
   @OneToMany(() => WeeklyReport, report => report.user)
   weeklyReports!: WeeklyReport[];
+
+  /** 绑定的第三方登录身份（Authentik/钉钉等），用于 OIDC 登录与自助绑定 */
+  @OneToMany(() => UserExternalIdentity, identity => identity.user)
+  externalIdentities!: UserExternalIdentity[];
 
   @CreateDateColumn()
   createdAt!: Date;

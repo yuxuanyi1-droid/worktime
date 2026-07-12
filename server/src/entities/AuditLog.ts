@@ -9,10 +9,10 @@ export class AuditLog {
   @PrimaryGeneratedColumn()
   id!: number;
 
-  @Column({ type: 'integer' })
-  userId!: number;
+  @Column({ type: 'integer', nullable: true })
+  userId!: number | null;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, { nullable: true })
   user!: User;
 
   @Column({ type: 'varchar', length: 50 })

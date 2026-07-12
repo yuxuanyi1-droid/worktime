@@ -79,7 +79,8 @@ function RichTextValue({ value }: { value?: string }) {
 
 /** 生成审批详情分享链接 */
 export function getApprovalShareUrl(targetType: string, targetId: number) {
-  return `${window.location.origin}/approval/detail/${targetType}/${targetId}`;
+  // 子路径部署时 __BASE_PATH__ 形如 '/worktime'，需补到 origin 之后
+  return `${window.location.origin}${__BASE_PATH__}/approval/detail/${targetType}/${targetId}`;
 }
 
 // ==================== 审批详情视图（共用） ====================
@@ -171,6 +172,16 @@ function ApprovalDetailView({
                   查看原审批单
                 </Button>
                 <Text type="secondary" style={{ marginLeft: 8 }}>（此工时为修改后重新提交）</Text>
+              </Descriptions.Item>
+            )}
+            {c.quota && (
+              <Descriptions.Item label="小组工时配额" span={c.weekEntries ? 3 : 2}>
+                <span style={{ fontSize: 13 }}>
+                  已消耗 <Text strong style={{ color: c.quota.exceeded ? '#C0564B' : '#6B8F71' }}>{c.quota.consumed}</Text> 天
+                  {' '}/ 总计 <Text strong>{c.quota.total}</Text> 天
+                  （含本次提交 {c.quota.submitted} 天）
+                  {c.quota.exceeded && <Text strong style={{ color: '#C0564B', marginLeft: 8 }}>已超额</Text>}
+                </span>
               </Descriptions.Item>
             )}
           </>

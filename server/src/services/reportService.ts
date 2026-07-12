@@ -5,6 +5,7 @@ import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { Between, Not } from 'typeorm';
 import { ApprovalService } from './approvalService';
 import { BusinessError } from '../utils/errors';
+import { round2 } from '../utils/validation';
 
 type SummaryWithCount = { hours: number; count: number };
 type SummaryHours = { hours: number };
@@ -37,31 +38,40 @@ function addCountSummary(target: Record<string, SummaryWithCount>, key: string, 
 
 function addHoursSummary(target: Record<string, SummaryHours>, key: string, hours: number) {
   if (!target[key]) target[key] = { hours: 0 };
-  target[key].hours += hours;
+  target[key].hours = round2(target[key].hours + hours);
 }
 
 function totalOfDates(byDate: Record<string, number>) {
-  return Object.values(byDate).reduce((sum, hours) => sum + hours, 0);
+  return round2(Object.values(byDate).reduce((sum, hours) => sum + hours, 0));
 }
 
 /**
- * 报表工时去重：按 (userId, date, projectId) 去重，排除 deprecated，保留 id 最大的记录。
+ * 报表工时去重：按 (userId, date) 取最新的已审批通过（approved）的 submissionGroup 的记录。
  * 抽成独立导出函数便于单元测试。
  *
- * 语义：同一条工时的多次提交/修改版本中，取最新非废弃的那一条，
- * 确保报表统计与工时填报页口径一致（填报页 getByUser 也是同样的去重逻辑）。
+ * 版本化语义：
+ *   - 同一天同一版本链可能有多个 submissionGroup（v1 approved, v2 submitted...）
+ *   - 报表只统计 approved：取该 (userId, date) 下 submissionGroupId 最大的 approved 记录
+ *   - v2 审批中时统计 v1，v2 通过后 v1 被 deprecate，统计 v2
+ *   - 同一天多项目在同一 submissionGroup 下各自独立统计
  */
 export function dedupReportTimesheets(records: Timesheet[]): Timesheet[] {
-  const map = new Map<string, Timesheet>();
-  for (const record of records) {
-    if (record.status === 'deprecated') continue;
-    const key = `${record.userId}_${record.date}_${record.projectId}`;
-    const existing = map.get(key);
-    if (!existing || record.id > existing.id) {
-      map.set(key, record);
+  // 找出每个 (userId, date) 对应的最大的 approved submissionGroupId
+  const maxApprovedGroupByKey = new Map<string, number>();
+  for (const r of records) {
+    if (r.status !== 'approved' || !r.submissionGroupId) continue;
+    const key = `${r.userId}_${r.date}`;
+    const cur = maxApprovedGroupByKey.get(key);
+    if (cur === undefined || r.submissionGroupId > cur) {
+      maxApprovedGroupByKey.set(key, r.submissionGroupId);
     }
   }
-  return Array.from(map.values());
+  // 只保留属于该 (userId, date) 最大 approved submissionGroupId 的 approved 记录
+  return records.filter(r => {
+    if (r.status !== 'approved') return false;
+    const key = `${r.userId}_${r.date}`;
+    return r.submissionGroupId === maxApprovedGroupByKey.get(key);
+  });
 }
 
 export class ReportService {
@@ -110,19 +120,16 @@ export class ReportService {
   /**
    * 查询报表用工时记录。
    *
-   * 统计口径：status 为 approved 或 submitted 的记录（排除 deprecated/draft/rejected）。
-   * - approved：已审批通过，正常统计
-   * - submitted：修改审批中的最新版本——旧记录已 deprecated，新记录正在审批，
-   *   纳入统计可避免「修改期间报表工时凭空消失」的问题
-   * 然后由 dedupTimesheets 按 (userId, date, projectId) 去重保留 id 最大，
-   * 确保同一条工时只计一次（取最新版本）。
+   * 统计口径：只统计 approved（已审批通过）。
+   * 版本化去重：由 dedupReportTimesheets 按 (userId, date) 取最大 approved submissionGroup，
+   * 确保修改期间旧版本（仍 approved）正常统计，新版本通过后才替代。
    */
   private async getReportTimesheets(startDate: string, endDate: string, filters: ReportFilters = {}) {
     const qb = this.timesheetRepo.createQueryBuilder('t')
       .leftJoinAndSelect('t.user', 'u')
       .leftJoinAndSelect('t.project', 'p')
       .where('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
-      .andWhere('t.status IN (:...statuses)', { statuses: ['approved', 'submitted'] });
+      .andWhere('t.status = :status', { status: 'approved' });
 
     if (filters.userId) qb.andWhere('t.userId = :userId', { userId: filters.userId });
     if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
@@ -194,14 +201,14 @@ export class ReportService {
     if (userId) qb.andWhere('o.userId = :userId', { userId });
 
     const records = await qb.getMany();
-    const totalHours = records.reduce((sum, record) => sum + Number(record.hours), 0);
+    const totalHours = round2(records.reduce((sum, record) => sum + Number(record.hours), 0));
     const byType = records.reduce((acc, record) => {
-      acc[record.overtimeType] = (acc[record.overtimeType] || 0) + Number(record.hours);
+      acc[record.overtimeType] = round2((acc[record.overtimeType] || 0) + Number(record.hours));
       return acc;
     }, {} as Record<string, number>);
     const byUser = records.reduce((acc, record) => {
       const key = record.user?.realName || UNKNOWN_USER;
-      acc[key] = (acc[key] || 0) + Number(record.hours);
+      acc[key] = round2((acc[key] || 0) + Number(record.hours));
       return acc;
     }, {} as Record<string, number>);
     const byGroup = records.reduce((acc, record) => {
@@ -225,7 +232,7 @@ export class ReportService {
     const monthTimesheets = this.dedupTimesheets(rawMonthTimesheets);
     const monthByDate: Record<string, number> = {};
     for (const record of monthTimesheets) {
-      monthByDate[record.date] = (monthByDate[record.date] || 0) + Number(record.hours);
+      monthByDate[record.date] = round2((monthByDate[record.date] || 0) + Number(record.hours));
     }
     const monthHours = totalOfDates(monthByDate);
     const trend = Object.entries(monthByDate).map(([date, hours]) => ({ date, hours }));
@@ -236,7 +243,7 @@ export class ReportService {
     const monthOvertime = await this.overtimeRepo.find({
       where: { userId, date: Between(monthStart, monthEnd), status: 'approved' },
     });
-    const overtimeHours = monthOvertime.reduce((sum, record) => sum + Number(record.hours), 0);
+    const overtimeHours = round2(monthOvertime.reduce((sum, record) => sum + Number(record.hours), 0));
 
     return { monthHours, overtimeHours, pendingCount, trend };
   }

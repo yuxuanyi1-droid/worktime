@@ -24,3 +24,15 @@ export const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { code: 429, message: '登录尝试过于频繁，请稍后再试' },
 });
+
+/**
+ * OIDC 回调限流：同一 IP 每 10 分钟最多 30 次回调。
+ * 回调是换 token 的敏感端点，限制比通用接口更严格以防重放/探测。
+ */
+export const oidcCallbackLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { code: 429, message: 'SSO 回调请求过于频繁，请稍后再试' },
+});

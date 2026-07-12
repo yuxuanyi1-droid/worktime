@@ -8,6 +8,7 @@ import { PlusOutlined, SendOutlined, DeleteOutlined, SaveOutlined, LeftOutlined,
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import { timesheetApi } from '../../api/timesheet';
+import { approvalApi } from '../../api/approval';
 import { systemApi } from '../../api/system';
 import { statusMap } from '../../types';
 import type { Timesheet as TimesheetData, Project } from '../../types';
@@ -25,6 +26,7 @@ interface WeekRow {
   hours: Record<string, number>; // { 'YYYY-MM-DD': number }
   status?: string; // draft | submitted | approved | rejected
   originalStatus?: string; // 加载时的原始状态，用于区分保存草稿还是修改
+  targetId?: number; // 该组第一条 timesheet 记录的 id（用于撤回审批）
 }
 
 const dayLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
@@ -44,12 +46,30 @@ function newRow(): WeekRow {
   return { key: `row_${++rowKeyCounter}_${Date.now()}`, projectId: undefined, description: '', hours: {} };
 }
 
-/** 天模式下校正：只允许 0、0.5、1 */
-function snapToDay(value: number): number {
+/** 工时填报单位（天步长）可选值与默认值 */
+const UNIT_OPTIONS = [0.1, 0.2, 0.25, 0.5];
+const DEFAULT_UNIT = 0.5;
+/** 把后端原始值（字符串）解析为合法步长 number，非法/老值归一为默认 */
+function parseUnit(raw: unknown): number {
+  const n = Number(raw);
+  return UNIT_OPTIONS.includes(n) ? n : DEFAULT_UNIT;
+}
+/** 按步长对齐：四舍五入到最近的步长倍数，并修掉浮点误差，clamp [0,1] */
+function snapToStep(value: number, step: number): number {
   if (value <= 0) return 0;
-  if (value <= 0.5) return 0.5;
-  if (value <= 1) return 1;
-  return 1;
+  const snapped = Math.round(value / step) * step;
+  return Math.min(1, Number(snapped.toFixed(4)));
+}
+
+/**
+ * 求和并修掉浮点累加误差。
+ * JS 浮点 0.1+0.2=0.30000000000000004，直接 reduce 多个 0.1 步长会得到
+ * 1.0999999999999999 这种值。这里累加后四舍五入到 2 位小数
+ * （最小步长 0.1，合计最多 1 位小数，2 位容差足够消除误差）。
+ */
+function sumRound(values: number[]): number {
+  const total = values.reduce((s, v) => s + (v || 0), 0);
+  return Number(total.toFixed(2));
 }
 
 export default function TimesheetPage() {
@@ -69,8 +89,8 @@ export default function TimesheetPage() {
   const rowSnapshotRef = useRef<Map<string, WeekRow>>(new Map()); // 编辑模式开始时的行快照
   const weekLoadReqId = useRef(0); // 切周请求竞态守卫：只接受最新一次的响应
 
-  // 系统设置：工时单位 days/hours
-  const [unitMode, setUnitMode] = useState<'days' | 'hours'>('days');
+  // 系统设置：工时填报单位（天步长），默认 0.5 天
+  const [unitStep, setUnitStep] = useState<number>(DEFAULT_UNIT);
   const [settingsLoaded, setSettingsLoaded] = useState(false); // 设置加载完成前禁用工时输入，防竞态
 
   const { hasPermission } = usePermission();
@@ -83,11 +103,8 @@ export default function TimesheetPage() {
   // 判断当前周是否有审批中的行（用于区分"撤回修改"和"修改工时"按钮）
   const hasPendingRows = rows.some(r => r.originalStatus === 'submitted');
 
-  const isDayMode = unitMode === 'days';
-  const unitLabel = isDayMode ? '天' : 'h';
-  const unitMax = isDayMode ? 1 : 24;
-  const unitStep = isDayMode ? 0.5 : 0.5;
-  const minWeekTotal = isDayMode ? 5 : 40; // 天模式下至少5天，小时模式下至少40小时
+  const unitLabel = '天';
+  const minWeekTotal = 5; // 周合计不少于5天
 
   const weekDates = useMemo(() => getWeekDates(currentWeekStart), [currentWeekStart]);
 
@@ -108,7 +125,7 @@ export default function TimesheetPage() {
     try {
       const res = await systemApi.getSettings();
       if (res.data?.settings?.timesheet_unit) {
-        setUnitMode(res.data.settings.timesheet_unit === 'hours' ? 'hours' : 'days');
+        setUnitStep(parseUnit(res.data.settings.timesheet_unit));
       }
     } catch (error) {
       message.warning(getErrorMessage(error, '系统设置加载失败，已使用默认工时单位'));
@@ -157,7 +174,8 @@ export default function TimesheetPage() {
       });
       if (reqId !== weekLoadReqId.current) return; // 已有更新的请求，丢弃本次响应
       if (res.data && res.data.list.length > 0) {
-        const allItems = res.data.list;
+        // 过滤掉已驳回/已撤回的记录——这些工时不在周表格中展示/编辑，仅保留在历史记录中查看详情
+        const allItems = res.data.list.filter(item => item.status !== 'rejected' && item.status !== 'withdrawn');
         // 按 projectId 分组（合并所有状态）
         const byProject: Record<number, { items: TimesheetData[]; status: string; originalStatus: string }> = {};
         for (const item of allItems) {
@@ -185,6 +203,7 @@ export default function TimesheetPage() {
             hours,
             status: group.status,
             originalStatus: group.originalStatus,
+            targetId: group.items[0]?.id,
           };
         });
         setRows(loadedRows.length > 0 ? loadedRows : [newRow()]);
@@ -244,15 +263,15 @@ export default function TimesheetPage() {
 
   const updateHours = (key: string, date: string, value: number | null) => {
     let corrected = value || 0;
-    // 天模式下校正：自动修正为 0.5 或 1
-    if (isDayMode && corrected > 0) {
-      corrected = snapToDay(corrected);
+    // 按填报单位步长校正（自动修正为最近的步长倍数）
+    if (corrected > 0) {
+      corrected = snapToStep(corrected, unitStep);
     }
-    // 单日工时校验：计算当前日期其他行的工时之和
-    const otherRowsTotal = rows.filter(r => r.key !== key).reduce((sum, r) => sum + (r.hours[date] || 0), 0);
-    const dayLimit = isDayMode ? 1 : 24;
-    if (otherRowsTotal + corrected > dayLimit) {
-      message.warning(`${dayjs(date).format('M月D日')}工时合计不能超过${isDayMode ? '1天' : '24小时'}，当前已有 ${otherRowsTotal}${unitLabel}`);
+    // 单日工时校验：计算当前日期其他行的工时之和（sumRound 避免浮点累加误差）
+    const otherRowsTotal = sumRound(rows.filter(r => r.key !== key).map(r => r.hours[date] || 0));
+    const dayLimit = 1; // 每天最多1天
+    if (sumRound([otherRowsTotal, corrected]) > dayLimit) {
+      message.warning(`${dayjs(date).format('M月D日')}工时合计不能超过1天，当前已有 ${otherRowsTotal}${unitLabel}`);
       return;
     }
     setRows(prev => prev.map(r =>
@@ -338,15 +357,15 @@ export default function TimesheetPage() {
   };
 
   /** 计算一行总计 */
-  const rowTotal = (row: WeekRow) => weekDates.reduce((sum, d) => sum + (row.hours[d] || 0), 0);
+  const rowTotal = (row: WeekRow) => sumRound(weekDates.map(d => row.hours[d] || 0));
 
   /** 计算每天列总计 */
   const dayTotals = useMemo(() => {
-    return weekDates.map(d => rows.reduce((sum, r) => sum + (r.hours[d] || 0), 0));
+    return weekDates.map(d => sumRound(rows.map(r => r.hours[d] || 0)));
   }, [rows, weekDates]);
 
   /** 周总工时 */
-  const weekTotal = useMemo(() => dayTotals.reduce((a, b) => a + b, 0), [dayTotals]);
+  const weekTotal = useMemo(() => sumRound(dayTotals), [dayTotals]);
 
   /** 收集有效数据（所有行） */
   const collectItems = () => {
@@ -365,13 +384,9 @@ export default function TimesheetPage() {
 
   /** 校验周工时 */
   const validateWeekTotal = (items: { hours: number }[]) => {
-    const total = items.reduce((sum, i) => sum + i.hours, 0);
-    if (isDayMode && total < 5) {
+    const total = sumRound(items.map(i => i.hours));
+    if (total < 5) {
       message.warning(`每周工时合计不得少于5天，当前仅 ${total} 天`);
-      return false;
-    }
-    if (!isDayMode && total < 40) {
-      message.warning(`每周工时合计不得少于40小时，当前仅 ${total} 小时`);
       return false;
     }
     return true;
@@ -416,7 +431,7 @@ export default function TimesheetPage() {
       setSaving(true);
       try {
         await timesheetApi.modifySubmitted(submittedRows);
-        message.success('工时已修改，可重新提交审批');
+        message.success('工时已修改，新审批已自动发起');
         setEditing(false);
         loadWeekDrafts();
         loadHistory();
@@ -499,18 +514,16 @@ export default function TimesheetPage() {
     }
     // 校验周工时：计算整周总工时（包括已通过/审批中未修改的行）
     const allWeekItems = validRows.flatMap(r => r.entries);
-    const submittedHours = allWeekItems.reduce((s, e) => s + e.hours, 0);
-    const approvedHours = rows
-      .filter(r => (r.originalStatus === 'approved' || r.originalStatus === 'submitted')
-        && (!editing || !isRowChanged(r)))
-      .reduce((sum, r) => sum + weekDates.reduce((s, d) => s + (r.hours[d] || 0), 0), 0);
-    const totalWeekHours = submittedHours + approvedHours;
-    if (isDayMode && totalWeekHours < 5) {
+    const submittedHours = sumRound(allWeekItems.map(e => e.hours));
+    const approvedHours = sumRound(
+      rows
+        .filter(r => (r.originalStatus === 'approved' || r.originalStatus === 'submitted')
+          && (!editing || !isRowChanged(r)))
+        .flatMap(r => weekDates.map(d => r.hours[d] || 0))
+    );
+    const totalWeekHours = sumRound([submittedHours, approvedHours]);
+    if (totalWeekHours < 5) {
       message.warning(`每周工时合计不得少于5天，当前仅 ${totalWeekHours} 天`);
-      return;
-    }
-    if (!isDayMode && totalWeekHours < 40) {
-      message.warning(`每周工时合计不得少于40小时，当前仅 ${totalWeekHours} 小时`);
       return;
     }
 
@@ -519,7 +532,7 @@ export default function TimesheetPage() {
       const p = projects.find(pp => pp.id === r.projectId);
       return p?.name || `项目#${r.projectId}`;
     });
-    const totalH = allWeekItems.reduce((s, e) => s + e.hours, 0);
+    const totalH = sumRound(allWeekItems.map(e => e.hours));
 
     Modal.confirm({
       title: '确认提交审批',
@@ -528,7 +541,7 @@ export default function TimesheetPage() {
           <p>即将提交 <b>{validRows.length}</b> 个项目行的审批申请：</p>
           <ul style={{ paddingLeft: 20, margin: '8px 0' }}>
             {projectNames.map((name, i) => (
-              <li key={i}>{name}：{validRows[i].entries.reduce((s, e) => s + e.hours, 0)}{unitLabel}</li>
+              <li key={i}>{name}：{sumRound(validRows[i].entries.map(e => e.hours))}{unitLabel}</li>
             ))}
           </ul>
           <p>周合计：<b>{totalH}</b>{unitLabel}</p>
@@ -592,7 +605,7 @@ export default function TimesheetPage() {
       const dates = items.map(i => i.date).sort();
       const ws = dayjs(dates[0]).isoWeekday(1).format('YYYY-MM-DD');
       const we = dayjs(ws).add(6, 'day').format('YYYY-MM-DD');
-      const totalHours = items.reduce((s, i) => s + i.hours, 0);
+      const totalHours = sumRound(items.map(i => i.hours));
       // 状态：如果全组都是 deprecated，则显示 deprecated；否则取最高优先级的非 draft 非 deprecated 状态
       const allDeprecated = items.every(i => i.status === 'deprecated');
       const status = allDeprecated
@@ -675,7 +688,7 @@ export default function TimesheetPage() {
             </Button>
           );
         }
-        if (record.status === 'deprecated') {
+        if (record.status === 'deprecated' || record.status === 'withdrawn') {
           return (
             <Button
               type="link" size="small"
@@ -689,9 +702,9 @@ export default function TimesheetPage() {
           return (
             <Button
               type="link" size="small"
-              onClick={() => setCurrentWeekStart(dayjs(record.weekStart))}
+              onClick={() => navigate(`/approval/detail/timesheet/${record.targetId}`)}
             >
-              修改
+              详情
             </Button>
           );
         }
@@ -795,7 +808,7 @@ export default function TimesheetPage() {
         ) : (
           <InputNumber
             min={0}
-            max={unitMax}
+            max={1}
             step={unitStep}
             size="small"
             value={row.hours[date] || null}
@@ -887,11 +900,40 @@ export default function TimesheetPage() {
                       <Button
                         icon={<EditOutlined />}
                         onClick={() => {
-                          // 快照当前行数据，用于后续判断是否有变更
-                          const snap = new Map<string, WeekRow>();
-                          rows.forEach(r => snap.set(r.key, { ...r, hours: { ...r.hours } }));
-                          rowSnapshotRef.current = snap;
-                          setEditing(true);
+                          if (hasPendingRows) {
+                            // 有审批中的提交：先撤回本周所有审批中的单子，再进入编辑
+                            const pendingTargetIds = rows
+                              .filter(r => r.originalStatus === 'submitted' && r.targetId)
+                              .map(r => r.targetId!);
+                            Modal.confirm({
+                              title: '撤回确认',
+                              content: '此操作会撤回本周所有正在审批中的提交，已审批通过的不受影响，确认撤回吗？',
+                              okText: '确认撤回',
+                              cancelText: '取消',
+                              onOk: async () => {
+                                try {
+                                  await Promise.all(
+                                    pendingTargetIds.map(id => approvalApi.withdraw('timesheet', id))
+                                  );
+                                  message.success('已撤回审批中的提交');
+                                  // 快照当前行数据，用于后续判断是否有变更
+                                  const snap = new Map<string, WeekRow>();
+                                  rows.forEach(r => snap.set(r.key, { ...r, hours: { ...r.hours } }));
+                                  rowSnapshotRef.current = snap;
+                                  await loadWeekDrafts();
+                                  setEditing(true);
+                                } catch (error) {
+                                  message.error(getErrorMessage(error, '撤回失败'));
+                                }
+                              },
+                            });
+                          } else {
+                            // 无审批中的提交（仅有已通过的）：直接进入编辑（走 modifySubmitted 逻辑）
+                            const snap = new Map<string, WeekRow>();
+                            rows.forEach(r => snap.set(r.key, { ...r, hours: { ...r.hours } }));
+                            rowSnapshotRef.current = snap;
+                            setEditing(true);
+                          }
                         }}
                       >
                         {hasPendingRows ? '撤回修改' : '修改工时'}
@@ -943,8 +985,7 @@ export default function TimesheetPage() {
                   ))}
                   <span>
                     周合计：<Text strong style={{ color: weekTotal >= minWeekTotal ? '#6B8F71' : '#C0564B', fontSize: 15 }}>{weekTotal}</Text>{unitLabel}
-                    {isDayMode && weekTotal < 5 && <Text type="warning" style={{ marginLeft: 8 }}>(不足5天)</Text>}
-                    {!isDayMode && weekTotal < 40 && <Text type="warning" style={{ marginLeft: 8 }}>(不足40h)</Text>}
+                    {weekTotal < 5 && <Text type="warning" style={{ marginLeft: 8 }}>(不足5天)</Text>}
                   </span>
                 </Space>
               </Col>

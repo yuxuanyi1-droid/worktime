@@ -1,5 +1,5 @@
 import request from '../utils/request';
-import { Department, Group, Role, Permission, Project, ProjectSE, ApprovalFlow, PageResult } from '../types';
+import { Department, Group, Role, Permission, Project, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, PageResult } from '../types';
 
 export interface UserListItem {
   id: number;
@@ -63,6 +63,11 @@ export const systemApi = {
   getProjectSEs: (projectId: number) => request.get<any, { code: number; data: ProjectSE[] }>(`/system/projects/${projectId}/ses`),
   addProjectSE: (projectId: number, data: { userId: number; groupId: number }) => request.post<any, { code: number }>(`/system/projects/${projectId}/ses`, data),
   removeProjectSE: (id: number) => request.delete<any, { code: number }>(`/system/projects/ses/${id}`),
+
+  // 项目工时配额（按组配置，单位人/天）
+  getProjectAllocations: (projectId: number) => request.get<any, { code: number; data: ProjectWorkloadAllocation[] }>(`/system/projects/${projectId}/allocations`),
+  addProjectAllocation: (projectId: number, data: { groupId: number; allocation: number }) => request.post<any, { code: number }>(`/system/projects/${projectId}/allocations`, data),
+  removeProjectAllocation: (id: number) => request.delete<any, { code: number }>(`/system/projects/allocations/${id}`),
 
   // 审批流程
   getApprovalFlows: (type?: string) => request.get<any, { code: number; data: ApprovalFlow[] }>('/system/approval-flows', { params: { type } }),

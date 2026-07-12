@@ -92,3 +92,12 @@ export function parseArray<T>(value: unknown, field: string, parser: (item: unkn
 export function firstQueryValue(value: unknown) {
   return Array.isArray(value) ? value[0] : value;
 }
+
+/**
+ * 四舍五入到 2 位小数，消除工时累加的浮点误差
+ * （如 0.1+0.2=0.30000000000000004）。工时最小步长 0.1 天，
+ * 合计最多 1 位小数，2 位容差足够。
+ */
+export function round2(value: number): number {
+  return Number(value.toFixed(2));
+}

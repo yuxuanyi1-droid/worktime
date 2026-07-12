@@ -53,6 +53,15 @@ export interface ApprovalDetail {
     submissionGroupId?: number;
     weekEntries?: { date: string; hours: number }[];
     previousApproval?: { targetId: number; submissionGroupId: number } | null;
+    /** 工时配额信息（timesheet 审批单动态计算，null=未配置配额=不限制） */
+    quota?: {
+      total: number;
+      consumed: number;
+      remaining: number;
+      submitted: number;
+      exceeded: boolean;
+      groupName?: string;
+    } | null;
   };
   flowSteps: {
     stepOrder: number;

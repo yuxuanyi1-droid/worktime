@@ -6,6 +6,7 @@ import MainLayout from '../components/Layout/MainLayout';
 import { Result, Button, Spin } from 'antd';
 
 const Login = lazy(() => import('../pages/Login'));
+const OidcCallbackPage = lazy(() => import('../pages/OidcCallback'));
 const Dashboard = lazy(() => import('../pages/Dashboard'));
 const Timesheet = lazy(() => import('../pages/Timesheet'));
 const Overtime = lazy(() => import('../pages/Overtime'));
@@ -66,6 +67,8 @@ export default function AppRouter() {
     <Suspense fallback={<div style={{ padding: 48, textAlign: 'center' }}><Spin /></div>}>
       <Routes>
       <Route path="/login" element={<Login />} />
+      {/* OIDC 回调页：未登录态回调时还没有 token，必须放在 PrivateRoute 之外 */}
+      <Route path="/oidc/callback" element={<OidcCallbackPage />} />
       <Route
         path="/"
         element={
@@ -91,7 +94,7 @@ export default function AppRouter() {
             status="404"
             title="页面不存在"
             subTitle="你访问的页面不存在或链接已失效"
-            extra={<Button type="primary" onClick={() => window.location.href = '/'}>返回首页</Button>}
+            extra={<Button type="primary" onClick={() => window.location.href = __BASE_URL__}>返回首页</Button>}
           />
         } />
       </Route>

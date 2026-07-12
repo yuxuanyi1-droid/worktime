@@ -17,11 +17,39 @@ export interface UserInfo {
   group: { id: number; name: string } | null;
   roles: { id: number; name: string; label: string }[];
   permissions: string[];
+  /** 档案是否由 IdP 管控（绑定了 JIT provider）——前端据此隐藏密码修改/信息编辑入口 */
+  idpManaged?: boolean;
 }
 
 export interface LoginResult {
   token: string;
   user: UserInfo;
+}
+
+// ==================== OIDC / 第三方登录 ====================
+/** 对用户可见的 OIDC 提供商（环境变量已配 ∩ 管理员开关已开） */
+export interface OidcProviderInfo {
+  name: string;
+  label: string;
+  type: 'oidc' | 'dingtalk';
+  /** 是否 JIT 自动建号——true=主登录方式(直接登录),false=补充登录(需绑定) */
+  jit?: boolean;
+}
+
+/** 用户的某个第三方账号绑定记录 */
+export interface OidcBinding {
+  id: number;
+  provider: string;
+  providerLabel: string;
+  externalUsername?: string | null;
+  boundAt: string;
+}
+
+/** 绑定成功后返回的绑定信息 */
+export interface OidcBindResult {
+  provider: string;
+  providerLabel: string;
+  externalUsername?: string | null;
 }
 
 // 部门
@@ -80,6 +108,7 @@ export interface Project {
   status: string; // active=进行中, completed=已完成, suspended=已中止, cancelled=已取消
   managers?: { id: number; realName: string }[];
   moduleSEs?: ProjectSE[];
+  workloadAllocations?: ProjectWorkloadAllocation[];
   canUpdate?: boolean;
   canAssignSE?: boolean;
   canAssignManager?: boolean;
@@ -109,6 +138,14 @@ export interface ProjectSE {
   } | null;
   userName?: string;
   groupName?: string;
+}
+
+// 项目工时配额（按组配置，单位人/天）
+export interface ProjectWorkloadAllocation {
+  id: number;
+  groupId: number;
+  groupName: string;
+  allocation: number;
 }
 
 // 工时

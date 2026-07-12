@@ -12,6 +12,7 @@ import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { WeeklyReport } from '../entities/WeeklyReport';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
 import { ProjectSE } from '../entities/ProjectSE';
+import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
 import { ApprovalFlow } from '../entities/ApprovalFlow';
 import { ApprovalFlowStep } from '../entities/ApprovalFlowStep';
 import { ApprovalFlowVersion } from '../entities/ApprovalFlowVersion';
@@ -25,9 +26,11 @@ import { AnnouncementRead } from '../entities/AnnouncementRead';
 import { PermissionRequest } from '../entities/PermissionRequest';
 import { UserPermissionGrant } from '../entities/UserPermissionGrant';
 import { SubmissionSequence } from '../entities/SubmissionSequence';
+import { UserExternalIdentity } from '../entities/UserExternalIdentity';
 import { InitSchema1700000000000 } from '../migrations/1700000000000-InitSchema';
 import { PrecisionAndIndexes1700000000001 } from '../migrations/1700000000001-PrecisionAndIndexes';
 import { CountersignSupport1700000000002 } from '../migrations/1700000000002-CountersignSupport';
+import { RootGroupId1700000000003 } from '../migrations/1700000000003-RootGroupId';
 
 const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db');
 // 默认关闭 synchronize（防止生产环境自动改表丢数据）；
@@ -44,13 +47,14 @@ export const AppDataSource = new DataSource({
   entities: [
     User, Department, Group, Role, Permission, Project,
     Timesheet, OvertimeApplication, WeeklyReport,
-    ApprovalRecord, ProjectSE, ApprovalFlow, ApprovalFlowStep,
+    ApprovalRecord, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep,
     ApprovalFlowVersion, ApprovalInstance, ApprovalTask,
     SystemSetting, Notification, AuditLog, Announcement, AnnouncementRead,
     PermissionRequest, UserPermissionGrant,
     SubmissionSequence,
+    UserExternalIdentity,
   ],
-  migrations: [InitSchema1700000000000, PrecisionAndIndexes1700000000001, CountersignSupport1700000000002],
+  migrations: [InitSchema1700000000000, PrecisionAndIndexes1700000000001, CountersignSupport1700000000002, RootGroupId1700000000003],
   subscribers: [],
   prepareDatabase: (db: any) => {
     db.pragma('journal_mode = WAL');

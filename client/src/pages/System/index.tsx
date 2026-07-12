@@ -11,7 +11,7 @@ import {
   ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import { systemApi, UserListItem, SimpleUser } from '../../api/system';
-import { Department, Group, Role, Permission, Project, ProjectSE, ApprovalFlow, ApprovalFlowStep, stepTypeMap } from '../../types';
+import { Department, Group, Role, Permission, Project, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep, stepTypeMap } from '../../types';
 import { announcementApi, AnnouncementItem, AnnouncementStats } from '../../api/notification';
 import { useAppStore } from '../../stores/appStore';
 import { usePermission } from '../../hooks/usePermission';
@@ -64,27 +64,17 @@ export default function System() {
   );
 }
 
-// ==================== 组织架构管理（部门+多层级分组） ====================
+// ==================== 组织架构（只读展示，数据由 OIDC/IdP 同步） ====================
 function OrgTab() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [groupTree, setGroupTree] = useState<any[]>([]);
-  const [users, setUsers] = useState<SimpleUser[]>([]);
-  const [deptModalOpen, setDeptModalOpen] = useState(false);
-  const [groupModalOpen, setGroupModalOpen] = useState(false);
-  const [editDept, setEditDept] = useState<Department | null>(null);
-  const [editGroup, setEditGroup] = useState<Group | null>(null);
   const [selectedDeptId, setSelectedDeptId] = useState<number | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [deptForm] = Form.useForm();
-  const [groupForm] = Form.useForm();
 
   const load = async () => {
-    const [deptRes, userRes] = await Promise.all([
+    const [deptRes] = await Promise.all([
       systemApi.getDepartments(),
-      systemApi.getAllUsers(),
     ]);
     if (deptRes.data) setDepartments(deptRes.data);
-    if (userRes.data) setUsers(userRes.data);
 
     // 根据是否选中部门加载对应分组树
     if (selectedDeptId) {
@@ -99,33 +89,7 @@ function OrgTab() {
 
   useEffect(() => { load(); }, [selectedDeptId]);
 
-  const handleDeptSave = async (values: any) => {
-    if (editDept) {
-      await systemApi.updateDepartment(editDept.id, values);
-    } else {
-      await systemApi.createDepartment(values);
-    }
-    message.success('操作成功');
-    setDeptModalOpen(false);
-    deptForm.resetFields();
-    setEditDept(null);
-    load();
-  };
-
-  const handleGroupSave = async (values: any) => {
-    if (editGroup) {
-      await systemApi.updateGroup(editGroup.id, values);
-    } else {
-      await systemApi.createGroup(values);
-    }
-    message.success('操作成功');
-    setGroupModalOpen(false);
-    groupForm.resetFields();
-    setEditGroup(null);
-    load();
-  };
-
-  // 将分组树转为 Ant Design Tree 结构
+  // 将分组树转为 Ant Design Tree 结构（只读，无操作按钮）
   const buildTreeData = (groups: any[]): any[] => {
     return groups.map(g => ({
       key: `group-${g.id}`,
@@ -135,28 +99,6 @@ function OrgTab() {
           {g.name}
           {g.leader && <Tag color="blue" style={{ marginLeft: 8, fontSize: 12 }}>负责人: {g.leader.realName}</Tag>}
           {g.members?.length > 0 && <Tag style={{ marginLeft: 4, fontSize: 11, color: '#7A7060' }}>{g.members.length}人</Tag>}
-          <span style={{ marginLeft: 8 }}>
-          <PermissionGuard permission="system:org:manage">
-            <Tooltip title="添加子组"><PlusOutlined style={{ color: '#4A8B5E', cursor: 'pointer' }} onClick={() => {
-              setEditGroup(null);
-              groupForm.resetFields();
-              groupForm.setFieldsValue({ departmentId: g.departmentId, parentId: g.id });
-              setGroupModalOpen(true);
-            }} /></Tooltip>
-          </PermissionGuard>
-          <PermissionGuard permission="system:org:manage">
-            <Tooltip title="编辑"><EditOutlined style={{ color: '#6B8F71', marginLeft: 8, cursor: 'pointer' }} onClick={() => {
-              setEditGroup(g);
-              groupForm.setFieldsValue({ name: g.name, description: g.description, leaderId: g.leader?.id, parentId: g.parentId, departmentId: g.departmentId });
-              setGroupModalOpen(true);
-            }} /></Tooltip>
-          </PermissionGuard>
-          <PermissionGuard permission="system:org:manage">
-            <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteGroup(g.id); message.success('删除成功'); load(); }}>
-              <DeleteOutlined style={{ color: '#C0564B', marginLeft: 8, cursor: 'pointer' }} />
-            </Popconfirm>
-          </PermissionGuard>
-          </span>
         </span>
       ),
       children: [
@@ -166,10 +108,15 @@ function OrgTab() {
             <span style={{ color: '#7A7060', fontSize: 12 }}>
               <UserOutlined style={{ marginRight: 4 }} />
               {g.members.map((m: any) => (
-                <Tag key={m.id} style={{ fontSize: 11, marginRight: 4, marginBottom: 2 }}
-                  color={g.leader?.id === m.id ? 'blue' : 'default'}>
-                  {m.realName}{g.leader?.id === m.id ? '(负责人)' : ''}
-                </Tag>
+                <span key={m.id} style={{ display: 'inline-flex', alignItems: 'center', marginRight: 8, marginBottom: 2 }}>
+                  <Tag style={{ fontSize: 11, marginRight: 2, marginBottom: 0 }}
+                    color={g.leader?.id === m.id ? 'blue' : 'default'}>
+                    {m.realName}{g.leader?.id === m.id ? '(负责人)' : ''}
+                  </Tag>
+                  {m.roles?.map((role: any) => (
+                    <Tag key={role.id} color="orange" style={{ fontSize: 10, marginRight: 2, marginBottom: 0 }}>{role.label}</Tag>
+                  ))}
+                </span>
               ))}
             </span>
           ),
@@ -191,65 +138,20 @@ function OrgTab() {
             <ApartmentOutlined style={{ marginRight: 6 }} />
             <strong>{dept.name}</strong>
             {dept.leader && <Tag color="green" style={{ marginLeft: 8, fontSize: 12 }}>负责人: {dept.leader.realName}</Tag>}
-            <span style={{ marginLeft: 8 }}>
-              <PermissionGuard permission="system:org:manage">
-                <Tooltip title="编辑"><EditOutlined style={{ color: '#6B8F71', cursor: 'pointer' }} onClick={() => {
-                  setEditDept(dept);
-                  deptForm.setFieldsValue({ name: dept.name, description: dept.description, leaderId: dept.leader?.id });
-                  setDeptModalOpen(true);
-                }} /></Tooltip>
-              </PermissionGuard>
-              <PermissionGuard permission="system:org:manage">
-                <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteDepartment(dept.id); message.success('删除成功'); load(); }}>
-                  <DeleteOutlined style={{ color: '#C0564B', marginLeft: 8, cursor: 'pointer' }} />
-                </Popconfirm>
-              </PermissionGuard>
-            </span>
           </span>
         ),
-        children: [
-          // 在该部门下添加分组按钮
-          {
-            key: `add-group-${dept.id}`,
-            title: (
-              <Button type="dashed" size="small" icon={<PlusOutlined />} onClick={() => {
-                setEditGroup(null);
-                groupForm.resetFields();
-                groupForm.setFieldsValue({ departmentId: dept.id });
-                setGroupModalOpen(true);
-              }}>添加分组</Button>
-            ),
-            selectable: false,
-            children: buildTreeData(groupTree.filter((g: any) => g.departmentId === dept.id)),
-          },
-        ],
+        children: buildTreeData(groupTree.filter((g: any) => g.departmentId === dept.id)),
       })),
   ];
 
-  // 获取所有分组平铺列表（用于选择父级）
-  const flattenGroups = (groups: any[], result: { id: number; name: string; level: number }[] = []) => {
-    for (const g of groups) {
-      result.push({ id: g.id, name: g.name, level: g.level || 0 });
-      if (g.children?.length) flattenGroups(g.children, result);
-    }
-    return result;
-  };
-
-  const allGroupsFlat = flattenGroups(groupTree);
-
   return (
     <div>
+      <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
+        组织架构由身份源（Authentik）同步，用户登录时自动创建/更新，此处仅展示。如需修改请在身份源中调整。
+      </div>
       <Row gutter={16}>
         <Col span={6}>
-          <Card title="部门列表" size="small" extra={
-            <PermissionGuard permission="system:org:manage">
-              <Button type="link" size="small" icon={<PlusOutlined />} onClick={() => {
-                setEditDept(null);
-                deptForm.resetFields();
-                setDeptModalOpen(true);
-              }}>新增</Button>
-            </PermissionGuard>
-          }>
+          <Card title="部门列表" size="small">
             {departments.map(d => (
               <div key={d.id} style={{
                 padding: '8px 12px', cursor: 'pointer', borderRadius: 6, marginBottom: 4,
@@ -266,15 +168,7 @@ function OrgTab() {
         <Col span={18}>
           <Card title={`组织架构 ${selectedDeptId ? `(${departments.find(d => d.id === selectedDeptId)?.name || ''})` : ''}`}
             size="small" extra={
-              <Space>
-                <Button size="small" icon={<PlusOutlined />} onClick={() => {
-                  setEditGroup(null);
-                  groupForm.resetFields();
-                  if (selectedDeptId) groupForm.setFieldsValue({ departmentId: selectedDeptId });
-                  setGroupModalOpen(true);
-                }}>新增分组</Button>
-                <Button size="small" icon={<ReloadOutlined />} onClick={load} />
-              </Space>
+              <Button size="small" icon={<ReloadOutlined />} onClick={load} />
             }>
             {treeData.length ? (
               <Tree treeData={treeData} defaultExpandAll blockNode />
@@ -284,50 +178,6 @@ function OrgTab() {
           </Card>
         </Col>
       </Row>
-
-      {/* 部门编辑 Modal */}
-      <Modal title={editDept ? '编辑部门' : '新增部门'} open={deptModalOpen} confirmLoading={saving}
-        onCancel={() => { setDeptModalOpen(false); setEditDept(null); }} onOk={() => deptForm.submit()}>
-        <Form form={deptForm} layout="vertical" onFinish={handleDeptSave}>
-          <Form.Item name="name" label="部门名称" rules={[{ required: true, message: '请输入' }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="leaderId" label="部门负责人">
-            <Select allowClear showSearch optionFilterProp="label"
-              placeholder="选择负责人"
-              options={users.map(u => ({ label: u.realName, value: u.id }))} />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* 分组编辑 Modal */}
-      <Modal title={editGroup ? '编辑分组' : '新增分组'} open={groupModalOpen} confirmLoading={saving}
-        onCancel={() => { setGroupModalOpen(false); setEditGroup(null); }} onOk={() => groupForm.submit()}>
-        <Form form={groupForm} layout="vertical" onFinish={handleGroupSave}>
-          <Form.Item name="name" label="分组名称" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="departmentId" label="所属部门">
-            <Select allowClear placeholder="选择部门" options={departments.map(d => ({ label: d.name, value: d.id }))} />
-          </Form.Item>
-          <Form.Item name="parentId" label="上级分组">
-            <Select allowClear placeholder="无（顶级组）" options={allGroupsFlat.map(g => ({
-              label: `${'　'.repeat(g.level)}${g.name}`, value: g.id,
-            }))} />
-          </Form.Item>
-          <Form.Item name="leaderId" label="负责人">
-            <Select allowClear showSearch optionFilterProp="label"
-              placeholder="选择负责人"
-              options={users.map(u => ({ label: u.realName, value: u.id }))} />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-        </Form>
-      </Modal>
     </div>
   );
 }
@@ -361,7 +211,21 @@ function UserTab() {
   useEffect(() => { load(); }, [page]);
 
   // 构建分组 TreeSelect 数据：部门 > 分组(多级)
-  const buildGroupSelectTree = (): any[] => {
+  const buildGroupNodes = (groups: any[]): any[] => {
+    return groups.map(g => ({
+      title: g.name + (g.leader ? ` (${g.leader.realName})` : ''),
+      value: g.id,
+      key: `group-${g.id}`,
+      children: g.children?.length ? buildGroupNodes(g.children) : [],
+    }));
+  };
+
+  const buildGroupSelectTree = (deptId?: number): any[] => {
+    if (deptId) {
+      // 已选部门：只展示该部门下的分组（平铺，不再嵌套部门层级）
+      return buildGroupNodes(groupTreeData.filter((g: any) => g.departmentId === deptId));
+    }
+    // 未选部门：展示全部部门作为分组节点（保持原行为）
     return departments.map(dept => ({
       title: dept.name,
       value: `dept-${dept.id}`,
@@ -372,16 +236,24 @@ function UserTab() {
     }));
   };
 
-  const buildGroupNodes = (groups: any[]): any[] => {
-    return groups.map(g => ({
-      title: g.name + (g.leader ? ` (${g.leader.realName})` : ''),
-      value: g.id,
-      key: `group-${g.id}`,
-      children: g.children?.length ? buildGroupNodes(g.children) : [],
-    }));
-  };
+  // 监听部门选择，动态过滤分组下拉
+  const watchedDeptId = Form.useWatch('departmentId', form);
+  const groupSelectTreeData = buildGroupSelectTree(watchedDeptId);
 
-  const groupSelectTreeData = buildGroupSelectTree();
+  // 部门切换时清空已选分组（旧分组可能不属于新部门）
+  useEffect(() => {
+    if (!modalOpen) return;
+    const currentGroupId = form.getFieldValue('groupId');
+    if (currentGroupId == null) return;
+    // 校验当前分组是否属于所选部门，不属于则清空
+    const belongs = groupSelectTreeData.some(node => {
+      const search = (nodes: any[]): boolean => nodes.some(n =>
+        n.value === currentGroupId || (n.children?.length && search(n.children))
+      );
+      return search([node]);
+    });
+    if (!belongs) form.setFieldValue('groupId', undefined);
+  }, [watchedDeptId]);
 
   const handleSave = async (values: any) => {
     if (editItem) {
@@ -581,12 +453,15 @@ function ProjectTab() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [seModalOpen, setSeModalOpen] = useState(false);
+  const [allocationModalOpen, setAllocationModalOpen] = useState(false);
   const [editItem, setEditItem] = useState<any | null>(null);
   const [selectedProject, setSelectedProject] = useState<any>(null);
   const [projectSEs, setProjectSEs] = useState<ProjectSE[]>([]);
+  const [projectAllocations, setProjectAllocations] = useState<ProjectWorkloadAllocation[]>([]);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
   const [seForm] = Form.useForm();
+  const [allocationForm] = Form.useForm();
 
   const load = async () => {
     const [projRes, userRes, groupRes] = await Promise.all([
@@ -628,6 +503,20 @@ function ProjectTab() {
     load();
   };
 
+  const loadProjectAllocations = async (projectId: number) => {
+    const res = await systemApi.getProjectAllocations(projectId);
+    if (res.data) setProjectAllocations(res.data);
+  };
+
+  const handleAddAllocation = async (values: any) => {
+    if (!selectedProject) return;
+    await systemApi.addProjectAllocation(selectedProject.id, values);
+    message.success('保存成功');
+    allocationForm.resetFields();
+    loadProjectAllocations(selectedProject.id);
+    load();
+  };
+
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 60 },
     { title: '项目名称', dataIndex: 'name' },
@@ -646,9 +535,15 @@ function ProjectTab() {
         <Tag key={se.id} color="purple">{se.user?.realName} → {se.group?.name}</Tag>
       )) : <Tag>未配置</Tag>;
     }},
+    { title: '工时配额', key: 'allocations', width: 200, render: (_: any, r: any) => {
+      const allocs = r.workloadAllocations || [];
+      return allocs.length ? allocs.map((a: any) => (
+        <Tag key={a.id} color="cyan">{a.groupName}: {a.allocation}天</Tag>
+      )) : <Tag>未配置</Tag>;
+    }},
     { title: '状态', dataIndex: 'status', width: 80, render: (s: number) => <Tag color={s === 1 ? 'green' : 'default'}>{s === 1 ? '进行中' : '已结束'}</Tag> },
     {
-      title: '操作', key: 'action', width: 260,
+      title: '操作', key: 'action', width: 340,
       render: (_: any, record: any) => (
         <Space>
           <PermissionGuard permission="project:update">
@@ -666,6 +561,12 @@ function ProjectTab() {
               seForm.resetFields();
               setSeModalOpen(true);
             }}>配置SE</Button>
+            <Button type="link" size="small" onClick={() => {
+              setSelectedProject(record);
+              loadProjectAllocations(record.id);
+              allocationForm.resetFields();
+              setAllocationModalOpen(true);
+            }}>配置工时</Button>
           </PermissionGuard>
           <PermissionGuard permission="project:delete">
             <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteProject(record.id); message.success('删除成功'); load(); }}>
@@ -746,9 +647,57 @@ function ProjectTab() {
             <Form.Item>
               <Button type="primary" htmlType="submit">添加</Button>
             </Form.Item>
-            </Form>
+          </Form>
           </Card>
         </PermissionGuard>
+      </Modal>
+
+      {/* 工时配额 Modal */}
+      <Modal title={`配置工时配额 - ${selectedProject?.name || ''}`} open={allocationModalOpen}
+        onCancel={() => { setAllocationModalOpen(false); setSelectedProject(null); }} footer={null} width={600}>
+        <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
+          按组配置工时配额（单位：人/天）。用户提交工时后，审批单中会动态展示该组在本项目的配额消耗，超额时向审批人警告。未配置的组不限制。
+        </div>
+        <Card size="small" title="已有配额" style={{ marginBottom: 16 }}>
+          <Table rowKey="id" dataSource={projectAllocations} pagination={{ pageSize: 10 }} size="small"
+            locale={{ emptyText: '暂无配额配置' }}
+            columns={[
+              { title: '组', key: 'groupName', dataIndex: 'groupName' },
+              { title: '配额(人/天)', key: 'allocation', dataIndex: 'allocation', width: 120 },
+              {
+                title: '操作', key: 'action', width: 80,
+                render: (_: any, r: ProjectWorkloadAllocation) => (
+                  <Popconfirm title="确定删除?" onConfirm={async () => {
+                    await systemApi.removeProjectAllocation(r.id);
+                    message.success('删除成功');
+                    if (selectedProject) loadProjectAllocations(selectedProject.id);
+                    load();
+                  }}>
+                    <Button type="link" size="small" danger>删除</Button>
+                  </Popconfirm>
+                ),
+              },
+            ]}
+          />
+        </Card>
+        <Card size="small" title="添加/更新配额">
+          <Form form={allocationForm} layout="inline" onFinish={handleAddAllocation}>
+            <Form.Item name="groupId" label="组" rules={[{ required: true }]}>
+              <Select showSearch optionFilterProp="label" style={{ width: 180 }}
+                placeholder="选择组"
+                options={groups.map(g => ({ label: g.name, value: g.id }))} />
+            </Form.Item>
+            <Form.Item name="allocation" label="配额(人/天)" rules={[{ required: true, message: '请输入配额' }]}>
+              <InputNumber min={0} step={0.5} style={{ width: 130 }} placeholder="如 20" />
+            </Form.Item>
+            <Form.Item>
+              <Button type="primary" htmlType="submit">保存</Button>
+            </Form.Item>
+          </Form>
+          <div style={{ marginTop: 8, color: '#aaa', fontSize: 12 }}>
+            同一项目同一组重复保存会覆盖原配额值。
+          </div>
+        </Card>
       </Modal>
     </>
   );
@@ -1189,7 +1138,8 @@ function AnnouncementTab() {
 
 // ==================== 系统设置 ====================
 function SettingsTab() {
-  const [timesheetUnit, setTimesheetUnit] = useState<string>('days');
+  // 工时填报单位（天步长），默认 0.5 天
+  const [timesheetUnit, setTimesheetUnit] = useState<string>('0.5');
   const [lockDay, setLockDay] = useState<number>(0);
   const [localSystemName, setLocalSystemName] = useState<string>('WorkTime');
   const [loading, setLoading] = useState(false);
@@ -1205,7 +1155,10 @@ function SettingsTab() {
     try {
       const res = await systemApi.getSettings();
       if (res.data?.settings?.timesheet_unit) {
-        setTimesheetUnit(res.data.settings.timesheet_unit);
+        // 兼容老值 days/hours，统一归一为 0.5 天
+        const raw = res.data.settings.timesheet_unit;
+        const valid = ['0.1', '0.2', '0.25', '0.5'];
+        setTimesheetUnit(valid.includes(raw) ? raw : '0.5');
       }
       if (res.data?.settings?.timesheet_lock_day) {
         setLockDay(parseInt(res.data.settings.timesheet_lock_day, 10) || 0);
@@ -1276,8 +1229,10 @@ function SettingsTab() {
               optionType="button"
               buttonStyle="solid"
             >
-              <Radio.Button value="days">天（0.5 / 1）</Radio.Button>
-              <Radio.Button value="hours">小时（0.5 ~ 24）</Radio.Button>
+              <Radio.Button value="0.1">0.1天</Radio.Button>
+              <Radio.Button value="0.2">0.2天</Radio.Button>
+              <Radio.Button value="0.25">0.25天</Radio.Button>
+              <Radio.Button value="0.5">0.5天</Radio.Button>
             </Radio.Group>
           </Col>
           <Col>
@@ -1287,9 +1242,7 @@ function SettingsTab() {
           </Col>
         </Row>
         <div style={{ marginTop: 12, color: '#888', fontSize: 13 }}>
-          {timesheetUnit === 'days'
-            ? '天模式：每天最多填1天，最小单位0.5天，提交时校验周合计不得少于5天'
-            : '小时模式：每天最多填24小时，最小单位0.5小时，提交时校验周合计不得少于40小时'}
+          工时按天填报，最小单位 {timesheetUnit} 天；每天最多填1天，提交时校验周合计不少于5天。
         </div>
       </Card>
 
@@ -1326,6 +1279,8 @@ function SettingsTab() {
           {lockDay ? `每月${lockDay}号之后，用户将无法提交上月的工时记录` : '未设置工时锁定，用户可以随时提交历史工时'}
         </div>
       </Card>
+
+      {/* OIDC 提供商由环境变量配置，无需在此开关；如需增减请编辑 server/.env 的 OIDC_PROVIDERS */}
     </div>
   );
 }

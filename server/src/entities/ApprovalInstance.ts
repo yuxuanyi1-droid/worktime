@@ -69,6 +69,21 @@ export class ApprovalInstance {
   @Column({ type: 'simple-json' })
   stepsSnapshot!: ApprovalInstanceStepSnapshot[];
 
+  /**
+   * 工时配额快照（仅 timesheet 类型）：
+   * 提交时计算并冻结，审批通过/驳回后仍展示此快照（不再动态更新）。
+   * null = 未配置配额 或 非 timesheet 类型。
+   */
+  @Column({ type: 'simple-json', nullable: true })
+  quotaSnapshot!: {
+    total: number;
+    consumed: number;
+    remaining: number;
+    submitted: number;
+    exceeded: boolean;
+    groupName?: string;
+  } | null;
+
   @Column({ type: 'datetime' })
   submittedAt!: Date;
 

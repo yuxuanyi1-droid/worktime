@@ -1,17 +1,20 @@
-import { EntityManager, In, Repository } from 'typeorm';
+import { EntityManager, In, Not, Repository } from 'typeorm';
 import { AppDataSource } from '../config/database';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
 import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { WeeklyReport } from '../entities/WeeklyReport';
 import { User } from '../entities/User';
+import { Group } from '../entities/Group';
 import { ApprovalTask } from '../entities/ApprovalTask';
 import { ApprovalInstance } from '../entities/ApprovalInstance';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationService } from './notificationService';
 import { PermissionRequest } from '../entities/PermissionRequest';
 import { PermissionGovernanceService } from './permissionGovernanceService';
+import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
 import { BusinessError } from '../utils/errors';
+import { round2 } from '../utils/validation';
 
 type TargetType = 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
 
@@ -66,6 +69,9 @@ export class ApprovalService {
   private get weeklyReportRepo() { return (this.manager ?? AppDataSource).getRepository(WeeklyReport); }
   private get permissionRequestRepo() { return (this.manager ?? AppDataSource).getRepository(PermissionRequest); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get allocationRepo() { return (this.manager ?? AppDataSource).getRepository(ProjectWorkloadAllocation); }
+  private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
+  private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
   private get notificationService() { return new NotificationService(this.manager); }
   private get permissionGovernanceService() { return new PermissionGovernanceService(this.manager); }
@@ -164,7 +170,7 @@ export class ApprovalService {
         base.date = dates[0] || ts.date;
         base.weekStart = dates[0] || ts.date;
         base.weekEnd = dates[dates.length - 1] || ts.date;
-        base.hours = groupRecords.reduce((sum, record) => sum + Number(record.hours), 0);
+        base.hours = round2(groupRecords.reduce((sum, record) => sum + Number(record.hours), 0));
         base.description = groupRecords[0]?.description;
         base.projectId = ts.projectId;
         base.submissionGroupId = ts.submissionGroupId;
@@ -324,10 +330,32 @@ export class ApprovalService {
 
         if (item.targetType === 'timesheet' && target.submissionGroupId) {
           await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
-          if (item.action === 'approve' && result.status === 'approved' && target.previousGroupId) {
-            await txService.timesheetRepo.update(
-              { submissionGroupId: target.previousGroupId, userId: target.userId },
-              { status: 'deprecated' },
+          if (item.action === 'approve' && result.status === 'approved') {
+            // 新版本审批通过：按 rootGroupId deprecate 整条旧链上所有旧版本（非当前 submissionGroupId）
+            const currentRec = await txService.timesheetRepo.findOne({
+              where: { submissionGroupId: target.submissionGroupId },
+            });
+            const rootGroupId = currentRec?.rootGroupId;
+            if (rootGroupId) {
+              await txService.timesheetRepo.update(
+                { rootGroupId, submissionGroupId: Not(target.submissionGroupId), status: Not('deprecated') },
+                { status: 'deprecated' },
+              );
+            } else if (target.previousGroupId) {
+              // 兜底：无 rootGroupId 时用 previousGroupId（直接前驱）
+              await txService.timesheetRepo.update(
+                { submissionGroupId: target.previousGroupId, userId: target.userId },
+                { status: 'deprecated' },
+              );
+            }
+          }
+          // 终态（通过/驳回）时冻结配额快照：把当前的动态配额值写入 instance.quotaSnapshot，
+          // 之后查看已通过/已驳回的单子展示此快照（不再动态更新），作为审批内容的永久记录。
+          if (result.status === 'approved' || result.status === 'rejected') {
+            await txService.freezeTimesheetQuotaSnapshot(
+              result.instance.id,
+              target.submissionGroupId,
+              applicantId,
             );
           }
         } else if (item.targetType === 'permission_request') {
@@ -566,13 +594,21 @@ export class ApprovalService {
       }));
 
       const updateData: any = {
-        status: targetType === 'permission_request' ? 'withdrawn' : 'draft',
+        status: 'withdrawn',
         currentStep: 0,
         approvalFlowId: null,
         approvalInstanceId: null,
         totalSteps: 0,
       };
       if (targetType === 'timesheet' && target.submissionGroupId) {
+        // 撤回前冻结配额快照（撤回也是操作历史的一部分，方便回溯）
+        const instanceId = instance?.id ?? target.approvalInstanceId;
+        if (instanceId) {
+          await txService.freezeTimesheetQuotaSnapshot(instanceId, target.submissionGroupId, userId);
+        }
+        // 撤回恢复为未分组草稿：清空 submissionGroupId，避免下次提交误走 deprecated 重建分支。
+        // previousGroupId 保留，以维持与原审批的版本链追溯（rootGroupId 亦不变）。
+        updateData.submissionGroupId = null;
         await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
       } else {
         await repo!.update(targetId, updateData);
@@ -719,7 +755,7 @@ export class ApprovalService {
         content.date = dates[0] || ts.date;
         content.weekStart = dates[0] || ts.date;
         content.weekEnd = dates[dates.length - 1] || ts.date;
-        content.hours = groupRecords.reduce((sum, record) => sum + Number(record.hours), 0);
+        content.hours = round2(groupRecords.reduce((sum, record) => sum + Number(record.hours), 0));
         content.description = groupRecords[0]?.description || ts.description;
         content.submissionGroupId = ts.submissionGroupId;
         content.weekEntries = groupRecords.map(record => ({ date: record.date, hours: Number(record.hours) }));
@@ -728,6 +764,21 @@ export class ApprovalService {
         content.hours = ts?.hours;
         content.description = ts?.description;
         content.project = ts?.project ? { id: ts.project.id, name: ts.project.name } : null;
+      }
+
+      // 工时配额信息：
+      // - 审批中（submitted）：动态计算（其他人可能同时在提交，消耗实时变化）
+      // - 已通过/已驳回/已撤销：展示审批通过时冻结的快照（不再动态更新）
+      if (content.status === 'submitted') {
+        const projectId = content.project?.id ?? ts?.projectId;
+        const groupId = applicant?.group?.id;
+        if (projectId && groupId) {
+          content.quota = await this.buildTimesheetQuota(projectId, groupId, Number(content.hours) || 0);
+        }
+      } else {
+        // 读取审批通过时冻结的配额快照
+        const instance = await this.getTargetInstance('timesheet', target, targetId);
+        content.quota = instance?.quotaSnapshot ?? null;
       }
     } else if (targetType === 'overtime') {
       const overtime = await this.overtimeRepo.findOne({ where: { id: targetId }, relations: ['project'] });
@@ -754,6 +805,121 @@ export class ApprovalService {
     }
 
     return content;
+  }
+
+  /**
+   * 计算工时配额消耗情况（动态，每次打开审批单实时查询）。
+   *
+   * 配额向上继承：从用户所在组开始，沿 parent 链向上查找，直到找到配额配置为止。
+   *   如配额配在「蜂窝通信组」，用户在「通话组」（子组），则使用「蜂窝通信组」的配额。
+   * 消耗统计范围：配额组及其所有子组的成员（配额配在父组，则父组+所有子孙组成员的工时都算消耗）。
+   *
+   * @param projectId 项目 ID
+   * @param groupId  申请人所在组 ID
+   * @param submittedHours 本次提交的工时（人/天）
+   * @returns 配额信息对象；若该组及其所有祖先组在该项目都没配过配额则返回 null（不限制）
+   */
+  private async buildTimesheetQuota(
+    projectId: number,
+    groupId: number,
+    submittedHours: number,
+  ): Promise<{
+    total: number;
+    consumed: number;
+    remaining: number;
+    submitted: number;
+    exceeded: boolean;
+    groupName?: string;
+  } | null> {
+    // 1. 沿组层级向上查找配额配置（与 module_se 审批步骤同样的向上继承逻辑）
+    let allocation: { allocation: number; groupId: number; groupName: string } | null = null;
+    let searchGroupId: number | null = groupId;
+    while (searchGroupId) {
+      const found = await this.allocationRepo.findOne({
+        where: { projectId, groupId: searchGroupId },
+        relations: ['group'],
+      });
+      if (found) {
+        allocation = {
+          allocation: Number(found.allocation),
+          groupId: found.groupId,
+          groupName: found.group?.name || found.groupName || '',
+        };
+        break;
+      }
+      // 向上一级
+      const group = await this.groupRepo.findOne({
+        where: { id: searchGroupId },
+        relations: ['parent'],
+      });
+      searchGroupId = group?.parent?.id ?? null;
+    }
+    if (!allocation) return null; // 该组及所有祖先组都没配额 = 不限制
+
+    // 2. 收集配额组及其所有子组的 id（配额配在父组，子组成员也消耗）
+    //    利用 Group.path 字段：子组的 path 以配额组的 path 为前缀。
+    //    path 格式如 "1/3/7"，配额组 path="3"，则所有 path LIKE "3/%" 或 path="3" 的组都是其子组（含自身）。
+    const quotaGroup = await this.groupRepo.findOne({ where: { id: allocation.groupId } });
+    const quotaGroupIds: number[] = [allocation.groupId];
+    if (quotaGroup?.path) {
+      // path LIKE "quotaPath/%" 匹配所有子孙组；path = quotaPath 匹配自身（已在数组里）
+      const childGroups = await this.groupRepo
+        .createQueryBuilder('g')
+        .where('g.path LIKE :prefix', { prefix: `${quotaGroup.path}/%` })
+        .select('g.id', 'id')
+        .getRawMany<{ id: number }>();
+      quotaGroupIds.push(...childGroups.map((g) => g.id));
+    }
+
+    // 3. 动态查询配额组及其所有子组成员在该项目的已消耗工时（submitted + approved）
+    const consumedRaw = await this.timesheetRepo
+      .createQueryBuilder('t')
+      .innerJoin('users', 'u', 'u.id = t.userId')
+      .where('t.projectId = :projectId', { projectId })
+      .andWhere(`u.groupId IN (${quotaGroupIds.map((_, i) => `:gid${i}`).join(',')})`,
+        Object.fromEntries(quotaGroupIds.map((id, i) => [`gid${i}`, id])))
+      .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
+      .select('COALESCE(SUM(t.hours), 0)', 'total')
+      .getRawOne<{ total: string | number }>();
+    const consumed = round2(Number(consumedRaw?.total || 0));
+    const total = round2(allocation.allocation);
+    const remaining = round2(total - consumed);
+    return {
+      total,
+      consumed,
+      remaining,
+      submitted: round2(submittedHours),
+      exceeded: consumed > total,
+      groupName: allocation.groupName,
+    };
+  }
+
+  /**
+   * 冻结工时配额快照到审批实例。在终态（通过/驳回/撤回）时调用，
+   * 把当时的动态配额值写入 instance.quotaSnapshot，之后查看时展示此快照不再动态更新。
+   */
+  private async freezeTimesheetQuotaSnapshot(
+    instanceId: number,
+    submissionGroupId: number,
+    applicantUserId: number,
+  ): Promise<void> {
+    const ts = await this.timesheetRepo.findOne({
+      where: { submissionGroupId },
+      relations: ['project'],
+    });
+    const applicantUser = await this.userRepo.findOne({
+      where: { id: applicantUserId },
+      relations: ['group'],
+    });
+    if (!ts?.projectId || !applicantUser?.group?.id) return;
+    const weekRecords = await this.timesheetRepo.find({ where: { submissionGroupId } });
+    const weekHours = weekRecords.reduce((sum, r) => sum + Number(r.hours), 0);
+    const quotaSnapshot = await this.buildTimesheetQuota(
+      ts.projectId,
+      applicantUser.group.id,
+      weekHours,
+    );
+    await this.instanceRepo.update(instanceId, { quotaSnapshot });
   }
 
   private buildFlowSteps(instance: ApprovalInstance | null, tasks: ApprovalTask[]) {

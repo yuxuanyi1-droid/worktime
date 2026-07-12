@@ -3,7 +3,9 @@ import { message } from 'antd';
 import { useAuthStore } from '../stores/authStore';
 
 const request = axios.create({
-  baseURL: '/api/v1',
+  // 子路径部署时 __BASE_PATH__ 形如 '/worktime'，baseURL 变 '/worktime/api/v1'；
+  // 根路径部署时 __BASE_PATH__ 为空，baseURL 仍是 '/api/v1'。
+  baseURL: `${__BASE_PATH__}/api/v1`,
   timeout: 30000,
 });
 
@@ -30,8 +32,12 @@ request.interceptors.response.use(
     if (error.response?.status === 401) {
       useAuthStore.getState().clearAuth();
       // 通过事件总线通知 React 层软跳转（保留 SPA 状态，避免整页刷新丢数据）；
-      // 已在登录页时不派发，避免循环
-      if (window.location.pathname !== '/login') {
+      // 已在登录页或 OIDC 回调页时不派发，避免循环：
+      //   - /login：登录页本身
+      //   - /oidc/callback：第三方登录回调换 token 时若遇 401 不应抢跳
+      // 子路径部署下 pathname 形如 /worktime/login，用 endsWith 兼容根路径与子路径两种部署。
+      const pathname = window.location.pathname;
+      if (!pathname.endsWith('/login') && !pathname.endsWith('/oidc/callback')) {
         window.dispatchEvent(new CustomEvent('unauthorized'));
       }
       return Promise.reject(error);

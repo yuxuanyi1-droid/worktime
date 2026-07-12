@@ -15,3 +15,4 @@ export { SystemSetting } from './SystemSetting';
 export { PermissionRequest } from './PermissionRequest';
 export { UserPermissionGrant } from './UserPermissionGrant';
 export { SubmissionSequence } from './SubmissionSequence';
+export { UserExternalIdentity } from './UserExternalIdentity';

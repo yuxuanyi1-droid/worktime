@@ -7,6 +7,7 @@ import { Role } from '../entities/Role';
 import { Permission } from '../entities/Permission';
 import { Project } from '../entities/Project';
 import { ProjectSE } from '../entities/ProjectSE';
+import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
 import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { WeeklyReport } from '../entities/WeeklyReport';
@@ -25,6 +26,7 @@ export class SystemService {
   private get permRepo() { return (this.manager ?? AppDataSource).getRepository(Permission); }
   private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
   private get projectSERepo() { return (this.manager ?? AppDataSource).getRepository(ProjectSE); }
+  private get allocationRepo() { return (this.manager ?? AppDataSource).getRepository(ProjectWorkloadAllocation); }
   private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
   private get overtimeRepo() { return (this.manager ?? AppDataSource).getRepository(OvertimeApplication); }
   private get weeklyReportRepo() { return (this.manager ?? AppDataSource).getRepository(WeeklyReport); }
@@ -66,7 +68,7 @@ export class SystemService {
     if (departmentId) where.departmentId = departmentId;
     const allGroups = await this.groupRepo.find({
       where,
-      relations: ['leader', 'parent', 'users'],
+      relations: ['leader', 'parent', 'users', 'users.roles'],
       order: { sortOrder: 'ASC', createdAt: 'ASC' },
     });
     return this.buildGroupTree(allGroups);
@@ -90,7 +92,12 @@ export class SystemService {
       .map(g => ({
         ...g,
         leader: g.leader ? { id: g.leader.id, realName: g.leader.realName } : null,
-        members: (g.users || []).map(u => ({ id: u.id, realName: u.realName, username: u.username })),
+        members: (g.users || []).map(u => ({
+          id: u.id,
+          realName: u.realName,
+          username: u.username,
+          roles: (u.roles || []).map(r => ({ id: r.id, name: r.name, label: r.label })),
+        })),
         children: this.buildGroupTree(groups, g.id),
       }))
       .sort((a, b) => a.sortOrder - b.sortOrder);
@@ -415,6 +422,7 @@ export class SystemService {
     return AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       await txService.projectSERepo.delete({ projectId: id });
+      await txService.allocationRepo.delete({ projectId: id });
       return txService.projectRepo.delete(id);
     });
   }
@@ -453,6 +461,62 @@ export class SystemService {
 
   async removeProjectSE(id: number) {
     return this.projectSERepo.delete(id);
+  }
+
+  // ==================== 项目工时配额管理 ====================
+
+  async getProjectAllocations(projectId: number) {
+    return this.allocationRepo.find({
+      where: { projectId },
+      relations: ['group'],
+      order: { createdAt: 'ASC' },
+    });
+  }
+
+  /** upsert：同一项目同一组只保留一条配额记录，重复提交则更新 allocation 值 */
+  async addProjectAllocation(data: { projectId: number; groupId: number; allocation: number }) {
+    return AppDataSource.transaction(async (manager) => {
+      const txService = new SystemService(manager);
+      const existing = await txService.allocationRepo.findOne({
+        where: { projectId: data.projectId, groupId: data.groupId },
+      });
+      if (existing) {
+        existing.allocation = data.allocation;
+        return txService.allocationRepo.save(existing);
+      }
+      const group = await txService.groupRepo.findOne({ where: { id: data.groupId } });
+      const allocation = txService.allocationRepo.create({
+        ...data,
+        groupName: group?.name || '',
+      });
+      return txService.allocationRepo.save(allocation);
+    });
+  }
+
+  async removeProjectAllocation(id: number) {
+    return this.allocationRepo.delete(id);
+  }
+
+  /** 按 id 查单条配额（DELETE 路由先查 projectId 做权限校验用） */
+  async getProjectAllocationById(id: number) {
+    return this.allocationRepo.findOne({ where: { id } });
+  }
+
+  /**
+   * 统计某组在某项目的已消耗工时（人/天）。
+   * 消耗口径：status IN ('submitted','approved')（审批中 + 已通过），排除 draft/deprecated/rejected。
+   * 统计范围：该组所有成员在该项目的工时总和（配额是组级共享额度）。
+   */
+  async getGroupProjectConsumption(projectId: number, groupId: number): Promise<number> {
+    const result = await this.timesheetRepo
+      .createQueryBuilder('t')
+      .innerJoin('users', 'u', 'u.id = t.userId')
+      .where('t.projectId = :projectId', { projectId })
+      .andWhere('u.groupId = :groupId', { groupId })
+      .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
+      .select('COALESCE(SUM(t.hours), 0)', 'total')
+      .getRawOne();
+    return Number(result?.total || 0);
   }
 
   /** 获取所有用户列表（供选择器用） */

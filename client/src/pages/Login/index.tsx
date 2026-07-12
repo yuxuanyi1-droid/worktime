@@ -1,13 +1,17 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Form, Input, Button, message } from 'antd';
+import { Form, Input, Button, message, Divider } from 'antd';
 import { UserOutlined, LockOutlined } from '@ant-design/icons';
 import { authApi } from '../../api/auth';
 import { useAuthStore } from '../../stores/authStore';
 import { useAppStore } from '../../stores/appStore';
+import { setOidcIntent, getRedirectUriBase } from '../OidcCallback';
+import type { OidcProviderInfo } from '../../types';
 
 export default function Login() {
   const [loading, setLoading] = useState(false);
+  const [ssoLoading, setSsoLoading] = useState<string | null>(null);
+  const [providers, setProviders] = useState<OidcProviderInfo[]>([]);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { setAuth } = useAuthStore();
@@ -18,7 +22,33 @@ export default function Login() {
     if (localStorage.getItem('token')) {
       loadSettings();
     }
+    // 拉取对用户可见的 OIDC 提供商（管理员开关控制的登录方式）。失败静默——SSO 是可选功能。
+    authApi.oidcVisibleProviders().then((res) => {
+      setProviders(Array.isArray(res.data) ? res.data : []);
+    }).catch(() => { /* 未启用或网络异常时不展示 SSO 入口 */ });
   }, [loadSettings]);
+
+  const handleSsoLogin = async (provider: OidcProviderInfo) => {
+    setSsoLoading(provider.name);
+    try {
+      const redirect = searchParams.get('redirect') || '/';
+      // 把登录意图存 sessionStorage，回调页据此换 token
+      setOidcIntent({ mode: 'login', provider: provider.name, redirect });
+      const res = await authApi.oidcLogin(provider.name, {
+        mode: 'login',
+        redirect,
+        redirectUriBase: getRedirectUriBase(),
+      });
+      if (res.data?.url) {
+        // 整页跳转到 IdP 授权页
+        window.location.href = res.data.url;
+      }
+    } catch {
+      // 响应拦截器已弹错误提示
+    } finally {
+      setSsoLoading(null);
+    }
+  };
 
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true);
@@ -162,6 +192,35 @@ export default function Login() {
             </Button>
           </Form.Item>
         </Form>
+
+        {providers.length > 0 && (
+          <>
+            <Divider plain style={{ borderColor: '#E8E0D4', color: '#9A9080', fontSize: 12, margin: '20px 0' }}>
+              或使用以下方式登录
+            </Divider>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {providers.map((p) => (
+                <Button
+                  key={p.name}
+                  block
+                  loading={ssoLoading === p.name}
+                  onClick={() => handleSsoLogin(p)}
+                  style={{
+                    height: 46,
+                    borderRadius: 12,
+                    fontWeight: 600,
+                    fontSize: 14,
+                    background: '#FDFBF7',
+                    borderColor: '#E8E0D4',
+                    color: '#2C2418',
+                  }}
+                >
+                  {p.label} 登录
+                </Button>
+              ))}
+            </div>
+          </>
+        )}
 
         {import.meta.env.DEV && (
           <div style={{ textAlign: 'center', color: '#B0A898', fontSize: 12 }}>

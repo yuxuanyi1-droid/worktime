@@ -37,4 +37,7 @@ Thumbs.db
 
 # Local assistant notes and accidental files
 .learnings/
-_nul
+.zcode/
+# Windows 误产生的 nul 杂散文件（保留设备名，普通方式删不掉，git 忽略即可）
+nul
+server/nul

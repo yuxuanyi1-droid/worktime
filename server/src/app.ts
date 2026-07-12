@@ -1,14 +1,16 @@
 import 'reflect-metadata';
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
+import path from 'path';
+import './config/env'; // 加载根 .env（端口）+ server/.env（业务配置）
 import pinoHttp from 'pino-http';
 import { AppDataSource, ensureSchema } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
-import { globalLimiter, loginLimiter } from './middleware/security';
+import { globalLimiter, loginLimiter, oidcCallbackLimiter } from './middleware/security';
 import { metricsMiddleware, metricsHandler } from './middleware/metrics';
 import { logger } from './utils/logger';
 import { authRoutes } from './routes/auth';
+import { oidcRoutes } from './routes/oidc';
 import { systemRoutes } from './routes/system';
 import { timesheetRoutes } from './routes/timesheet';
 import { overtimeRoutes } from './routes/overtime';
@@ -20,10 +22,25 @@ import { auditRoutes } from './routes/audit';
 import { announcementRoutes } from './routes/announcement';
 import { permissionRequestRoutes } from './routes/permissionRequest';
 
-dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 3000;
+// PORT 统一在根 .env 配置；Number 化避免字符串端口传入 listen
+const PORT = Number(process.env.PORT) || 3000;
+// 前端端口联动：未配置 ALLOWED_ORIGINS 时按 CLIENT_PORT 自动生成默认白名单
+const clientPort = process.env.CLIENT_PORT || '5173';
+
+// 子路径部署前缀（根 .env 的 BASE_PATH，如 /worktime）。
+// 规范化：剥尾部斜杠；仅允许空字符串或以 / 开头，否则告警回落为空（根路径部署）。
+const BASE_PATH = (() => {
+  const raw = (process.env.BASE_PATH || '').trim().replace(/\/+$/, '');
+  if (raw && !raw.startsWith('/')) {
+    logger.warn(`BASE_PATH="${raw}" 必须以 / 开头，已忽略并使用根路径部署`);
+    return '';
+  }
+  return raw;
+})();
+// 路由前缀：空 = /api、/api/v1；子路径 = /worktime/api、/worktime/api/v1
+const apiBase = `${BASE_PATH}/api`;
+const v1Base = `${BASE_PATH}/api/v1`;
 
 // 数据库连接状态
 let dbConnected = false;
@@ -35,8 +52,9 @@ app.set('trust proxy', 1);
 app.use(pinoHttp({ logger, autoLogging: process.env.NODE_ENV !== 'test' }));
 // Prometheus 指标采集
 app.use(metricsMiddleware);
-// CORS origin 从环境变量读取（逗号分隔），生产环境应锁定为真实域名
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+// CORS origin 从环境变量读取（逗号分隔），生产环境应锁定为真实域名。
+// 未显式配置时按 CLIENT_PORT（根 .env）自动派生默认白名单。
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || `http://localhost:${clientPort},http://127.0.0.1:${clientPort}`)
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
@@ -48,10 +66,10 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // 全局限流（所有路由）
-app.use('/api/', globalLimiter);
+app.use(`${apiBase}/`, globalLimiter);
 
 // 数据库状态检查中间件（仅对 API 路由生效）
-app.use('/api/v1', (req, res, next) => {
+app.use(v1Base, (req, res, next) => {
   if (!dbConnected) {
     return res.status(503).json({
       code: 503,
@@ -62,23 +80,27 @@ app.use('/api/v1', (req, res, next) => {
 });
 
 // 登录接口额外限流
-app.use('/api/v1/auth/login', loginLimiter);
+app.use(`${v1Base}/auth/login`, loginLimiter);
+// OIDC 回调限流（换 token 的敏感端点，比通用接口更严格）
+app.use(`${v1Base}/auth/oidc/callback`, oidcCallbackLimiter);
 
 // 路由
-app.use('/api/v1/auth', authRoutes);
-app.use('/api/v1/system', systemRoutes);
-app.use('/api/v1/timesheets', timesheetRoutes);
-app.use('/api/v1/overtime', overtimeRoutes);
-app.use('/api/v1/weekly-reports', weeklyReportRoutes);
-app.use('/api/v1/approvals', approvalRoutes);
-app.use('/api/v1/reports', reportRoutes);
-app.use('/api/v1/notifications', notificationRoutes);
-app.use('/api/v1/audit-logs', auditRoutes);
-app.use('/api/v1/announcements', announcementRoutes);
-app.use('/api/v1/permission-requests', permissionRequestRoutes);
+app.use(`${v1Base}/auth`, authRoutes);
+// OIDC 路由挂在 /auth/oidc 下（providers 为公开端点，其余需鉴权由路由内部控制）
+app.use(`${v1Base}/auth/oidc`, oidcRoutes);
+app.use(`${v1Base}/system`, systemRoutes);
+app.use(`${v1Base}/timesheets`, timesheetRoutes);
+app.use(`${v1Base}/overtime`, overtimeRoutes);
+app.use(`${v1Base}/weekly-reports`, weeklyReportRoutes);
+app.use(`${v1Base}/approvals`, approvalRoutes);
+app.use(`${v1Base}/reports`, reportRoutes);
+app.use(`${v1Base}/notifications`, notificationRoutes);
+app.use(`${v1Base}/audit-logs`, auditRoutes);
+app.use(`${v1Base}/announcements`, announcementRoutes);
+app.use(`${v1Base}/permission-requests`, permissionRequestRoutes);
 
 // Prometheus 指标端点（生产应通过 METRICS_TOKEN 环境变量加 Bearer 校验）
-app.get('/api/metrics', async (req, res) => {
+app.get(`${apiBase}/metrics`, async (req, res) => {
   const metricsToken = process.env.METRICS_TOKEN;
   if (metricsToken) {
     const auth = req.headers.authorization;
@@ -90,13 +112,28 @@ app.get('/api/metrics', async (req, res) => {
 });
 
 // 健康检查（包含数据库状态）
-app.get('/api/health', (req, res) => {
+app.get(`${apiBase}/health`, (req, res) => {
   res.json({
     status: 'ok',
     dbConnected,
     timestamp: new Date().toISOString(),
   });
 });
+
+// 子路径部署时（BASE_PATH 非空），后端同时伺服前端 SPA 静态产物（生产单服务部署）。
+// dist 由 `BASE_PATH=xxx npm run build` 产出，资源引用已带 BASE_PATH 前缀。
+// 注意：开发期 BASE_PATH 为空，不挂载静态文件，仍用 vite dev server。
+if (BASE_PATH) {
+  const distDir = path.resolve(__dirname, '../../client/dist');
+  // 静态资源（/worktime/assets/...）
+  app.use(`${BASE_PATH}/`, express.static(distDir, { index: false }));
+  // 非 API 的子路径请求 fallback 到 index.html（SPA 路由由前端处理）
+  app.get(`${BASE_PATH}/*`, (req, res, next) => {
+    if (req.path.startsWith(apiBase)) return next(); // API 请求不走 SPA
+    res.sendFile(path.join(distDir, 'index.html'));
+  });
+  logger.info(`子路径部署：前端静态产物来自 ${distDir}，挂载于 ${BASE_PATH}/`);
+}
 
 // 错误处理
 app.use(errorHandler);

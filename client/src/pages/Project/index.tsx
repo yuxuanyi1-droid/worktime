@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import {
-  Card, Table, Button, Space, Modal, Form, Input, Select, Tag, message,
+  Card, Table, Button, Space, Modal, Form, Input, InputNumber, Select, Tag, message,
   Typography, Row, Col, Popconfirm,
 } from 'antd';
 import {
   PlusOutlined, ProjectOutlined,
 } from '@ant-design/icons';
 import { systemApi, SimpleUser } from '../../api/system';
-import { Group, Project, ProjectSE, projectStatusMap } from '../../types';
+import { Group, Project, ProjectSE, ProjectWorkloadAllocation, projectStatusMap } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
 
 const { Title } = Typography;
@@ -20,11 +20,14 @@ export default function ProjectPage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [seModalOpen, setSeModalOpen] = useState(false);
+  const [allocationModalOpen, setAllocationModalOpen] = useState(false);
   const [editItem, setEditItem] = useState<Project | null>(null);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [projectSEs, setProjectSEs] = useState<ProjectSE[]>([]);
+  const [projectAllocations, setProjectAllocations] = useState<ProjectWorkloadAllocation[]>([]);
   const [form] = Form.useForm();
   const [seForm] = Form.useForm();
+  const [allocationForm] = Form.useForm();
 
   const isAdmin = serverIsAdmin;
   const canCreate = hasPermission('project:create');
@@ -72,6 +75,20 @@ export default function ProjectPage() {
     if (res.data) setProjectSEs(res.data);
   };
 
+  const loadProjectAllocations = async (projectId: number) => {
+    const res = await systemApi.getProjectAllocations(projectId);
+    if (res.data) setProjectAllocations(res.data);
+  };
+
+  const handleAddAllocation = async (values: any) => {
+    if (!selectedProject) return;
+    await systemApi.addProjectAllocation(selectedProject.id, values);
+    message.success('保存成功');
+    allocationForm.resetFields();
+    loadProjectAllocations(selectedProject.id);
+    load();
+  };
+
   const handleSave = async (values: any) => {
     const payload = { ...values };
     if (editItem && !editItem.canAssignManager) delete payload.managerIds;
@@ -112,6 +129,12 @@ export default function ProjectPage() {
         <Tag key={se.id} color="purple">{se.user?.realName} → {se.group?.name}</Tag>
       )) : <Tag>未配置</Tag>;
     }},
+    { title: '工时配额', key: 'allocations', width: 200, render: (_: any, r: Project) => {
+      const allocs = r.workloadAllocations || [];
+      return allocs.length ? allocs.map((a: ProjectWorkloadAllocation) => (
+        <Tag key={a.id} color="cyan">{a.groupName}: {a.allocation}天</Tag>
+      )) : <Tag>未配置</Tag>;
+    }},
     {
       title: '状态', dataIndex: 'status', width: 100,
       render: (s: string) => {
@@ -120,7 +143,7 @@ export default function ProjectPage() {
       },
     },
     {
-      title: '\u64cd\u4f5c', key: 'action', width: 260,
+      title: '\u64cd\u4f5c', key: 'action', width: 340,
       render: (_: any, record: Project) => {
         const hasActions = record.canUpdate || record.canAssignSE || record.canDelete;
         if (!hasActions) return '-';
@@ -143,6 +166,14 @@ export default function ProjectPage() {
                 seForm.resetFields();
                 setSeModalOpen(true);
               }}>{'\u914d\u7f6eSE'}</Button>
+            )}
+            {record.canUpdate && (
+              <Button type="link" size="small" onClick={() => {
+                setSelectedProject(record);
+                loadProjectAllocations(record.id);
+                allocationForm.resetFields();
+                setAllocationModalOpen(true);
+              }}>配置工时</Button>
             )}
             {record.canDelete && (
               <Popconfirm title={'\u786e\u5b9a\u5220\u9664?'} onConfirm={async () => { await systemApi.deleteProject(record.id); message.success('\u5220\u9664\u6210\u529f'); load(); }}>
@@ -243,6 +274,56 @@ export default function ProjectPage() {
                   <Button type="primary" htmlType="submit">{'\u6dfb\u52a0'}</Button>
                 </Form.Item>
               </Form>
+            </Card>
+          )}
+        </Modal>
+
+        {/* 工时配额 Modal */}
+        <Modal title={`配置工时配额 - ${selectedProject?.name || ''}`} open={allocationModalOpen}
+          onCancel={() => { setAllocationModalOpen(false); setSelectedProject(null); }} footer={null} width={600}>
+          <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
+            按组配置工时配额（单位：人/天）。用户提交工时后，审批单中会动态展示该组在本项目的配额消耗，超额时向审批人警告。未配置的组不限制。
+          </div>
+          <Card size="small" title="已有配额" style={{ marginBottom: 16 }}>
+            <Table rowKey="id" dataSource={projectAllocations} pagination={{ pageSize: 10 }} size="small"
+              locale={{ emptyText: '暂无配额配置' }}
+              columns={[
+                { title: '组', key: 'groupName', dataIndex: 'groupName' },
+                { title: '配额(人/天)', key: 'allocation', dataIndex: 'allocation', width: 120 },
+                ...(selectedProject?.canUpdate ? [{
+                  title: '操作', key: 'action', width: 80,
+                  render: (_: any, r: ProjectWorkloadAllocation) => (
+                    <Popconfirm title="确定删除?" onConfirm={async () => {
+                      await systemApi.removeProjectAllocation(r.id);
+                      message.success('删除成功');
+                      if (selectedProject) loadProjectAllocations(selectedProject.id);
+                      load();
+                    }}>
+                      <Button type="link" size="small" danger>删除</Button>
+                    </Popconfirm>
+                  ),
+                }] : []),
+              ]}
+            />
+          </Card>
+          {selectedProject?.canUpdate && (
+            <Card size="small" title="添加/更新配额">
+              <Form form={allocationForm} layout="inline" onFinish={handleAddAllocation}>
+                <Form.Item name="groupId" label="组" rules={[{ required: true }]}>
+                  <Select showSearch optionFilterProp="label" style={{ width: 150 }}
+                    placeholder="选择组"
+                    options={groups.map(g => ({ label: g.name, value: g.id }))} />
+                </Form.Item>
+                <Form.Item name="allocation" label="配额" rules={[{ required: true, message: '请输入配额' }]}>
+                  <InputNumber min={0} step={0.5} style={{ width: 100 }} placeholder="人/天" />
+                </Form.Item>
+                <Form.Item>
+                  <Button type="primary" htmlType="submit">保存</Button>
+                </Form.Item>
+              </Form>
+              <div style={{ marginTop: 8, color: '#aaa', fontSize: 12 }}>
+                同一项目同一组重复保存会覆盖原配额值。
+              </div>
             </Card>
           )}
         </Modal>

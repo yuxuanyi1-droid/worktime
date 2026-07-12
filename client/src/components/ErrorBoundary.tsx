@@ -32,7 +32,8 @@ export class ErrorBoundary extends Component<Props, State> {
   handleReset = () => {
     this.setState({ hasError: false, error: undefined });
     if (this.props.fullPage) {
-      window.location.href = '/';
+      // __BASE_URL__：根路径部署为 '/'，子路径部署为 '/worktime/'
+      window.location.href = __BASE_URL__;
     }
   };
 

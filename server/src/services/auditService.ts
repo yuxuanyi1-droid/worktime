@@ -6,7 +6,7 @@ export class AuditService {
   private repo = AppDataSource.getRepository(AuditLog);
 
   async log(data: {
-    userId: number;
+    userId?: number | null;
     action: string;
     target: string;
     targetId?: number;

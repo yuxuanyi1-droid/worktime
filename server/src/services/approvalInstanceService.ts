@@ -6,6 +6,7 @@ import { ApprovalTask } from '../entities/ApprovalTask';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
 import { ApprovalTargetType } from '../entities/ApprovalFlowVersion';
 import { ApprovalFlowEngine } from './approvalFlowService';
+import { Timesheet } from '../entities/Timesheet';
 
 export class ApprovalInstanceService {
   constructor(private manager?: EntityManager) {}
@@ -14,6 +15,7 @@ export class ApprovalInstanceService {
   private get taskRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalTask); }
   private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
   private get flowEngine() { return new ApprovalFlowEngine(this.manager); }
+  private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
 
   async start(params: {
     targetType: ApprovalTargetType;
@@ -174,11 +176,36 @@ export class ApprovalInstanceService {
   }
 
   async getPendingInstance(targetType: string, targetId: number) {
-    return this.instanceRepo.findOne({
+    // 精确匹配优先
+    const direct = await this.instanceRepo.findOne({
       where: { targetType: targetType as ApprovalTargetType, targetId, status: 'pending' },
       relations: ['tasks'],
       order: { id: 'DESC' },
     });
+    if (direct) return direct;
+
+    // 工时归一化：一个 submissionGroup 的多行工时共享一个审批实例，
+    // 但实例的 targetId 只挂在首行（submitByRows 里 const targetId = records[0].id）。
+    // 当按 group 内非首行记录（如详情页从 id=20 进入，而实例挂在 id=16）撤回/审批时，
+    // 精确查不到——这里回退到该 group 首行 targetId 再查一次。
+    if (targetType === 'timesheet') {
+      const seed = await this.timesheetRepo.findOne({ where: { id: targetId } });
+      if (seed?.submissionGroupId) {
+        // group 内 id 最小的非废弃记录，即实例真正挂载的首行 targetId
+        const headRow = await this.timesheetRepo.findOne({
+          where: { submissionGroupId: seed.submissionGroupId },
+          order: { id: 'ASC' },
+        });
+        if (headRow && headRow.id !== targetId) {
+          return this.instanceRepo.findOne({
+            where: { targetType: 'timesheet' as ApprovalTargetType, targetId: headRow.id, status: 'pending' },
+            relations: ['tasks'],
+            order: { id: 'DESC' },
+          });
+        }
+      }
+    }
+    return null;
   }
 
   async getPendingTasks(approverId: number, params: { targetType?: string; isAdmin?: boolean }) {

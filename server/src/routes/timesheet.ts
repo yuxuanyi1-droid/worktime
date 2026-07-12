@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { TimesheetService } from '../services/timesheetService';
+import { AppDataSource } from '../config/database';
+import { Timesheet } from '../entities/Timesheet';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import {
@@ -132,6 +134,27 @@ router.delete('/:id', requirePermission('timesheet:delete'), async (req: AuthReq
   try {
     await timesheetService.delete(parsePositiveInt(req.params.id, 'id'), req.user!.id);
     res.json({ code: 0, message: '删除成功' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 查看某条工时的完整修改链（v1→v2→v3…，含已 deprecated 的历史版本）
+router.get('/chain/:id', async (req: AuthRequest, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    // 鉴权：先取种子记录，校验查看者对其有访问权
+    const seed = await AppDataSource.getRepository(Timesheet).findOne({ where: { id } });
+    if (!seed) throw new BusinessError('记录不存在');
+    const owner = seed.userId;
+    if (!await canAccessUserData(req.user!, owner, {
+      departmentPermissions: ['timesheet:view:department'],
+      groupPermissions: ['timesheet:view:group'],
+    })) {
+      return res.status(403).json({ code: 403, message: '无权查看该工时的修改链' });
+    }
+    const data = await timesheetService.getModificationChain(id);
+    res.json({ code: 0, data });
   } catch (error) {
     next(error);
   }
