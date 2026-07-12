@@ -22,6 +22,8 @@ async function seed() {
   await ensureSchema();
   console.log('🌱 开始初始化种子数据...');
 
+  const isProduction = process.env.NODE_ENV === 'production';
+
   // 1. 创建权限
   const permRepo = AppDataSource.getRepository(Permission);
   const allPerms: Permission[] = [];
@@ -97,6 +99,30 @@ async function seed() {
   console.log('✅ 角色初始化完成');
 
   const adminRole = allRoles.find(r => r.name === 'admin')!;
+
+  // 3. 创建 admin 用户（生产模式只建这一个用户，不建示例数据）
+  const userRepo = AppDataSource.getRepository(User);
+  const hash = (pw: string) => bcrypt.hash(pw, 10);
+  let adminUser = await userRepo.findOne({ where: { username: 'admin' } });
+  if (!adminUser) {
+    adminUser = userRepo.create({
+      username: 'admin', password: await hash('123456'), realName: '系统管理员',
+      roles: [adminRole],
+    });
+    await userRepo.save(adminUser);
+  }
+  console.log('✅ 管理员账号初始化完成 (admin / 123456)');
+
+  // 生产模式到此为止——不创建部门/分组/示例用户/项目/审批流程
+  if (isProduction) {
+    console.log('\n🎉 生产环境种子数据初始化完成（仅权限/角色/admin 用户）');
+    console.log('📝 默认账号：admin / 123456（请尽快修改密码）');
+    console.log('📝 组织架构和用户将通过 Authentik OIDC 自动同步');
+    await AppDataSource.destroy();
+    return;
+  }
+
+  // ===== 以下为开发模式示例数据（生产模式不执行） =====
   const managerRole = allRoles.find(r => r.name === 'manager')!;
   const leaderRole = allRoles.find(r => r.name === 'group_leader')!;
   const employeeRole = allRoles.find(r => r.name === 'employee')!;
@@ -133,18 +159,7 @@ async function seed() {
   };
 
   // 先创建用户（因为分组需要 leader）
-  const userRepo = AppDataSource.getRepository(User);
-  const hash = (pw: string) => bcrypt.hash(pw, 10);
-
-  // 先创建必要的用户（不设分组，后面再更新）
-  let adminUser = await userRepo.findOne({ where: { username: 'admin' } });
-  if (!adminUser) {
-    adminUser = userRepo.create({
-      username: 'admin', password: await hash('123456'), realName: '系统管理员',
-      department: techDept, roles: [adminRole],
-    });
-    await userRepo.save(adminUser);
-  }
+  // userRepo / hash / adminUser 已在上方公共部分创建
 
   let managerUser = await userRepo.findOne({ where: { username: 'manager1' } });
   if (!managerUser) {

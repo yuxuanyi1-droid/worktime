@@ -120,19 +120,31 @@ app.get(`${apiBase}/health`, (req, res) => {
   });
 });
 
-// 子路径部署时（BASE_PATH 非空），后端同时伺服前端 SPA 静态产物（生产单服务部署）。
-// dist 由 `BASE_PATH=xxx npm run build` 产出，资源引用已带 BASE_PATH 前缀。
-// 注意：开发期 BASE_PATH 为空，不挂载静态文件，仍用 vite dev server。
-if (BASE_PATH) {
+// 生产单服务部署：后端同时伺服前端 SPA 静态产物（client/dist）。
+// 支持根路径（BASE_PATH 为空）和子路径（BASE_PATH 非空）两种部署方式。
+// dist 由 `npm run build` 产出（可选 BASE_PATH=xxx 控制子路径）。
+// 注意：开发期（NODE_ENV != production）不挂载静态文件，仍用 vite dev server。
+const isProduction = process.env.NODE_ENV === 'production';
+if (isProduction) {
   const distDir = path.resolve(__dirname, '../../client/dist');
-  // 静态资源（/worktime/assets/...）
-  app.use(`${BASE_PATH}/`, express.static(distDir, { index: false }));
-  // 非 API 的子路径请求 fallback 到 index.html（SPA 路由由前端处理）
+  const mountPath = `${BASE_PATH}/`;
+  // 静态资源（如 /assets/... 或 /worktime/assets/...）
+  app.use(mountPath, express.static(distDir, { index: false }));
+  // 非 API 的请求 fallback 到 index.html（SPA 路由由前端处理）
   app.get(`${BASE_PATH}/*`, (req, res, next) => {
     if (req.path.startsWith(apiBase)) return next(); // API 请求不走 SPA
     res.sendFile(path.join(distDir, 'index.html'));
   });
-  logger.info(`子路径部署：前端静态产物来自 ${distDir}，挂载于 ${BASE_PATH}/`);
+  if (BASE_PATH) {
+    logger.info(`子路径部署：前端静态产物来自 ${distDir}，挂载于 ${BASE_PATH}/`);
+  } else {
+    // 根路径部署时也需要拦截根路径
+    app.get('/', (req, res, next) => {
+      if (req.path.startsWith(apiBase)) return next();
+      res.sendFile(path.join(distDir, 'index.html'));
+    });
+    logger.info(`根路径部署：前端静态产物来自 ${distDir}，前后端同端口（${PORT}）`);
+  }
 }
 
 // 错误处理
