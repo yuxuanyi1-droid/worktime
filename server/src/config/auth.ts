@@ -36,15 +36,15 @@ export const authConfig = {
 export interface OidcProviderConfig {
   /** 环境变量层开关：运维控制是否加载该 provider（false 则完全不参与） */
   enabled: boolean;
-  /** 展示名（如 "Authentik" / "钉钉"），前端按钮文案 */
+  /** 展示名（如 "Authentik" / "钉钉" / "OPPO SIAM"），前端按钮文案 */
   label: string;
-  /** 提供商类型：标准 OIDC（Authentik/Keycloak/Okta）或 钉钉（非标准 OAuth2） */
-  type: 'oidc' | 'dingtalk';
+  /** 提供商类型：标准 OIDC / 钉钉（非标准 OAuth2）/ OPPO SIAM（直连 OAuth2） */
+  type: 'oidc' | 'dingtalk' | 'siam';
   /**
    * 是否启用 JIT 自动建号（Just-In-Time provisioning）。
    * - true（主要登录方式）：登录时若 (provider, subject) 未绑定本地用户，自动创建本地用户并绑定。
    *   适用于 Authentik 这类"企业主身份源"——用户在 IdP 侧开通即获得系统访问权。
-   * - false / 未设（补充登录方式）：未绑定时提示"请先账号密码登录后绑定"。适用于钉钉等辅助登录。
+   * - false / 未设（补充登录方式）：未绑定时提示"请先账号密码登录后绑定"。适用于钉钉/SIAM 等辅助登录。
    */
   jit?: boolean;
   /** JIT 建号时新用户的默认角色名。默认 'employee'。角色由本地管理员后续手动调整 */
@@ -56,6 +56,12 @@ export interface OidcProviderConfig {
   scopes?: string[];
   // ---- 钉钉字段（type === 'dingtalk'）----
   dingtalk?: { clientId?: string; clientSecret?: string; scopes?: string[] };
+  // ---- OPPO SIAM 字段（type === 'siam'）----
+  /**
+   * SIAM 直连模式基址，默认 https://sso.myoas.com。
+   * authorize / accessTokenByJson / profileByJson / logout 均挂在该 host 下。
+   */
+  ssoBaseUrl?: string;
 }
 
 /** 解析 OIDC_PROVIDERS（JSON）。解析失败时回退为空对象，避免启动崩溃（SSO 是可选功能） */

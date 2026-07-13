@@ -4,12 +4,13 @@ import { BusinessError } from '../../utils/errors';
 import { OidcProvider } from './provider';
 import { OidcAdapter } from './oidcAdapter';
 import { DingTalkAdapter } from './dingtalkAdapter';
+import { SiamAdapter } from './siamAdapter';
 
 /** provider 对外的展示信息（不含 secret） */
 export interface ProviderDefinition {
   name: string;
   label: string;
-  type: 'oidc' | 'dingtalk';
+  type: 'oidc' | 'dingtalk' | 'siam';
   /** 是否 JIT 自动建号——前端据此区分"直接登录"（true）和"需绑定"（false）*/
   jit?: boolean;
 }
@@ -36,9 +37,14 @@ const adapterCache = new Map<string, OidcProvider>();
 function buildAdapter(name: string, config: OidcProviderConfig): OidcProvider {
   const cached = adapterCache.get(name);
   if (cached) return cached;
-  const adapter = config.type === 'dingtalk'
-    ? new DingTalkAdapter(name, config)
-    : new OidcAdapter(name, config);
+  let adapter: OidcProvider;
+  if (config.type === 'dingtalk') {
+    adapter = new DingTalkAdapter(name, config);
+  } else if (config.type === 'siam') {
+    adapter = new SiamAdapter(name, config);
+  } else {
+    adapter = new OidcAdapter(name, config);
+  }
   adapterCache.set(name, adapter);
   return adapter;
 }

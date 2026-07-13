@@ -31,7 +31,7 @@ export interface LoginResult {
 export interface OidcProviderInfo {
   name: string;
   label: string;
-  type: 'oidc' | 'dingtalk';
+  type: 'oidc' | 'dingtalk' | 'siam';
   /** 是否 JIT 自动建号——true=主登录方式(直接登录),false=补充登录(需绑定) */
   jit?: boolean;
 }
