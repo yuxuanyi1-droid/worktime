@@ -1,3 +1,4 @@
+import './config/env'; // 加载根 .env（与 app.ts 一致），使 NODE_ENV / ALLOW_PROD_SEED 等配置生效
 import 'reflect-metadata';
 import bcrypt from 'bcryptjs';
 import { AppDataSource, ensureSchema } from './config/database';
