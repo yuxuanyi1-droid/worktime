@@ -94,9 +94,11 @@ export class ApprovalFlowEngine {
             relations: ['parent', 'leader'],
           });
           if (!fresh?.parent) {
-            // 没有上级组了：跳过该步骤（不再静默回退部门负责人，语义更可预测）
-            // 如需部门负责人审批，应在流程中显式配置 dept_leader 步骤
-            return [];
+            // 到顶了（当前组即顶级组）：用顶级组负责人兜底，避免顶级组成员无人审批而自动通过。
+            // 若顶级组也无负责人，才返回空（仍由上层 start 逻辑判定跳过/自动通过）。
+            // 注：若兜底的审批人恰为申请人自己，会被 start 的自排逻辑（approvalInstanceService）排除。
+            if (!fresh?.leader) return [];
+            return [{ userId: fresh.leader.id, userName: fresh.leader.realName }];
           }
           currentGroup = fresh.parent;
         }
