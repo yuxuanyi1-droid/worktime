@@ -84,6 +84,9 @@ export default function TimesheetPage() {
   // 周表格相关状态
   const [currentWeekStart, setCurrentWeekStart] = useState<dayjs.Dayjs>(dayjs().isoWeekday(1));
   const [rows, setRows] = useState<WeekRow[]>([newRow()]);
+  // 脏标志：自上次加载/保存以来是否有未保存的改动。切周前据此判断是否提示。
+  // 之前用 originalStatus==='draft' 派生判断会误报（已保存草稿也恒为 draft）且漏报（新行 undefined）。
+  const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false); // 编辑模式：控制已提交/已审批行是否可编辑
   const rowSnapshotRef = useRef<Map<string, WeekRow>>(new Map()); // 编辑模式开始时的行快照
@@ -208,18 +211,21 @@ export default function TimesheetPage() {
         });
         setRows(loadedRows.length > 0 ? loadedRows : [newRow()]);
         setEditing(false);
+        setDirty(false);
       } else {
         setRows([newRow()]);
+        setDirty(false);
       }
     } catch (error) {
       message.error(getErrorMessage(error, '本周工时加载失败'));
       setRows([newRow()]);
+      setDirty(false);
     }
   };
 
   // ===== 周表格操作 =====
 
-  const addRow = () => setRows(prev => [...prev, newRow()]);
+  const addRow = () => { setRows(prev => [...prev, newRow()]); setDirty(true); };
 
   const removeRow = async (key: string) => {
     const row = rows.find(r => r.key === key);
@@ -242,17 +248,21 @@ export default function TimesheetPage() {
         }
         message.success('草稿已删除');
         loadHistory();
-        loadWeekDrafts(); // 同步刷新周表，避免 UI 与 DB 不一致
+        await loadWeekDrafts(); // 同步刷新周表，UI 与 DB 一致（loadWeekDrafts 已重置 dirty）
+        return; // draft 删除已通过 loadWeekDrafts 刷新 UI，无需再手动 setRows
       } catch (error) {
         message.error(getErrorMessage(error, '删除失败'));
         return;
       }
     }
+    // 非 draft 行（如已提交行）从 UI 移除：标记 dirty，待用户保存
     setRows(prev => prev.length <= 1 ? [newRow()] : prev.filter(r => r.key !== key));
+    setDirty(true);
   };
 
   const updateRow = (key: string, field: Partial<WeekRow>) => {
     setRows(prev => prev.map(r => r.key === key ? { ...r, ...field } : r));
+    setDirty(true);
   };
 
   /** 获取某行可选的项目列表（排除其他行已选的） */
@@ -277,10 +287,11 @@ export default function TimesheetPage() {
     setRows(prev => prev.map(r =>
       r.key === key ? { ...r, hours: { ...r.hours, [date]: corrected } } : r
     ));
+    setDirty(true);
   };
 
-  // 切周前检查是否有未保存的草稿数据（避免切周丢失）
-  const hasUnsavedDraft = () => rows.some(r => weekDates.some(d => (r.hours[d] || 0) > 0) && r.originalStatus === 'draft');
+  // 切周前检查是否有未保存的改动（基于 dirty 标志，而非 originalStatus——已保存草稿 originalStatus 也是 draft 会误报）
+  const hasUnsavedDraft = () => dirty;
   const switchWeek = (newWeek: dayjs.Dayjs) => {
     if (hasUnsavedDraft()) {
       Modal.confirm({
@@ -337,6 +348,7 @@ export default function TimesheetPage() {
       const hasCurrentData = rows.some(r => weekDates.some(d => (r.hours[d] || 0) > 0));
       const doCopy = () => {
         setRows(newRows);
+        setDirty(true);
         message.success(`已复制上周 ${newRows.length} 个项目行`);
       };
       if (hasCurrentData) {
@@ -439,6 +451,7 @@ export default function TimesheetPage() {
         await timesheetApi.modifySubmitted(submittedRows);
         message.success('工时已修改，新审批已自动发起');
         setEditing(false);
+        setDirty(false);
         loadWeekDrafts();
         loadHistory();
       } catch (error) {
@@ -485,6 +498,7 @@ export default function TimesheetPage() {
       })));
       await timesheetApi.batchCreate(draftItems);
       message.success('草稿已保存');
+      setDirty(false);
       loadWeekDrafts();
       loadHistory();
     } catch (error) {
@@ -566,6 +580,7 @@ export default function TimesheetPage() {
         try {
           await timesheetApi.submitByRows(validRows);
           message.success('已提交审批');
+          setDirty(false);
           loadWeekDrafts();
           loadHistory();
         } catch (error) {
