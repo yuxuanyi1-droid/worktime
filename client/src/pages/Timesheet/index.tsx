@@ -428,6 +428,12 @@ export default function TimesheetPage() {
         message.info('没有检测到修改，无需保存');
         return;
       }
+      // 工作内容必填校验（提交审批/修改场景；草稿不校验）
+      const missingDescProj = submittedRows.find(r => !r.description.trim());
+      if (missingDescProj) {
+        message.warning('请填写每条工时的工作内容后再提交');
+        return;
+      }
       setSaving(true);
       try {
         await timesheetApi.modifySubmitted(submittedRows);
@@ -510,6 +516,12 @@ export default function TimesheetPage() {
     }
     if (validRows.length === 0) {
       message.warning('请至少填写一条有效工时');
+      return;
+    }
+    // 工作内容必填校验（提交审批场景）
+    const missingDesc = validRows.find(r => !r.description.trim());
+    if (missingDesc) {
+      message.warning('请填写每条工时的工作内容后再提交');
       return;
     }
     // 校验周工时：计算整周总工时（包括已通过/审批中未修改的行）
