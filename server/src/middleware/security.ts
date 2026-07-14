@@ -36,3 +36,15 @@ export const oidcCallbackLimiter = rateLimit({
   legacyHeaders: false,
   message: { code: 429, message: 'SSO 回调请求过于频繁，请稍后再试' },
 });
+
+/**
+ * AI 聊天限流：同一 IP 每分钟最多 30 次对话。
+ * 每次对话会触发 LLM 调用（成本与延时较高），需比通用接口更严格。
+ */
+export const agentLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { code: 429, message: '对话请求过于频繁，请稍后再试' },
+});

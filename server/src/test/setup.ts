@@ -74,6 +74,7 @@ async function loadEntities() {
   const { PermissionRequest } = await import('../entities/PermissionRequest');
   const { UserPermissionGrant } = await import('../entities/UserPermissionGrant');
   const { UserExternalIdentity } = await import('../entities/UserExternalIdentity');
+  const { PersonalAccessToken } = await import('../entities/PersonalAccessToken');
   return [
     User, Department, Group, Role, Permission, Project,
     Timesheet, OvertimeApplication, WeeklyReport,
@@ -82,5 +83,6 @@ async function loadEntities() {
     SystemSetting, Notification, AuditLog, Announcement, AnnouncementRead,
     PermissionRequest, UserPermissionGrant, SubmissionSequence,
     UserExternalIdentity,
+    PersonalAccessToken,
   ];
 }

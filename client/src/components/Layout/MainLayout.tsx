@@ -1,6 +1,7 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Dropdown, Avatar, Badge, Popover, List, Empty, Spin, Tag, Tabs, Space, Button } from 'antd';
 import { ErrorBoundary } from '../ErrorBoundary';
+import AgentChat from '../AgentChat';
 import {
   DashboardOutlined,
   ClockCircleOutlined,
@@ -302,6 +303,7 @@ export default function MainLayout() {
 
   const userMenuItems = [
     { key: 'profile', icon: <UserOutlined />, label: '个人信息' },
+    { key: 'pat', icon: <KeyOutlined />, label: '访问令牌' },
     { key: 'divider', type: 'divider' as const },
     { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', danger: true },
   ];
@@ -309,6 +311,7 @@ export default function MainLayout() {
   const handleUserMenu = ({ key }: { key: string }) => {
     if (key === 'logout') handleLogout();
     else if (key === 'profile') navigate('/profile');
+    else if (key === 'pat') navigate('/pat');
   };
 
   const currentPath = location.pathname;
@@ -439,6 +442,9 @@ export default function MainLayout() {
           <Outlet />
         </ErrorBoundary>
       </div>
+
+      {/* 全局悬浮 AI 助手 */}
+      <AgentChat />
     </div>
   );
 }

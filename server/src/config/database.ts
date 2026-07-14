@@ -27,10 +27,12 @@ import { PermissionRequest } from '../entities/PermissionRequest';
 import { UserPermissionGrant } from '../entities/UserPermissionGrant';
 import { SubmissionSequence } from '../entities/SubmissionSequence';
 import { UserExternalIdentity } from '../entities/UserExternalIdentity';
+import { PersonalAccessToken } from '../entities/PersonalAccessToken';
 import { InitSchema1700000000000 } from '../migrations/1700000000000-InitSchema';
 import { PrecisionAndIndexes1700000000001 } from '../migrations/1700000000001-PrecisionAndIndexes';
 import { CountersignSupport1700000000002 } from '../migrations/1700000000002-CountersignSupport';
 import { RootGroupId1700000000003 } from '../migrations/1700000000003-RootGroupId';
+import { PersonalAccessTokens1700000000004 } from '../migrations/1700000000004-PersonalAccessTokens';
 
 /**
  * 数据库类型：'sqlite'（默认，零配置单文件）或 'postgres'（生产，高并发）。
@@ -49,11 +51,13 @@ const entities = [
   PermissionRequest, UserPermissionGrant,
   SubmissionSequence,
   UserExternalIdentity,
+  PersonalAccessToken,
 ];
 
 const migrations = [
   InitSchema1700000000000, PrecisionAndIndexes1700000000001,
   CountersignSupport1700000000002, RootGroupId1700000000003,
+  PersonalAccessTokens1700000000004,
 ];
 
 /**

@@ -19,6 +19,7 @@ const System = lazy(() => import('../pages/System'));
 const ProjectPage = lazy(() => import('../pages/Project'));
 const ProfilePage = lazy(() => import('../pages/Profile'));
 const NotificationCenter = lazy(() => import('../pages/NotificationCenter'));
+const PatPage = lazy(() => import('../pages/Pat'));
 
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -88,6 +89,7 @@ export default function AppRouter() {
         <Route path="project" element={<ProjectPage />} />
         <Route path="system" element={<PermissionRoute permission="system:read"><System /></PermissionRoute>} />
         <Route path="profile" element={<ProfilePage />} />
+        <Route path="pat" element={<PatPage />} />
         <Route path="notifications" element={<NotificationCenter />} />
         <Route path="*" element={
           <Result

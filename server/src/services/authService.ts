@@ -8,6 +8,7 @@ import { Department } from '../entities/Department';
 import { Group } from '../entities/Group';
 import { UserExternalIdentity } from '../entities/UserExternalIdentity';
 import { AccessPolicyService } from './accessPolicyService';
+import { PatService } from './patService';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import type { ProviderUserInfo } from './oidc/provider';
@@ -40,6 +41,12 @@ export class AuthService {
     const token = this.signLocalJwt(user);
     const permissions = Array.from(await this.accessPolicy.getPermissionCodes(user.id));
     const idpManaged = await this.isIdpManaged(user.id);
+    // 首登/无 PAT 时自动建默认 PAT（best-effort，失败不影响登录）
+    try {
+      await new PatService().ensureDefaultPat(user.id);
+    } catch {
+      /* ignore */
+    }
     return {
       token,
       user: {

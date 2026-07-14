@@ -6,7 +6,7 @@ import './config/env'; // 加载根 .env（端口）+ server/.env（业务配置
 import pinoHttp from 'pino-http';
 import { AppDataSource, ensureSchema } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
-import { globalLimiter, loginLimiter, oidcCallbackLimiter } from './middleware/security';
+import { globalLimiter, loginLimiter, oidcCallbackLimiter, agentLimiter } from './middleware/security';
 import { metricsMiddleware, metricsHandler } from './middleware/metrics';
 import { logger } from './utils/logger';
 import { authRoutes } from './routes/auth';
@@ -21,6 +21,10 @@ import { notificationRoutes } from './routes/notification';
 import { auditRoutes } from './routes/audit';
 import { announcementRoutes } from './routes/announcement';
 import { permissionRequestRoutes } from './routes/permissionRequest';
+import { patRoutes } from './routes/pat';
+import { agentRoutes } from './routes/agent';
+import { ensurePiModelsJson } from './config/ai';
+import { preloadPi } from './ai/agentRunner';
 
 const app = express();
 // PORT 统一在根 .env 配置；Number 化避免字符串端口传入 listen
@@ -83,6 +87,8 @@ app.use(v1Base, (req, res, next) => {
 app.use(`${v1Base}/auth/login`, loginLimiter);
 // OIDC 回调限流（换 token 的敏感端点，比通用接口更严格）
 app.use(`${v1Base}/auth/oidc/callback`, oidcCallbackLimiter);
+// AI 聊天限流（每次对话触发 LLM 调用，成本与延时较高）
+app.use(`${v1Base}/agent/chat`, agentLimiter);
 
 // 路由
 app.use(`${v1Base}/auth`, authRoutes);
@@ -98,6 +104,8 @@ app.use(`${v1Base}/notifications`, notificationRoutes);
 app.use(`${v1Base}/audit-logs`, auditRoutes);
 app.use(`${v1Base}/announcements`, announcementRoutes);
 app.use(`${v1Base}/permission-requests`, permissionRequestRoutes);
+app.use(`${v1Base}/pats`, patRoutes);
+app.use(`${v1Base}/agent`, agentRoutes);
 
 // Prometheus 指标端点（生产应通过 METRICS_TOKEN 环境变量加 Bearer 校验）
 app.get(`${apiBase}/metrics`, async (req, res) => {
@@ -154,6 +162,11 @@ app.use(errorHandler);
 AppDataSource.initialize()
   .then(async () => {
     await ensureSchema();
+    // 生成 pi agent 的 models.json（AI 未配置则跳过，不影响启动）
+    ensurePiModelsJson();
+    // 预启动 pi worker：pi 是大型 ESM 包，在已加载 CJS 模块的主线程里动态 import 会死锁事件循环，
+    // 必须放进 worker 线程。服务启动时预创建 worker 并 import pi，避免首次请求时阻塞。
+    preloadPi();
     dbConnected = true;
     logger.info('数据库连接成功');
     logger.info({ entities: AppDataSource.entityMetadatas.map(e => e.name) }, '已注册实体');
