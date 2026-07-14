@@ -32,7 +32,8 @@ const formatLocalDate = (date = new Date()) => {
 
 function addCountSummary(target: Record<string, SummaryWithCount>, key: string, hours: number) {
   if (!target[key]) target[key] = { hours: 0, count: 0 };
-  target[key].hours += hours;
+  // 累加后 round2，避免浮点尾巴（如 0.3+0.3+...→1.7999...）。与 addHoursSummary 对齐。
+  target[key].hours = round2(target[key].hours + hours);
   target[key].count += 1;
 }
 
@@ -46,30 +47,30 @@ function totalOfDates(byDate: Record<string, number>) {
 }
 
 /**
- * 报表工时去重：按 (userId, date) 取最新的已审批通过（approved）的 submissionGroup 的记录。
+ * 报表工时去重：按 (userId, projectId, date) 取最新的已审批通过（approved）的 submissionGroup 的记录。
  * 抽成独立导出函数便于单元测试。
  *
  * 版本化语义：
  *   - 同一天同一版本链可能有多个 submissionGroup（v1 approved, v2 submitted...）
- *   - 报表只统计 approved：取该 (userId, date) 下 submissionGroupId 最大的 approved 记录
+ *   - 报表只统计 approved：取该 (userId, projectId, date) 下 submissionGroupId 最大的 approved 记录
  *   - v2 审批中时统计 v1，v2 通过后 v1 被 deprecate，统计 v2
- *   - 同一天多项目在同一 submissionGroup 下各自独立统计
+ *   - 同一天多项目各自独立统计（submitByRows 每个 projectId 独立分配 submissionGroupId，故必须带 projectId 维度）
  */
 export function dedupReportTimesheets(records: Timesheet[]): Timesheet[] {
-  // 找出每个 (userId, date) 对应的最大的 approved submissionGroupId
+  // 找出每个 (userId, projectId, date) 对应的最大的 approved submissionGroupId
   const maxApprovedGroupByKey = new Map<string, number>();
   for (const r of records) {
     if (r.status !== 'approved' || !r.submissionGroupId) continue;
-    const key = `${r.userId}_${r.date}`;
+    const key = `${r.userId}_${r.projectId}_${r.date}`;
     const cur = maxApprovedGroupByKey.get(key);
     if (cur === undefined || r.submissionGroupId > cur) {
       maxApprovedGroupByKey.set(key, r.submissionGroupId);
     }
   }
-  // 只保留属于该 (userId, date) 最大 approved submissionGroupId 的 approved 记录
+  // 只保留属于该 (userId, projectId, date) 最大 approved submissionGroupId 的 approved 记录
   return records.filter(r => {
     if (r.status !== 'approved') return false;
-    const key = `${r.userId}_${r.date}`;
+    const key = `${r.userId}_${r.projectId}_${r.date}`;
     return r.submissionGroupId === maxApprovedGroupByKey.get(key);
   });
 }
@@ -99,7 +100,7 @@ export class ReportService {
       const departmentName = record.departmentSnapshotName || UNKNOWN_DEPARTMENT;
       const groupName = record.groupSnapshotName || UNKNOWN_GROUP;
 
-      byDate[record.date] = (byDate[record.date] || 0) + hours;
+      byDate[record.date] = round2((byDate[record.date] || 0) + hours);
       addCountSummary(byUser, user?.realName || UNKNOWN_USER, hours);
       addCountSummary(byProject, project?.name || UNKNOWN_PROJECT, hours);
       addCountSummary(byDepartment, departmentName, hours);
