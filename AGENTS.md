@@ -2,7 +2,7 @@
 
 Monorepo: `server/` (Express + TypeScript + TypeORM + better-sqlite3 + JWT) and `client/` (React 18 + TS + Ant Design 5 + Zustand + ECharts). Orchestrated from the repo root with `concurrently`. User-facing strings, comments, and commit messages are **Chinese** — match that.
 
-> **项目处于开发阶段：修改实体时无需考虑数据库兼容性。** 直接改实体、开启 `TYPEORM_SYNCHRONIZE=true` 让 TypeORM 自动重建表结构、或删 `server/data/worktime.db` 后重新 `npm run seed` 即可，不必为 schema 变更编写 migration。
+> **项目处于测试阶段：所有涉及数据库的修改必须保证向后兼容。** 修改实体时**必须编写 TypeORM migration**（`npm run migration:generate` → 检查 → `migration:run`），不得依赖 `synchronize` 自动改表，不得删库重 seed。生产数据已存在，schema 变更需可重放、可回滚（`migration:revert`）。
 
 ## Commands
 
@@ -40,12 +40,15 @@ No lint/format/typecheck scripts exist. No CI. Client `tsc -b` runs only inside 
 - **Approval versioning:** approved timesheets/overtime/weekly-reports are never mutated back to draft — edits mark the old record `deprecated` and create a new one re-entering approval.
 - **`@/` alias exists in tsconfig but is unused** — use relative imports.
 
-## Backend schema (开发阶段，无需考虑兼容)
+## Backend schema (测试阶段，必须向后兼容)
 
 - DB: SQLite (`server/data/worktime.db`), WAL + `foreign_keys=ON` pragmas.
-- **改表流程：直接编辑 `entities/` 下的实体类，设 `TYPEORM_SYNCHRONIZE=true`（或删库重 seed）。无需写 migration、无需保证向后兼容。**
-- 实体类在 `config/database.ts` 的 `entities` 数组里**显式列出**（非 glob）——新增实体记得在此登记（以及 `test/setup.ts` 的 `loadEntities()`）。
-- 现有 migration 在 `src/migrations/` 仅作历史保留；开发期可忽略，必要时删库重建即可。
+- **改表流程：编辑 `entities/` 下实体类 → `npm run migration:generate -- src/migrations/<Name>` 生成 migration → 人工检查生成的 SQL（新增列给默认值、删列/改类型需先评估存量数据）→ `npm run migration:run` 落库。** 禁止用 `synchronize` 自动改表、禁止删库重 seed。
+- `TYPEORM_SYNCHRONIZE` 在测试/生产环境必须保持 `false`（仅首次建库可用）。
+- 兼容性要点：新增非空列须带 `DEFAULT`；删列/改名/改类型需写数据迁移 SQL；尽量加字段不加表，能向后兼容就不写破坏性 migration。
+- migration 必须支持 `migration:revert`（写好 `down`，或确认 `up` 可安全回滚）。
+- 实体类在 `config/database.ts` 的 `entities` 数组里**显式列出**（非 glob）——新增实体记得在此登记（以及 `test/setup.ts` 的 `loadEntities()`），并同步生成 migration。
+- `src/migrations/` 现有 migration 已启用，按时间戳顺序执行，**不得删除或重排已应用的 migration**。
 - Money/hours 使用 `numeric(10,2)`。`SubmissionSequence` 分配提交分组序号（替代 `MAX+1`）。
 
 ## Backend tests
@@ -66,7 +69,7 @@ No lint/format/typecheck scripts exist. No CI. Client `tsc -b` runs only inside 
 
 ## Gotchas
 
-- 开发阶段：schema 变更直接改实体 + synchronize，或删库重 seed，**不要**花时间写/维护 migration。
+- 测试阶段：schema 变更必须写 migration（`migration:generate` → 检查 → `migration:run`），**不得**用 synchronize 自动改表或删库重 seed。
 - `nul` 和 `server/nul` 是 Windows 误产生的杂散文件（`.gitignore` 里记为 `_nul`）；忽略即可。
 - 默认账号（seed 后，密码均为 `123456`）：`admin`、`manager1`、`leader1/2`、`subleader1`、`employee1/2`。
 - `data/worktime_test.db`（根）与 `server/data/*.db` 为本地数据库（已 gitignore）——不要提交。
@@ -75,7 +78,7 @@ No lint/format/typecheck scripts exist. No CI. Client `tsc -b` runs only inside 
 - 设了 `trust proxy = 1`（反向代理后限流依赖它）。
 
 ## Before editing sensitive areas, read
-- `server/src/config/database.ts` + `server/src/entities/` (schema — dev: edit freely + synchronize)
+- `server/src/config/database.ts` + `server/src/entities/` (schema — 测试阶段：改实体后必须生成并执行 migration，禁止 synchronize)
 - `server/src/services/timesheetService.ts` (transaction / approval-versioning pattern)
 - `server/src/middleware/auth.ts` + `permission.ts` (auth/permission model)
 - `client/src/utils/request.ts` + `client/src/router/index.tsx` (frontend auth flow & routing)
