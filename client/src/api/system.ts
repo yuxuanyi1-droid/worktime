@@ -18,6 +18,8 @@ export interface SimpleUser {
   id: number;
   username: string;
   realName: string;
+  departmentId?: number | null;
+  groupId?: number | null;
 }
 
 export const systemApi = {

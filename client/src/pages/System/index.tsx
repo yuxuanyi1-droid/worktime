@@ -64,17 +64,24 @@ export default function System() {
   );
 }
 
-// ==================== 组织架构（只读展示，数据由 OIDC/IdP 同步） ====================
+// ==================== 组织架构（可设置部门/组负责人，审批流程依赖此字段） ====================
 function OrgTab() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [groupTree, setGroupTree] = useState<any[]>([]);
   const [selectedDeptId, setSelectedDeptId] = useState<number | null>(null);
+  // 设置负责人弹窗状态：type 标识组/部门，id/name 为目标，可选 leaderName 用于标题展示
+  const [leaderModal, setLeaderModal] = useState<{ type: 'group' | 'dept'; id: number; name: string } | null>(null);
+  const [leaderForm] = Form.useForm();
+  const [allUsers, setAllUsers] = useState<SimpleUser[]>([]);
+  const [saving, setSaving] = useState(false);
 
   const load = async () => {
-    const [deptRes] = await Promise.all([
+    const [deptRes, usersRes] = await Promise.all([
       systemApi.getDepartments(),
+      systemApi.getAllUsers(),
     ]);
     if (deptRes.data) setDepartments(deptRes.data);
+    if (usersRes.data) setAllUsers(usersRes.data);
 
     // 根据是否选中部门加载对应分组树
     if (selectedDeptId) {
@@ -89,7 +96,36 @@ function OrgTab() {
 
   useEffect(() => { load(); }, [selectedDeptId]);
 
-  // 将分组树转为 Ant Design Tree 结构（只读，无操作按钮）
+  // 打开设置负责人弹窗（e.stopPropagation 防止触发树节点选中）
+  const openLeaderModal = (e: any, type: 'group' | 'dept', id: number, name: string, currentLeaderId?: number) => {
+    e.stopPropagation();
+    setLeaderModal({ type, id, name });
+    leaderForm.setFieldsValue({ leaderId: currentLeaderId ?? undefined });
+  };
+
+  // 提交设置负责人
+  const handleLeaderSave = async (values: any) => {
+    if (!leaderModal) return;
+    const leaderId = values.leaderId ?? null;
+    setSaving(true);
+    try {
+      if (leaderModal.type === 'group') {
+        await systemApi.updateGroup(leaderModal.id, { leaderId });
+      } else {
+        await systemApi.updateDepartment(leaderModal.id, { leaderId });
+      }
+      message.success('设置成功');
+      setLeaderModal(null);
+      leaderForm.resetFields();
+      await load();
+    } catch {
+      // 错误信息已由 request 拦截器统一提示
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 将分组树转为 Ant Design Tree 结构
   const buildTreeData = (groups: any[]): any[] => {
     return groups.map(g => ({
       key: `group-${g.id}`,
@@ -99,6 +135,13 @@ function OrgTab() {
           {g.name}
           {g.leader && <Tag color="blue" style={{ marginLeft: 8, fontSize: 12 }}>负责人: {g.leader.realName}</Tag>}
           {g.members?.length > 0 && <Tag style={{ marginLeft: 4, fontSize: 11, color: '#7A7060' }}>{g.members.length}人</Tag>}
+          <PermissionGuard permission="system:org:manage">
+            <Button type="link" size="small" icon={<EditOutlined />}
+              style={{ marginLeft: 4, padding: '0 4px', height: 'auto', fontSize: 12 }}
+              onClick={(e) => openLeaderModal(e, 'group', g.id, g.name, g.leader?.id)}>
+              设置负责人
+            </Button>
+          </PermissionGuard>
         </span>
       ),
       children: [
@@ -138,16 +181,31 @@ function OrgTab() {
             <ApartmentOutlined style={{ marginRight: 6 }} />
             <strong>{dept.name}</strong>
             {dept.leader && <Tag color="green" style={{ marginLeft: 8, fontSize: 12 }}>负责人: {dept.leader.realName}</Tag>}
+            <PermissionGuard permission="system:org:manage">
+              <Button type="link" size="small" icon={<EditOutlined />}
+                style={{ marginLeft: 4, padding: '0 4px', height: 'auto', fontSize: 12 }}
+                onClick={(e) => openLeaderModal(e, 'dept', dept.id, dept.name, dept.leader?.id)}>
+                设置负责人
+              </Button>
+            </PermissionGuard>
           </span>
         ),
         children: buildTreeData(groupTree.filter((g: any) => g.departmentId === dept.id)),
       })),
   ];
 
+  // 设置负责人弹窗的人选：按组/部门归属过滤
+  const leaderOptions = leaderModal
+    ? (leaderModal.type === 'group'
+        ? allUsers.filter(u => u.groupId === leaderModal.id)
+        : allUsers.filter(u => u.departmentId === leaderModal.id))
+        .map(u => ({ label: `${u.realName}(${u.username})`, value: u.id }))
+    : [];
+
   return (
     <div>
       <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
-        组织架构由身份源（Authentik）同步，用户登录时自动创建/更新，此处仅展示。如需修改请在身份源中调整。
+        组织架构来自身份源（Authentik）同步；部门/组负责人可在此处设置（审批流程的「直属负责人/上级负责人/部门负责人」依赖此字段）。
       </div>
       <Row gutter={16}>
         <Col span={6}>
@@ -178,6 +236,22 @@ function OrgTab() {
           </Card>
         </Col>
       </Row>
+
+      <Modal title={leaderModal ? `设置「${leaderModal.name}」负责人` : ''}
+        open={!!leaderModal} width={480} confirmLoading={saving}
+        onCancel={() => { setLeaderModal(null); leaderForm.resetFields(); }}
+        onOk={() => leaderForm.submit()}>
+        <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
+          负责人将作为该{leaderModal?.type === 'group' ? '组' : '部门'}提交工时/加班/周报时的默认审批人。清空可移除负责人。
+        </div>
+        <Form form={leaderForm} layout="vertical" onFinish={handleLeaderSave}>
+          <Form.Item name="leaderId" label="负责人">
+            <Select allowClear showSearch optionFilterProp="label" placeholder="选择负责人（可清空）"
+              options={leaderOptions}
+              notFoundContent={leaderModal ? `该${leaderModal.type === 'group' ? '组' : '部门'}暂无成员，请先在用户管理中分配用户到此${leaderModal.type === 'group' ? '组' : '部门'}` : undefined} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 }
