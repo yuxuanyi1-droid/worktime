@@ -4,7 +4,7 @@ import { Timesheet } from '../entities/Timesheet';
 import { SystemSetting } from '../entities/SystemSetting';
 import { SubmissionSequence } from '../entities/SubmissionSequence';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
-import { Between, In, Not } from 'typeorm';
+import { Between, In, Not, Brackets } from 'typeorm';
 import { NotificationService } from './notificationService';
 import { User } from '../entities/User';
 import { ApprovalInstanceService } from './approvalInstanceService';
@@ -163,10 +163,13 @@ export class TimesheetService {
       .where('t.userId = :userId', { userId });
 
     if (!includeAll) {
-      // 去重：同一 (projectId, date) 取最大的 submissionGroupId（最新提交版本）。
-      // submitByRows 每个 projectId 独立分配 submissionGroupId，故必须按 (projectId, date) 分组，
-      // 否则同一天多项目（各自不同 submissionGroupId）只留最大 group 那一个项目，丢失其他项目。
-      // 两步查询：先查出每个 (projectId, date) 的最大 submissionGroupId，再按这些 group 查完整记录。
+      // 周填报表查询：并集返回「已提交的最新版本」+「真草稿(draft)」。
+      //
+      // 路径A（已分组最新版本）：submitByRows 每个 projectId 独立分配 submissionGroupId，
+      //   故按 (projectId, date) 取 MAX(submissionGroupId) 得到各项目最新提交版本。
+      // 路径B（真草稿）：draft 的 submissionGroupId 本就是 null（未提交），单独查 status='draft'。
+      //   撤回记录(status=withdrawn, group 保留)被两路都排除：路径A按 status 排除 withdrawn，
+      //   路径B要求 status=draft。故撤回记录不显示（仅历史记录可见）。
       const maxGroupQb = this.repo.createQueryBuilder('d')
         .select('MAX(d.submissionGroupId)', 'maxGroup')
         .where('d.userId = :uid', { uid: userId })
@@ -182,12 +185,24 @@ export class TimesheetService {
       const maxGroupRows = await maxGroupQb.getRawMany<{ maxGroup: number }>();
       const maxGroups = maxGroupRows.map(r => r.maxGroup).filter(Boolean);
 
-      if (maxGroups.length === 0) {
-        return { list: [], total: 0, page, pageSize };
+      if (startDate && endDate) {
+        qb.andWhere('t.date BETWEEN :ds AND :de', { ds: startDate, de: endDate });
       }
-
-      qb.andWhere('t.submissionGroupId IN (:...maxGroups)', { maxGroups });
-      qb.andWhere('t.status NOT IN (:...mainExcl)', { mainExcl: ['deprecated', 'rejected', 'withdrawn'] });
+      // 并集：已提交最新版本(路径A) 或 真草稿(路径B)
+      qb.andWhere(new Brackets(qb1 => {
+        // 路径A：maxGroups 非空时取这些 group 的非终态记录
+        if (maxGroups.length > 0) {
+          qb1.where('t.submissionGroupId IN (:...maxGroups)', { maxGroups })
+            .andWhere('t.status NOT IN (:...mainExcl)', { mainExcl: ['deprecated', 'rejected', 'withdrawn'] })
+            .orWhere('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' });
+        } else {
+          // 无已提交版本：只查真草稿
+          qb1.where('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' });
+        }
+      }));
+      if (status) {
+        qb.andWhere('t.status = :status', { status });
+      }
     } else {
       // includeAll（历史记录）：按提交时间筛选，而非工时日期。
       // 这样跨周/跨月的提交记录能整组完整返回（一组工时共享同一个 submissionGroupId），
