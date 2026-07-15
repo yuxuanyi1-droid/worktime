@@ -4,10 +4,10 @@ import { Timesheet } from '../entities/Timesheet';
 
 /** 构造测试用 Timesheet（只填去重逻辑关心的字段） */
 function mk(
-  id: number, userId: number, date: string, projectId: number, hours: number,
+  id: number, userId: number, date: string, projectId: number, days: number,
   status: Timesheet['status'] = 'approved', submissionGroupId: number = 1,
 ): Timesheet {
-  return { id, userId, date, projectId, hours, status, submissionGroupId } as Timesheet;
+  return { id, userId, date, projectId, days, status, submissionGroupId } as Timesheet;
 }
 
 describe('dedupReportTimesheets', () => {
@@ -68,7 +68,7 @@ describe('dedupReportTimesheets', () => {
     const result = dedupReportTimesheets(records);
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe(1);
-    expect(result[0].hours).toBe(8);
+    expect(result[0].days).toBe(8);
   });
 
   it('版本化：v1 deprecated + v2 approved → 取 v2', () => {
@@ -80,7 +80,7 @@ describe('dedupReportTimesheets', () => {
     const result = dedupReportTimesheets(records);
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe(2);
-    expect(result[0].hours).toBe(3);
+    expect(result[0].days).toBe(3);
   });
 
   it('版本化：同一天多版本 approved 取最大 submissionGroupId', () => {
@@ -91,7 +91,7 @@ describe('dedupReportTimesheets', () => {
     const result = dedupReportTimesheets(records);
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe(2);
-    expect(result[0].hours).toBe(6);
+    expect(result[0].days).toBe(6);
   });
 
   it('版本化：同一天 v1 多项目 approved + v2 submitted → 取 v1 全部记录', () => {
@@ -105,7 +105,7 @@ describe('dedupReportTimesheets', () => {
     ];
     const result = dedupReportTimesheets(records);
     expect(result).toHaveLength(2);
-    const total = result.reduce((s, r) => s + r.hours, 0);
+    const total = result.reduce((s, r) => s + r.days, 0);
     expect(total).toBe(1.0);
   });
 
@@ -120,7 +120,7 @@ describe('dedupReportTimesheets', () => {
     ];
     const result = dedupReportTimesheets(records);
     expect(result).toHaveLength(3);
-    const total = result.reduce((s, r) => s + r.hours, 0);
+    const total = result.reduce((s, r) => s + r.days, 0);
     expect(total).toBe(1.0);
   });
 });

@@ -38,7 +38,7 @@ interface ApprovalTargetLike {
   previousGroupId?: number | null;
   // overtime / weekly_report / permission_request 特有
   date?: string;
-  hours?: number;
+  days?: number;
   overtimeType?: string;
   reason?: string;
   weekStart?: string;
@@ -170,21 +170,21 @@ export class ApprovalService {
         base.date = dates[0] || ts.date;
         base.weekStart = dates[0] || ts.date;
         base.weekEnd = dates[dates.length - 1] || ts.date;
-        base.hours = round2(groupRecords.reduce((sum, record) => sum + Number(record.hours), 0));
+        base.days = round2(groupRecords.reduce((sum, record) => sum + Number(record.days), 0));
         base.description = groupRecords[0]?.description;
         base.projectId = ts.projectId;
         base.submissionGroupId = ts.submissionGroupId;
       } else {
         base.title = `${applicantPrefix}${ts?.project?.name || ''} - ${ts?.date || ''}`;
         base.date = ts?.date;
-        base.hours = ts?.hours;
+        base.days = ts?.days;
         base.description = ts?.description;
         base.projectId = ts?.projectId;
       }
     } else if (targetType === 'overtime') {
       base.title = `${applicantPrefix}${target.date} 加班申请`;
       base.date = target.date;
-      base.hours = target.hours;
+      base.days = target.days;
       base.overtimeType = target.overtimeType;
       base.reason = target.reason;
     } else if (targetType === 'weekly_report') {
@@ -756,13 +756,13 @@ export class ApprovalService {
         content.date = dates[0] || ts.date;
         content.weekStart = dates[0] || ts.date;
         content.weekEnd = dates[dates.length - 1] || ts.date;
-        content.hours = round2(groupRecords.reduce((sum, record) => sum + Number(record.hours), 0));
+        content.days = round2(groupRecords.reduce((sum, record) => sum + Number(record.days), 0));
         content.description = groupRecords[0]?.description || ts.description;
         content.submissionGroupId = ts.submissionGroupId;
-        content.weekEntries = groupRecords.map(record => ({ date: record.date, hours: Number(record.hours) }));
+        content.weekEntries = groupRecords.map(record => ({ date: record.date, days: Number(record.days) }));
       } else {
         content.date = ts?.date;
-        content.hours = ts?.hours;
+        content.days = ts?.days;
         content.description = ts?.description;
         content.project = ts?.project ? { id: ts.project.id, name: ts.project.name } : null;
       }
@@ -774,7 +774,7 @@ export class ApprovalService {
         const projectId = content.project?.id ?? ts?.projectId;
         const groupId = applicant?.group?.id;
         if (projectId && groupId) {
-          content.quota = await this.buildTimesheetQuota(projectId, groupId, Number(content.hours) || 0);
+          content.quota = await this.buildTimesheetQuota(projectId, groupId, Number(content.days) || 0);
         }
       } else {
         // 读取审批通过时冻结的配额快照
@@ -784,7 +784,7 @@ export class ApprovalService {
     } else if (targetType === 'overtime') {
       const overtime = await this.overtimeRepo.findOne({ where: { id: targetId }, relations: ['project'] });
       content.date = target.date;
-      content.hours = target.hours;
+      content.days = target.days;
       content.overtimeType = target.overtimeType;
       content.reason = target.reason;
       content.project = overtime?.project ? { id: overtime.project.id, name: overtime.project.name } : null;
@@ -880,7 +880,7 @@ export class ApprovalService {
       .andWhere(`u.groupId IN (${quotaGroupIds.map((_, i) => `:gid${i}`).join(',')})`,
         Object.fromEntries(quotaGroupIds.map((id, i) => [`gid${i}`, id])))
       .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
-      .select('COALESCE(SUM(t.hours), 0)', 'total')
+      .select('COALESCE(SUM(t.days), 0)', 'total')
       .getRawOne<{ total: string | number }>();
     const consumed = round2(Number(consumedRaw?.total || 0));
     const total = round2(allocation.allocation);
@@ -914,11 +914,11 @@ export class ApprovalService {
     });
     if (!ts?.projectId || !applicantUser?.group?.id) return;
     const weekRecords = await this.timesheetRepo.find({ where: { submissionGroupId } });
-    const weekHours = weekRecords.reduce((sum, r) => sum + Number(r.hours), 0);
+    const weekDays = weekRecords.reduce((sum, r) => sum + Number(r.days), 0);
     const quotaSnapshot = await this.buildTimesheetQuota(
       ts.projectId,
       applicantUser.group.id,
-      weekHours,
+      weekDays,
     );
     await this.instanceRepo.update(instanceId, { quotaSnapshot });
   }

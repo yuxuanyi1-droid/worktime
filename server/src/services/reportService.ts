@@ -7,8 +7,8 @@ import { ApprovalService } from './approvalService';
 import { BusinessError } from '../utils/errors';
 import { round2 } from '../utils/validation';
 
-type SummaryWithCount = { hours: number; count: number };
-type SummaryHours = { hours: number };
+type SummaryWithCount = { days: number; count: number };
+type SummaryHours = { days: number };
 
 export type ReportFilters = {
   departmentId?: number;
@@ -30,20 +30,20 @@ const formatLocalDate = (date = new Date()) => {
   return `${year}-${month}-${day}`;
 };
 
-function addCountSummary(target: Record<string, SummaryWithCount>, key: string, hours: number) {
-  if (!target[key]) target[key] = { hours: 0, count: 0 };
-  // 累加后 round2，避免浮点尾巴（如 0.3+0.3+...→1.7999...）。与 addHoursSummary 对齐。
-  target[key].hours = round2(target[key].hours + hours);
+function addCountSummary(target: Record<string, SummaryWithCount>, key: string, days: number) {
+  if (!target[key]) target[key] = { days: 0, count: 0 };
+  // 累加后 round2，避免浮点尾巴（如 0.3+0.3+...→1.7999...）。与 addDaysSummary 对齐。
+  target[key].days = round2(target[key].days + days);
   target[key].count += 1;
 }
 
-function addHoursSummary(target: Record<string, SummaryHours>, key: string, hours: number) {
-  if (!target[key]) target[key] = { hours: 0 };
-  target[key].hours = round2(target[key].hours + hours);
+function addHoursSummary(target: Record<string, SummaryHours>, key: string, days: number) {
+  if (!target[key]) target[key] = { days: 0 };
+  target[key].days = round2(target[key].days + days);
 }
 
 function totalOfDates(byDate: Record<string, number>) {
-  return round2(Object.values(byDate).reduce((sum, hours) => sum + hours, 0));
+  return round2(Object.values(byDate).reduce((sum, days) => sum + days, 0));
 }
 
 /**
@@ -94,21 +94,21 @@ export class ReportService {
     const byGroup: Record<string, SummaryWithCount> = {};
 
     for (const record of records) {
-      const hours = Number(record.hours);
+      const days = Number(record.days);
       const user = record.user as any;
       const project = record.project as any;
       const departmentName = record.departmentSnapshotName || UNKNOWN_DEPARTMENT;
       const groupName = record.groupSnapshotName || UNKNOWN_GROUP;
 
-      byDate[record.date] = round2((byDate[record.date] || 0) + hours);
-      addCountSummary(byUser, user?.realName || UNKNOWN_USER, hours);
-      addCountSummary(byProject, project?.name || UNKNOWN_PROJECT, hours);
-      addCountSummary(byDepartment, departmentName, hours);
-      addCountSummary(byGroup, groupName, hours);
+      byDate[record.date] = round2((byDate[record.date] || 0) + days);
+      addCountSummary(byUser, user?.realName || UNKNOWN_USER, days);
+      addCountSummary(byProject, project?.name || UNKNOWN_PROJECT, days);
+      addCountSummary(byDepartment, departmentName, days);
+      addCountSummary(byGroup, groupName, days);
     }
 
     return {
-      totalHours: totalOfDates(byDate),
+      totalDays: totalOfDates(byDate),
       byDate,
       byUser,
       byProject,
@@ -202,22 +202,22 @@ export class ReportService {
     if (userId) qb.andWhere('o.userId = :userId', { userId });
 
     const records = await qb.getMany();
-    const totalHours = round2(records.reduce((sum, record) => sum + Number(record.hours), 0));
+    const totalDays = round2(records.reduce((sum, record) => sum + Number(record.days), 0));
     const byType = records.reduce((acc, record) => {
-      acc[record.overtimeType] = round2((acc[record.overtimeType] || 0) + Number(record.hours));
+      acc[record.overtimeType] = round2((acc[record.overtimeType] || 0) + Number(record.days));
       return acc;
     }, {} as Record<string, number>);
     const byUser = records.reduce((acc, record) => {
       const key = record.user?.realName || UNKNOWN_USER;
-      acc[key] = round2((acc[key] || 0) + Number(record.hours));
+      acc[key] = round2((acc[key] || 0) + Number(record.days));
       return acc;
     }, {} as Record<string, number>);
     const byGroup = records.reduce((acc, record) => {
-      addHoursSummary(acc, record.groupSnapshotName || UNKNOWN_GROUP, Number(record.hours));
+      addHoursSummary(acc, record.groupSnapshotName || UNKNOWN_GROUP, Number(record.days));
       return acc;
     }, {} as Record<string, SummaryHours>);
 
-    return { totalHours, byType, byUser, byGroup, records };
+    return { totalDays, byType, byUser, byGroup, records };
   }
 
   async getDashboardData(userId: number) {
@@ -225,7 +225,7 @@ export class ReportService {
     const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
     const monthEnd = formatLocalDate(new Date(now.getFullYear(), now.getMonth() + 1, 0));
 
-    // 本月工时：一次查询同时算 monthHours 和 trend（两者 where 条件相同，避免重复查询）
+    // 本月工时：一次查询同时算 monthDays 和 trend（两者 where 条件相同，避免重复查询）
     const rawMonthTimesheets = await this.timesheetRepo.find({
       where: { userId, date: Between(monthStart, monthEnd), status: Not('deprecated') },
       order: { date: 'ASC' },
@@ -233,10 +233,10 @@ export class ReportService {
     const monthTimesheets = this.dedupTimesheets(rawMonthTimesheets);
     const monthByDate: Record<string, number> = {};
     for (const record of monthTimesheets) {
-      monthByDate[record.date] = round2((monthByDate[record.date] || 0) + Number(record.hours));
+      monthByDate[record.date] = round2((monthByDate[record.date] || 0) + Number(record.days));
     }
-    const monthHours = totalOfDates(monthByDate);
-    const trend = Object.entries(monthByDate).map(([date, hours]) => ({ date, hours }));
+    const monthDays = totalOfDates(monthByDate);
+    const trend = Object.entries(monthByDate).map(([date, days]) => ({ date, days }));
 
     const pendingResult = await this.approvalService.getPendingList(userId, { page: 1, pageSize: 1 });
     const pendingCount = pendingResult.total;
@@ -244,8 +244,8 @@ export class ReportService {
     const monthOvertime = await this.overtimeRepo.find({
       where: { userId, date: Between(monthStart, monthEnd), status: 'approved' },
     });
-    const overtimeHours = round2(monthOvertime.reduce((sum, record) => sum + Number(record.hours), 0));
+    const overtimeDays = round2(monthOvertime.reduce((sum, record) => sum + Number(record.days), 0));
 
-    return { monthHours, overtimeHours, pendingCount, trend };
+    return { monthDays, overtimeDays, pendingCount, trend };
   }
 }

@@ -96,52 +96,52 @@ export class TimesheetService {
   }
 
   /** 校验单日工时合计不超过1天（天步长语义，带浮点容差） */
-  private validateDailyHours(dailyHours: Record<string, number>) {
-    for (const [date, total] of Object.entries(dailyHours)) {
+  private validateDailyDays(dailyDays: Record<string, number>) {
+    for (const [date, total] of Object.entries(dailyDays)) {
       if (total > 1 + 1e-9) {
         throw new BusinessError(`${date} 工时合计 ${total.toFixed(2)} 天，超过每日1天上限`);
       }
     }
   }
 
-  /** 校验每个 hours 值是步长的整数倍（带浮点容差） */
-  private validateStepMultiple(entries: { date: string; hours: number }[], step: number, field: string) {
+  /** 校验每个 days 值是步长的整数倍（带浮点容差） */
+  private validateStepMultiple(entries: { date: string; days: number }[], step: number, field: string) {
     for (const e of entries) {
-      if (e.hours <= 0) continue;
-      const ratio = e.hours / step;
+      if (e.days <= 0) continue;
+      const ratio = e.days / step;
       if (Math.abs(ratio - Math.round(ratio)) > 1e-9) {
-        throw new BusinessError(`${field}：${e.date} 工时 ${e.hours} 不是填报单位 ${step} 天的整数倍`);
+        throw new BusinessError(`${field}：${e.date} 工时 ${e.days} 不是填报单位 ${step} 天的整数倍`);
       }
     }
   }
 
 
-  async create(data: { userId: number; projectId: number; date: string; hours: number; description?: string }) {
+  async create(data: { userId: number; projectId: number; date: string; days: number; description?: string }) {
     // 草稿创建也校验步长倍数，防止非步长值落库（每日上限留待提交时校验，草稿可跨日累积）
     const step = await this.loadUnitStep();
-    this.validateStepMultiple([{ date: data.date, hours: data.hours }], step, '工时');
+    this.validateStepMultiple([{ date: data.date, days: data.days }], step, '工时');
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
     const record = this.createRecord(data, orgSnapshot);
     return this.repo.save(record);
   }
 
-  async batchCreate(userId: number, items: { projectId: number; date: string; hours: number; description?: string }[]) {
+  async batchCreate(userId: number, items: { projectId: number; date: string; days: number; description?: string }[]) {
     const step = await this.loadUnitStep();
-    items.forEach((item, i) => this.validateStepMultiple([{ date: item.date, hours: item.hours }], step, `items[${i}]`));
+    items.forEach((item, i) => this.validateStepMultiple([{ date: item.date, days: item.days }], step, `items[${i}]`));
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
     const records = items.map(item => this.createRecord({ ...item, userId }, orgSnapshot));
     return this.repo.save(records);
   }
 
-  async update(id: number, userId: number, data: { projectId?: number; hours?: number; description?: string }) {
+  async update(id: number, userId: number, data: { projectId?: number; days?: number; description?: string }) {
     const record = await this.repo.findOne({ where: { id } });
     if (!record) throw new BusinessError('记录不存在');
     if (record.userId !== userId) throw new BusinessError('只能修改自己的工时记录');
     if (record.status !== 'draft') throw new BusinessError('仅草稿状态可修改');
-    // 若更新了 hours，校验步长倍数
-    if (data.hours !== undefined) {
+    // 若更新了 days，校验步长倍数
+    if (data.days !== undefined) {
       const step = await this.loadUnitStep();
-      this.validateStepMultiple([{ date: record.date, hours: data.hours }], step, '工时');
+      this.validateStepMultiple([{ date: record.date, days: data.days }], step, '工时');
     }
     Object.assign(record, data);
     return this.repo.save(record);
@@ -266,11 +266,11 @@ export class TimesheetService {
 
       // 与 submitByRows 对齐的校验：工时锁定、每日上限、步长倍数
       await txService.checkTimesheetLock(records.map(r => r.date));
-      const entries = records.map(r => ({ date: r.date, hours: Number(r.hours) }));
+      const entries = records.map(r => ({ date: r.date, days: Number(r.days) }));
       txService.validateStepMultiple(entries, unitStep, '记录');
-      const dailyHours: Record<string, number> = {};
-      for (const e of entries) dailyHours[e.date] = (dailyHours[e.date] || 0) + e.hours;
-      txService.validateDailyHours(dailyHours);
+      const dailyDays: Record<string, number> = {};
+      for (const e of entries) dailyDays[e.date] = (dailyDays[e.date] || 0) + e.days;
+      txService.validateDailyDays(dailyDays);
 
       await txService.repo.save(records);
 
@@ -297,7 +297,7 @@ export class TimesheetService {
               targetType: 'timesheet',
               targetId: r.id,
               applicantName: submitter.realName,
-              title: `工时审批 ${r.hours}天`,
+              title: `工时审批 ${r.days}天`,
             });
           }
         } else {
@@ -318,7 +318,7 @@ export class TimesheetService {
   /**
    * 按行提交审批（事务化，submissionGroupId 通过序列表原子分配）
    */
-  async submitByRows(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; hours: number }[] }[]) {
+  async submitByRows(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[]) {
     if (!rows?.length) throw new BusinessError('请选择要提交的记录');
 
     const allDates = rows.flatMap(r => r.entries.map(e => e.date));
@@ -328,13 +328,13 @@ export class TimesheetService {
     const unitStep = await this.loadUnitStep();
     rows.forEach((row, i) => this.validateStepMultiple(row.entries, unitStep, `rows[${i}]`));
 
-    const dailyHours: Record<string, number> = {};
+    const dailyDays: Record<string, number> = {};
     for (const row of rows) {
       for (const e of row.entries) {
-        dailyHours[e.date] = (dailyHours[e.date] || 0) + e.hours;
+        dailyDays[e.date] = (dailyDays[e.date] || 0) + e.days;
       }
     }
-    this.validateDailyHours(dailyHours);
+    this.validateDailyDays(dailyDays);
 
     const notifications: PendingNotification[] = [];
 
@@ -362,7 +362,7 @@ export class TimesheetService {
       for (const row of rows) {
         const dates = new Set<string>();
         for (const e of row.entries) {
-          if (e.hours > 0) {
+          if (e.days > 0) {
             dates.add(e.date);
             allEntryDates.add(e.date);
           }
@@ -415,7 +415,7 @@ export class TimesheetService {
         const records: Timesheet[] = [];
 
         for (const entry of row.entries) {
-          if (entry.hours <= 0) continue;
+          if (entry.days <= 0) continue;
 
           const existingRec = existingRecords.find(
             d => !removedIds.has(d.id) && d.date === entry.date && d.projectId === row.projectId
@@ -431,13 +431,13 @@ export class TimesheetService {
                 userId,
                 projectId: row.projectId,
                 date: entry.date,
-                hours: entry.hours,
+                days: entry.days,
                 description: row.description,
                 previousGroupId: oldSubGroupId,
               }, orgSnapshot));
             } else {
               Object.assign(existingRec, orgSnapshot);
-              existingRec.hours = entry.hours;
+              existingRec.days = entry.days;
               existingRec.description = row.description || existingRec.description;
               records.push(existingRec);
             }
@@ -475,7 +475,7 @@ export class TimesheetService {
               userId,
               projectId: row.projectId,
               date: entry.date,
-              hours: entry.hours,
+              days: entry.days,
               description: row.description,
               previousGroupId: oldSubGroupId || previousGroupId,
             }, orgSnapshot));
@@ -484,7 +484,7 @@ export class TimesheetService {
               userId,
               projectId: row.projectId,
               date: entry.date,
-              hours: entry.hours,
+              days: entry.days,
               description: row.description,
               previousGroupId,
             }, orgSnapshot));
@@ -527,7 +527,7 @@ export class TimesheetService {
             },
           );
           if (resolved.firstApproverIds.length) {
-            const totalHours = round2(row.entries.reduce((s, e) => s + e.hours, 0));
+            const totalDays = round2(row.entries.reduce((s, e) => s + e.days, 0));
             const submitter = await txService.userRepo.findOneBy({ id: userId });
             if (submitter) {
               notifications.push({
@@ -536,7 +536,7 @@ export class TimesheetService {
                 targetType: 'timesheet',
                 targetId,
                 applicantName: submitter.realName,
-                title: `工时审批 ${totalHours}天`,
+                title: `工时审批 ${totalDays}天`,
               });
             }
           }
@@ -569,7 +569,7 @@ export class TimesheetService {
    * 这样消除了原先 modifySubmitted 把 approved 退回 draft 的反模式：
    * 审批通过即不可篡改，改动必须走新审批。
    */
-  async modifySubmitted(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; hours: number }[] }[]) {
+  async modifySubmitted(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[]) {
     return this.submitByRows(userId, rows);
   }
 
@@ -630,8 +630,8 @@ export class TimesheetService {
         description: recs[0].description ?? null,
         createdAt: recs[0].createdAt,
         updatedAt: recs[0].updatedAt,
-        totalHours: round2(recs.reduce((s, r) => s + Number(r.hours), 0)),
-        entries: recs.map(r => ({ id: r.id, date: r.date, hours: Number(r.hours) })),
+        totalDays: round2(recs.reduce((s, r) => s + Number(r.days), 0)),
+        entries: recs.map(r => ({ id: r.id, date: r.date, days: Number(r.days) })),
       }));
 
     return { rootGroupId, groups };
@@ -648,16 +648,16 @@ export class TimesheetService {
 
     const byDate: Record<string, number> = {};
     for (const r of records) {
-      byDate[r.date] = round2((byDate[r.date] || 0) + Number(r.hours));
+      byDate[r.date] = round2((byDate[r.date] || 0) + Number(r.days));
     }
-    const totalHours = round2(Object.values(byDate).reduce((s, h) => s + h, 0));
+    const totalDays = round2(Object.values(byDate).reduce((s, h) => s + h, 0));
 
     const byProject = records.reduce((acc, r) => {
       const key = r.project?.name || '未分配';
-      acc[key] = round2((acc[key] || 0) + Number(r.hours));
+      acc[key] = round2((acc[key] || 0) + Number(r.days));
       return acc;
     }, {} as Record<string, number>);
 
-    return { totalHours, byProject, records };
+    return { totalDays, byProject, records };
   }
 }

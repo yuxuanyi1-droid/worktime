@@ -25,7 +25,7 @@ import LazyEChart from '../../components/Charts/LazyEChart';
 
 const { Title, Text } = Typography;
 type ReportTabKey = 'personal' | 'group' | 'department' | 'project' | 'overtime';
-type SummaryValue = { hours: number; count?: number };
+type SummaryValue = { days: number; count?: number };
 
 const palette = ['#4F7B63', '#B7791F', '#B85C5C', '#4F6F8F', '#7A6C5D', '#6D7E3F', '#8C6A9E'];
 const emptyText = '选择筛选条件后点击查询';
@@ -44,7 +44,7 @@ function sortEntries<T>(data?: Record<string, T>) {
 }
 
 function summaryEntries(data?: Record<string, SummaryValue>) {
-  return Object.entries(data || {}).sort(([, a], [, b]) => Number(b.hours) - Number(a.hours));
+  return Object.entries(data || {}).sort(([, a], [, b]) => Number(b.days) - Number(a.days));
 }
 
 function totalCount(data?: Record<string, SummaryValue>) {
@@ -71,7 +71,7 @@ function makeTrendOption(byDate?: Record<string, number>, unit = '天') {
 
 function makePieOption(data?: Record<string, SummaryValue> | Record<string, number>, unit = '天') {
   const entries = Object.entries(data || {})
-    .map(([name, value]) => ({ name, value: typeof value === 'number' ? value : value.hours }))
+    .map(([name, value]) => ({ name, value: typeof value === 'number' ? value : value.days }))
     .filter((item) => item.value > 0)
     .sort((a, b) => b.value - a.value);
 
@@ -91,7 +91,7 @@ function makePieOption(data?: Record<string, SummaryValue> | Record<string, numb
 
 function makeBarOption(data?: Record<string, SummaryValue> | Record<string, number>, unit = '天', color = palette[0]) {
   const entries = Object.entries(data || {})
-    .map(([name, value]) => ({ name, value: typeof value === 'number' ? value : value.hours }))
+    .map(([name, value]) => ({ name, value: typeof value === 'number' ? value : value.days }))
     .filter((item) => item.value > 0)
     .sort((a, b) => b.value - a.value)
     .slice(0, 12);
@@ -141,12 +141,12 @@ function SummaryTable({ data, nameTitle, unit = '天' }: { data?: Record<string,
       dataSource={summaryEntries(data).map(([name, value]) => ({
         key: name,
         name,
-        hours: value.hours,
+        days: value.days,
         count: value.count || 0,
       }))}
       columns={[
         { title: nameTitle, dataIndex: 'name' },
-        { title: `工时(${unit})`, dataIndex: 'hours', align: 'right' as const },
+        { title: `工时(${unit})`, dataIndex: 'days', align: 'right' as const },
         { title: '记录数', dataIndex: 'count', align: 'right' as const },
       ]}
       locale={{ emptyText: '暂无数据' }}
@@ -167,7 +167,7 @@ function PersonalView({ data }: { data: PersonalReport | null }) {
         <DataChart title="每日工时趋势" option={makeTrendOption(data?.byDate)} />
       </Col>
       <Col xs={24} xl={8}>
-        <SummaryCard title="个人汇总" total={data?.totalHours} count={totalCount(data?.byProject)} />
+        <SummaryCard title="个人汇总" total={data?.totalDays} count={totalCount(data?.byProject)} />
       </Col>
       <Col xs={24} lg={12}>
         <DataChart title="项目工时占比" option={makePieOption(data?.byProject)} />
@@ -188,7 +188,7 @@ function GroupView({ data }: { data: GroupReport | null }) {
         <DataChart title="组内每日趋势" option={makeTrendOption(data?.byDate)} />
       </Col>
       <Col xs={24} xl={8}>
-        <SummaryCard title="组别汇总" total={data?.totalHours} count={totalCount(data?.byUser)} />
+        <SummaryCard title="组别汇总" total={data?.totalDays} count={totalCount(data?.byUser)} />
       </Col>
       <Col xs={24} lg={12}>
         <DataChart title="成员工时排行" option={makeBarOption(data?.byUser, '天', palette[0])} />
@@ -212,7 +212,7 @@ function DepartmentView({ data }: { data: DepartmentReport | null }) {
         <DataChart title="部门每日趋势" option={makeTrendOption(data?.byDate)} />
       </Col>
       <Col xs={24} xl={8}>
-        <SummaryCard title="部门汇总" total={data?.totalHours} count={totalCount(data?.byUser)} />
+        <SummaryCard title="部门汇总" total={data?.totalDays} count={totalCount(data?.byUser)} />
       </Col>
       <Col xs={24} lg={12}>
         <DataChart title="组别工时分布" option={makeBarOption(data?.byGroup, '天', palette[3])} />
@@ -241,7 +241,7 @@ function ProjectView({ data }: { data: ProjectReport | null }) {
         <DataChart title="项目每日趋势" option={makeTrendOption(data?.byDate)} />
       </Col>
       <Col xs={24} xl={8}>
-        <SummaryCard title="项目汇总" total={data?.totalHours} count={totalCount(data?.byUser)} />
+        <SummaryCard title="项目汇总" total={data?.totalDays} count={totalCount(data?.byUser)} />
       </Col>
       <Col xs={24} lg={12}>
         <DataChart title="部门工时分布" option={makeBarOption(data?.byDepartment, '天', palette[3])} />
@@ -267,14 +267,14 @@ function OvertimeView({ data }: { data: OvertimeReport | null }) {
   const typeData = useMemo(() => {
     if (!data?.byType) return {};
     const typeText: Record<string, string> = { weekend: '周末加班', holiday: '节假日加班', weekday: '工作日加班' };
-    return Object.fromEntries(Object.entries(data.byType).map(([type, hours]) => [typeText[type] || type, hours]));
+    return Object.fromEntries(Object.entries(data.byType).map(([type, days]) => [typeText[type] || type, days]));
   }, [data]);
 
   return (
     <Row gutter={[16, 16]}>
       <Col xs={24} xl={8}>
         <Card title="加班汇总" style={{ borderRadius: 8 }}>
-          <Statistic title="总加班" value={data?.totalHours || 0} suffix="小时" precision={1} />
+          <Statistic title="总加班" value={data?.totalDays || 0} suffix="天" precision={1} />
           <Divider />
           <Text type="secondary">仅统计已审批通过的加班申请</Text>
         </Card>

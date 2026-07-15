@@ -58,7 +58,7 @@ curl -s -H "Authorization: Bearer $WORKTIME_PAT" \
       {
         "id": 12,
         "date": "2026-07-10",
-        "hours": 8.0,
+        "days": 1.0,
         "status": "approved",
         "project": { "id": 1, "name": "工时管理系统" },
         "content": "完成工时模块开发"
@@ -71,10 +71,12 @@ curl -s -H "Authorization: Bearer $WORKTIME_PAT" \
 }
 ```
 
-关键字段：`date`（日期）、`hours`（工时数）、`status`（状态）、`project.name`（项目名）、`content`（工作内容）。
+关键字段：`date`（日期）、`days`（工时数，**单位是天不是小时**）、`status`（状态）、`project.name`（项目名）、`content`（工作内容）。
+
+> **重要**：本系统工时单位是**天**（每天最多 1 天，按 0.5 天等步长填报），`days` 字段值如 `1.0` 表示 1 天、`0.5` 表示半天。回答时务必用"天"为单位，不要说"小时"。
 
 ## 回答要求
 
 - 用中文回答，把工时按日期/项目归类总结。
-- 用户问"多少工时"时，给出总小时数（sum hours）。
+- 用户问"多少工时"时，给出总天数（sum days），单位用"天"。
 - 日期范围未明确时，默认查"本周"（周一至今天）或询问用户。

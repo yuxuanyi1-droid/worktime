@@ -73,7 +73,7 @@ export default function Overtime() {
           <Descriptions.Item label="加班日期">{payload.date}</Descriptions.Item>
           <Descriptions.Item label="加班项目">{projectName}</Descriptions.Item>
           <Descriptions.Item label="加班类型">{overtimeTypeMap[payload.overtimeType] || payload.overtimeType}</Descriptions.Item>
-          <Descriptions.Item label="加班时长">{payload.hours} 小时</Descriptions.Item>
+          <Descriptions.Item label="加班时长">{payload.days} 天</Descriptions.Item>
         </Descriptions>
       ),
       okText: '提交审批',
@@ -119,7 +119,7 @@ export default function Overtime() {
     { title: '日期', dataIndex: 'date', key: 'date', width: 120, sorter: (a: OvertimeApplication, b: OvertimeApplication) => a.date.localeCompare(b.date) },
     { title: '加班项目', key: 'project', width: 140, render: (_: any, r: OvertimeApplication) => r.project?.name || '-' },
     { title: '加班类型', dataIndex: 'overtimeType', key: 'overtimeType', width: 120, render: (v: string) => overtimeTypeMap[v] || v },
-    { title: '时长(h)', dataIndex: 'hours', key: 'hours', width: 100 },
+    { title: '时长(天)', dataIndex: 'days', key: 'days', width: 100 },
     { title: '加班原因', dataIndex: 'reason', key: 'reason', ellipsis: true },
     { title: '状态', dataIndex: 'status', key: 'status', width: 100, render: (s: string) => <Tag color={statusMap[s]?.color}>{statusMap[s]?.label}</Tag> },
     {
@@ -215,7 +215,7 @@ export default function Overtime() {
               { label: '工作日加班', value: 'weekday' },
             ]} />
           </Form.Item>
-          <Form.Item name="hours" label="加班时长(小时)" rules={[{ required: true }]}>
+          <Form.Item name="days" label="加班时长(天)" rules={[{ required: true }]}>
             <InputNumber min={0.5} max={24} step={0.5} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="reason" label="加班原因">

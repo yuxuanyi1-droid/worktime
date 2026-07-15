@@ -514,7 +514,7 @@ export class SystemService {
       .where('t.projectId = :projectId', { projectId })
       .andWhere('u.groupId = :groupId', { groupId })
       .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
-      .select('COALESCE(SUM(t.hours), 0)', 'total')
+      .select('COALESCE(SUM(t.days), 0)', 'total')
       .getRawOne();
     return Number(result?.total || 0);
   }

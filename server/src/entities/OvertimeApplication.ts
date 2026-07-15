@@ -42,7 +42,7 @@ export class OvertimeApplication {
   overtimeType!: OvertimeType;
 
   @Column({ type: 'numeric', precision: 10, scale: 2 })
-  hours!: number;
+  days!: number;
 
   @Column({ type: 'text', nullable: true })
   reason!: string;

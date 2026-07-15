@@ -132,7 +132,7 @@ export default function WeeklyReportPage() {
         weekEnd: we,
         content,
         summary,
-        totalHours: weekHours?.totalHours || 0,
+        totalDays: weekHours?.totalDays || 0,
       });
       message.success('保存成功');
       loadData();
@@ -266,16 +266,16 @@ export default function WeeklyReportPage() {
         </Col>
         <Col xs={24} lg={8}>
           <Card title="本周工时汇总" style={{ borderRadius: 12, marginBottom: 16 }}>
-            <Statistic title="总工时" value={weekHours?.totalHours || 0} suffix="小时" />
+            <Statistic title="总工时" value={weekHours?.totalDays || 0} suffix="天" />
             <Divider />
             <Title level={5}>项目分布</Title>
             <List
               size="small"
               dataSource={weekHours?.byProject ? Object.entries(weekHours.byProject) : []}
-              renderItem={([name, hours]: [string, any]) => (
+              renderItem={([name, val]: [string, any]) => (
                 <List.Item>
                   <span>{name}</span>
-                  <span>{hours}h</span>
+                  <span>{val?.days ?? val}天</span>
                 </List.Item>
               )}
             />

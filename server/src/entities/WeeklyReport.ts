@@ -29,7 +29,7 @@ export class WeeklyReport {
   summary!: string;
 
   @Column({ type: 'numeric', precision: 10, scale: 2, default: 0 })
-  totalHours!: number;
+  totalDays!: number;
 
   @Column({ type: 'varchar', length: 20, default: 'draft' })
   status!: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';

@@ -21,7 +21,7 @@ function parseWeeklyReportPayload(body: Record<string, unknown>) {
     weekEnd: parseDateString(body.weekEnd, 'weekEnd'),
     content: parseString(body.content, 'content', { max: 20000 }),
     summary: parseString(body.summary, 'summary', { max: 2000 }),
-    totalHours: body.totalHours === undefined ? undefined : parseNonNegativeNumber(body.totalHours, 'totalHours', { max: 168 }),
+    totalDays: body.totalDays === undefined ? undefined : parseNonNegativeNumber(body.totalDays, 'totalDays', { max: 7 }),
   };
 }
 

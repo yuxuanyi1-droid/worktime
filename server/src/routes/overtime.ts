@@ -7,7 +7,7 @@ import {
   parseArray,
   parseDateString,
   parseEnum,
-  parseHours,
+  parseDays,
   parseOptionalDateString,
   parseOptionalEnum,
   parseOptionalPositiveInt,
@@ -29,7 +29,7 @@ function parseOvertimePayload(body: Record<string, unknown>, partial = false) {
       : partial
       ? parseOptionalEnum(body.overtimeType, 'overtimeType', overtimeTypes)
       : parseEnum(body.overtimeType, 'overtimeType', overtimeTypes),
-    hours: partial && body.hours === undefined ? undefined : parseHours(body.hours),
+    days: partial && body.days === undefined ? undefined : parseDays(body.days),
     reason: parseString(body.reason, 'reason', { max: 1000 }),
     projectId: parseOptionalPositiveInt(body.projectId, 'projectId'),
   };

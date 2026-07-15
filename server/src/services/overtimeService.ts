@@ -17,21 +17,21 @@ export class OvertimeService {
   private get accessPolicy() { return new AccessPolicyService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
 
-  async create(data: { userId: number; date?: string; overtimeType?: string; hours?: number; reason?: string; projectId?: number }) {
+  async create(data: { userId: number; date?: string; overtimeType?: string; days?: number; reason?: string; projectId?: number }) {
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
     const record = this.repo.create({
       userId: data.userId,
       ...orgSnapshot,
       date: data.date!,
       overtimeType: data.overtimeType as OvertimeType,
-      hours: data.hours!,
+      days: data.days!,
       reason: data.reason,
       projectId: data.projectId ?? null,
     });
     return this.repo.save(record);
   }
 
-  async createAndSubmit(data: { userId: number; date?: string; overtimeType?: string; hours?: number; reason?: string; projectId?: number }) {
+  async createAndSubmit(data: { userId: number; date?: string; overtimeType?: string; days?: number; reason?: string; projectId?: number }) {
     // 整体事务：create + submit 原子化，任一失败整体回滚，避免孤儿记录或误删
     const notifications: { approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string }[] = [];
     let createdId: number;
@@ -45,7 +45,7 @@ export class OvertimeService {
         ...orgSnapshot,
         date: data.date!,
         overtimeType: data.overtimeType as OvertimeType,
-        hours: data.hours!,
+        days: data.days!,
         reason: data.reason,
         projectId: data.projectId ?? null,
       });
@@ -75,7 +75,7 @@ export class OvertimeService {
             targetType: 'overtime',
             targetId: saved.id,
             applicantName: submitter.realName,
-            title: `加班审批 ${saved.hours}小时`,
+            title: `加班审批 ${saved.days}天`,
           });
         }
       } else {
@@ -100,7 +100,7 @@ export class OvertimeService {
     });
   }
 
-  async update(id: number, userId: number, data: { date?: string; overtimeType?: string; hours?: number; reason?: string; projectId?: number }) {
+  async update(id: number, userId: number, data: { date?: string; overtimeType?: string; days?: number; reason?: string; projectId?: number }) {
     const record = await this.repo.findOne({ where: { id } });
     if (!record) throw new BusinessError('记录不存在');
     if (record.userId !== userId) throw new BusinessError('只能修改自己的加班记录');
@@ -108,7 +108,7 @@ export class OvertimeService {
 
     if (data.date !== undefined) record.date = data.date;
     if (data.overtimeType !== undefined) record.overtimeType = data.overtimeType as OvertimeType;
-    if (data.hours !== undefined) record.hours = data.hours;
+    if (data.days !== undefined) record.days = data.days;
     if (data.reason !== undefined) record.reason = data.reason;
     if (data.projectId !== undefined) record.projectId = data.projectId ?? null;
     return this.repo.save(record);
@@ -183,7 +183,7 @@ export class OvertimeService {
               targetType: 'overtime',
               targetId: r.id,
               applicantName: submitter.realName,
-              title: `加班审批 ${r.hours}小时`,
+              title: `加班审批 ${r.days}天`,
             });
           }
         } else {
@@ -207,7 +207,7 @@ export class OvertimeService {
   async getStats(userId: number, year: number, month?: number) {
     const qb = this.repo.createQueryBuilder('o')
       .select('o.overtimeType', 'type')
-      .addSelect('SUM(o.hours)', 'totalHours')
+      .addSelect('SUM(o.days)', 'totalDays')
       .addSelect('COUNT(o.id)', 'count')
       .where('o.userId = :userId', { userId })
       .andWhere('o.status = :status', { status: 'approved' });

@@ -159,7 +159,7 @@ export interface Timesheet {
   projectId: number;
   project?: Project;
   date: string;
-  hours: number;
+  days: number;
   description?: string;
   status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'deprecated' | 'withdrawn';
   currentStep: number;
@@ -183,7 +183,7 @@ export interface OvertimeApplication {
   project?: { id: number; name: string } | null;
   date: string;
   overtimeType: 'weekend' | 'holiday' | 'weekday';
-  hours: number;
+  days: number;
   reason?: string;
   status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
   currentStep: number;
@@ -200,7 +200,7 @@ export interface WeeklyReport {
   weekEnd: string;
   content?: string;
   summary?: string;
-  totalHours: number;
+  totalDays: number;
   status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
   currentStep: number;
   totalSteps: number;
@@ -219,13 +219,13 @@ export interface ApprovalItem {
   applicantId?: number;
   department?: string;
   date?: string;
-  hours?: number;
+  days?: number;
   description?: string;
   overtimeType?: string;
   reason?: string;
   weekStart?: string;
   weekEnd?: string;
-  totalHours?: number;
+  totalDays?: number;
   summary?: string;
   permissionCode?: string;
   permissionName?: string;
@@ -280,42 +280,42 @@ export interface ApprovalFlowStep {
 
 // 报表
 export interface DashboardData {
-  monthHours: number;
-  overtimeHours: number;
+  monthDays: number;
+  overtimeDays: number;
   pendingCount: number;
-  trend: { date: string; hours: number }[];
+  trend: { date: string; days: number }[];
 }
 
 export interface PersonalReport {
-  totalHours: number;
-  byProject: Record<string, { hours: number; count: number }>;
+  totalDays: number;
+  byProject: Record<string, { days: number; count: number }>;
   byDate: Record<string, number>;
 }
 
 export interface DepartmentReport {
-  totalHours: number;
-  byUser: Record<string, { hours: number; count: number }>;
-  byProject: Record<string, { hours: number; count?: number }>;
+  totalDays: number;
+  byUser: Record<string, { days: number; count: number }>;
+  byProject: Record<string, { days: number; count?: number }>;
   byDate: Record<string, number>;
-  byGroup: Record<string, { hours: number; count: number }>;
-  byDepartment?: Record<string, { hours: number; count: number }>;
+  byGroup: Record<string, { days: number; count: number }>;
+  byDepartment?: Record<string, { days: number; count: number }>;
 }
 
 export interface GroupReport {
-  totalHours: number;
-  byUser: Record<string, { hours: number; count: number }>;
-  byProject: Record<string, { hours: number; count?: number }>;
+  totalDays: number;
+  byUser: Record<string, { days: number; count: number }>;
+  byProject: Record<string, { days: number; count?: number }>;
   byDate: Record<string, number>;
-  byGroup: Record<string, { hours: number; count: number }>;
+  byGroup: Record<string, { days: number; count: number }>;
 }
 
 export interface ProjectReport {
-  totalHours: number;
-  byUser: Record<string, { hours: number; count: number }>;
-  byProject: Record<string, { hours: number; count?: number }>;
+  totalDays: number;
+  byUser: Record<string, { days: number; count: number }>;
+  byProject: Record<string, { days: number; count?: number }>;
   byDate: Record<string, number>;
-  byDepartment: Record<string, { hours: number; count: number }>;
-  byGroup: Record<string, { hours: number; count: number }>;
+  byDepartment: Record<string, { days: number; count: number }>;
+  byGroup: Record<string, { days: number; count: number }>;
   filters?: {
     departments: { id: number; name: string }[];
     groups: { id: number; name: string; departmentId: number | null }[];
@@ -334,10 +334,10 @@ export interface ReportScope {
 }
 
 export interface OvertimeReport {
-  totalHours: number;
+  totalDays: number;
   byType: Record<string, number>;
   byUser: Record<string, number>;
-  byGroup?: Record<string, { hours: number }>;
+  byGroup?: Record<string, { days: number }>;
 }
 
 // 状态标签

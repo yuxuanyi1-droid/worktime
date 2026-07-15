@@ -4,10 +4,10 @@ import { Timesheet } from '../entities/Timesheet';
 
 /** 构造测试用 Timesheet（只填去重逻辑关心的字段） */
 function mk(
-  id: number, projectId: number, date: string, hours: number,
+  id: number, projectId: number, date: string, days: number,
   status: Timesheet['status'] = 'submitted', submissionGroupId: number = 1,
 ): Timesheet {
-  return { id, projectId, date, hours, status, submissionGroupId } as Timesheet;
+  return { id, projectId, date, days, status, submissionGroupId } as Timesheet;
 }
 
 describe('dedupByLatestSubmissionGroup', () => {
@@ -24,7 +24,7 @@ describe('dedupByLatestSubmissionGroup', () => {
     ];
     const result = dedupByLatestSubmissionGroup(records);
     expect(result).toHaveLength(3);
-    const total = result.reduce((s, r) => s + r.hours, 0);
+    const total = result.reduce((s, r) => s + r.days, 0);
     expect(total).toBe(1.0);
   });
 
@@ -51,7 +51,7 @@ describe('dedupByLatestSubmissionGroup', () => {
     const result = dedupByLatestSubmissionGroup(records);
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe(2);
-    expect(result[0].hours).toBe(0.8);
+    expect(result[0].days).toBe(0.8);
   });
 
   it('不同项目不同日期互不影响', () => {

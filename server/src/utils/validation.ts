@@ -69,9 +69,10 @@ export function parseString(value: unknown, field: string, options: { required?:
   return trimmed;
 }
 
-export function parseHours(value: unknown, field = 'hours') {
+export function parseDays(value: unknown, field = 'days') {
   const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0 || num > 24) throw new BusinessError(`${field}必须大于0且不超过24`);
+  // 工时按"天"计：单条须大于0，单日上限1天
+  if (!Number.isFinite(num) || num <= 0 || num > 1) throw new BusinessError(`${field}必须大于0且不超过1`);
   return num;
 }
 

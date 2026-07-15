@@ -2,7 +2,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
  * 工时精度修正 + 关键索引：
- * 1. hours/totalHours 由 float 改为 numeric(10,2)，消除累计精度误差
+ * 1. days/totalDays 由 float 改为 numeric(10,2)，消除累计精度误差
  *    （SQLite 无独立 numeric，实际是 NUMERIC 亲和，CAST 保证数值正确）
  * 2. timesheets 补建高频查询索引
  *
@@ -13,10 +13,10 @@ export class PrecisionAndIndexes1700000000001 implements MigrationInterface {
   name = 'PrecisionAndIndexes1700000000001';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // 1. hours/totalHours 类型修正（SQLite 用 CAST 转 numeric 亲和，幂等）
-    await queryRunner.query(`UPDATE timesheets SET hours = CAST(hours AS REAL) WHERE 1=1`);
-    await queryRunner.query(`UPDATE overtime_applications SET hours = CAST(hours AS REAL) WHERE 1=1`);
-    await queryRunner.query(`UPDATE weekly_reports SET totalHours = CAST(totalHours AS REAL) WHERE 1=1`);
+    // 1. days/totalDays 类型修正（SQLite 用 CAST 转 numeric 亲和，幂等）
+    await queryRunner.query(`UPDATE timesheets SET days = CAST(days AS REAL) WHERE 1=1`);
+    await queryRunner.query(`UPDATE overtime_applications SET days = CAST(days AS REAL) WHERE 1=1`);
+    await queryRunner.query(`UPDATE weekly_reports SET totalDays = CAST(totalDays AS REAL) WHERE 1=1`);
 
     // 2. timesheets 索引（IF NOT EXISTS 幂等，synchronize 已建的不会重复）
     await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_timesheet_user_date" ON "timesheets" ("userId", "date")`);

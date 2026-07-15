@@ -312,7 +312,7 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
         groupIds = undefined;
       } else if (accessibleDepartmentIds.length === 0 && accessibleGroupIds.length === 0) {
         // 有报表码但无任何可见范围（scope 仅 project/self 等），无数据可见，直接返回空
-        return res.json({ code: 0, data: { totalHours: 0, byType: {}, records: [] } });
+        return res.json({ code: 0, data: { totalDays: 0, byType: {}, records: [] } });
       } else {
         departmentIds = accessibleDepartmentIds.length ? accessibleDepartmentIds : undefined;
         groupIds = accessibleGroupIds.length ? accessibleGroupIds : undefined;
@@ -371,7 +371,7 @@ router.get('/export/personal', requireAllPermissions('report:view:self', 'report
     sheet.columns = [
       { header: '日期', key: 'date', width: 14 },
       { header: '项目', key: 'project', width: 20 },
-      { header: '工时(天)', key: 'hours', width: 12 },
+      { header: '工时(天)', key: 'days', width: 12 },
       { header: '工作内容', key: 'description', width: 40 },
       { header: '状态', key: 'status', width: 10 },
     ];
@@ -382,14 +382,14 @@ router.get('/export/personal', requireAllPermissions('report:view:self', 'report
       sheet.addRow({
         date: record.date,
         project: record.project?.name || '-',
-        hours: record.hours,
+        days: record.days,
         description: record.description || '',
         status: statusText[record.status] || record.status,
       });
     }
 
     sheet.addRow([]);
-    sheet.addRow({ date: '合计', hours: data.totalHours });
+    sheet.addRow({ date: '合计', days: data.totalDays });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=timesheet-report-${startDate}-${endDate}.xlsx`);
@@ -424,7 +424,7 @@ router.get('/export/department', requireAllPermissions('report:view:department',
       { header: '部门', key: 'department', width: 16 },
       { header: '组别', key: 'group', width: 16 },
       { header: '项目', key: 'project', width: 20 },
-      { header: '工时(天)', key: 'hours', width: 12 },
+      { header: '工时(天)', key: 'days', width: 12 },
       { header: '日期', key: 'date', width: 14 },
     ];
     sheet.getRow(1).font = { bold: true };
@@ -436,13 +436,13 @@ router.get('/export/department', requireAllPermissions('report:view:department',
         department: record.departmentSnapshotName || '-',
         group: record.groupSnapshotName || '-',
         project: record.project?.name || '-',
-        hours: record.hours,
+        days: record.days,
         date: record.date,
       });
     }
 
     sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
+    sheet.addRow({ user: '合计', days: data.totalDays });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=dept-report-${startDate}-${endDate}.xlsx`);
@@ -473,7 +473,7 @@ router.get('/export/group', requireAllPermissions('report:view:group', 'report:e
       { header: '人员', key: 'user', width: 14 },
       { header: '组别', key: 'group', width: 16 },
       { header: '项目', key: 'project', width: 20 },
-      { header: '工时(天)', key: 'hours', width: 12 },
+      { header: '工时(天)', key: 'days', width: 12 },
       { header: '日期', key: 'date', width: 14 },
     ];
     sheet.getRow(1).font = { bold: true };
@@ -484,12 +484,12 @@ router.get('/export/group', requireAllPermissions('report:view:group', 'report:e
         user: record.user?.realName || '-',
         group: record.groupSnapshotName || '-',
         project: record.project?.name || '-',
-        hours: record.hours,
+        days: record.days,
         date: record.date,
       });
     }
     sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
+    sheet.addRow({ user: '合计', days: data.totalDays });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=group-report-${startDate}-${endDate}.xlsx`);
@@ -522,7 +522,7 @@ router.get('/export/project', requireAllPermissions('report:view:project', 'repo
       { header: '人员', key: 'user', width: 14 },
       { header: '部门', key: 'department', width: 16 },
       { header: '组别', key: 'group', width: 16 },
-      { header: '工时(天)', key: 'hours', width: 12 },
+      { header: '工时(天)', key: 'days', width: 12 },
       { header: '日期', key: 'date', width: 14 },
     ];
     sheet.getRow(1).font = { bold: true };
@@ -533,12 +533,12 @@ router.get('/export/project', requireAllPermissions('report:view:project', 'repo
         user: record.user?.realName || '-',
         department: record.departmentSnapshotName || '-',
         group: record.groupSnapshotName || '-',
-        hours: record.hours,
+        days: record.days,
         date: record.date,
       });
     }
     sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
+    sheet.addRow({ user: '合计', days: data.totalDays });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=project-report-${startDate}-${endDate}.xlsx`);
@@ -590,7 +590,7 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
       { header: '人员', key: 'user', width: 14 },
       { header: '日期', key: 'date', width: 14 },
       { header: '加班类型', key: 'type', width: 14 },
-      { header: '加班时长(小时)', key: 'hours', width: 16 },
+      { header: '加班时长(天)', key: 'days', width: 16 },
       { header: '原因', key: 'reason', width: 30 },
     ];
     sheet.getRow(1).font = { bold: true };
@@ -602,12 +602,12 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
         user: record.user?.realName || '-',
         date: record.date,
         type: typeText[record.overtimeType] || record.overtimeType,
-        hours: record.hours,
+        days: record.days,
         reason: record.reason || '',
       });
     }
     sheet.addRow([]);
-    sheet.addRow({ user: '合计', hours: data.totalHours });
+    sheet.addRow({ user: '合计', days: data.totalDays });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=overtime-report-${startDate}-${endDate}.xlsx`);

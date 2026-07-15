@@ -34,7 +34,7 @@ export class ProjectWorkloadAllocation {
   @Column({ type: 'varchar', length: 100, nullable: true })
   groupName!: string;
 
-  /** 工时配额（人/天），与 timesheets.hours 同单位 */
+  /** 工时配额（人/天），与 timesheets.days 同单位 */
   @Column({ type: 'numeric', precision: 10, scale: 2 })
   allocation!: number;
 

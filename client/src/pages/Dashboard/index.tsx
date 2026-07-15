@@ -76,7 +76,7 @@ export default function Dashboard() {
       splitLine: { lineStyle: { color: '#E8E0D4' } },
     },
     series: [{
-      data: data.trend.map(t => t.hours),
+      data: data.trend.map(t => t.days),
       type: 'line' as const,
       smooth: true,
       areaStyle: {
@@ -107,7 +107,7 @@ export default function Dashboard() {
   const statCards = [
     hasPermission('timesheet:read') && {
       icon: <ClockCircleOutlined />,
-      value: `${data?.monthHours || 0}天`,
+      value: `${data?.monthDays || 0}天`,
       label: '本月工时',
       color: '#6B8F71',
       bg: '#EAF0EB',
@@ -121,7 +121,7 @@ export default function Dashboard() {
     },
     hasPermission('overtime:read') && {
       icon: <ThunderboltOutlined />,
-      value: `${data?.overtimeHours || 0}h`,
+      value: `${data?.overtimeDays || 0}天`,
       label: '本月加班',
       color: '#C0564B',
       bg: '#F5E8E6',
@@ -167,7 +167,7 @@ export default function Dashboard() {
           {getGreeting(now)}，{user?.realName || '用户'}
         </h1>
         <div style={{ marginTop: 8, fontSize: 15, color: '#7A7060', lineHeight: 1.5 }}>
-          本月已填报 {data?.monthHours || 0} 天
+          本月已填报 {data?.monthDays || 0} 天
           {data?.pendingCount ? `，还有 ${data.pendingCount} 条审批需要处理。` : '。'}
         </div>
       </div>

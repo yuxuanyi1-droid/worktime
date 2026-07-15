@@ -23,7 +23,7 @@ interface WeekRow {
   key: string;
   projectId: number | undefined;
   description: string;
-  hours: Record<string, number>; // { 'YYYY-MM-DD': number }
+  days: Record<string, number>; // { 'YYYY-MM-DD': number }
   status?: string; // draft | submitted | approved | rejected
   originalStatus?: string; // 加载时的原始状态，用于区分保存草稿还是修改
   targetId?: number; // 该组第一条 timesheet 记录的 id（用于撤回审批）
@@ -43,7 +43,7 @@ function getWeekDates(weekStart: dayjs.Dayjs): string[] {
 
 let rowKeyCounter = 0;
 function newRow(): WeekRow {
-  return { key: `row_${++rowKeyCounter}_${Date.now()}`, projectId: undefined, description: '', hours: {} };
+  return { key: `row_${++rowKeyCounter}_${Date.now()}`, projectId: undefined, description: '', days: {} };
 }
 
 /** 工时填报单位（天步长）可选值与默认值 */
@@ -193,17 +193,17 @@ export default function TimesheetPage() {
           }
         }
         const loadedRows: WeekRow[] = Object.entries(byProject).map(([pid, group]) => {
-          const hours: Record<string, number> = {};
+          const days: Record<string, number> = {};
           let desc = '';
           group.items.forEach(item => {
-            hours[item.date] = item.hours;
+            days[item.date] = item.days;
             if (item.description) desc = item.description;
           });
           return {
             key: `row_${++rowKeyCounter}_${Date.now()}`,
             projectId: Number(pid),
             description: desc,
-            hours,
+            days,
             status: group.status,
             originalStatus: group.originalStatus,
             targetId: group.items[0]?.id,
@@ -271,21 +271,21 @@ export default function TimesheetPage() {
     return projects.filter(p => !usedIds.includes(p.id));
   };
 
-  const updateHours = (key: string, date: string, value: number | null) => {
+  const updateDays = (key: string, date: string, value: number | null) => {
     let corrected = value || 0;
     // 按填报单位步长校正（自动修正为最近的步长倍数）
     if (corrected > 0) {
       corrected = snapToStep(corrected, unitStep);
     }
     // 单日工时校验：计算当前日期其他行的工时之和（sumRound 避免浮点累加误差）
-    const otherRowsTotal = sumRound(rows.filter(r => r.key !== key).map(r => r.hours[date] || 0));
+    const otherRowsTotal = sumRound(rows.filter(r => r.key !== key).map(r => r.days[date] || 0));
     const dayLimit = 1; // 每天最多1天
     if (sumRound([otherRowsTotal, corrected]) > dayLimit) {
       message.warning(`${dayjs(date).format('M月D日')}工时合计不能超过1天，当前已有 ${otherRowsTotal}${unitLabel}`);
       return;
     }
     setRows(prev => prev.map(r =>
-      r.key === key ? { ...r, hours: { ...r.hours, [date]: corrected } } : r
+      r.key === key ? { ...r, days: { ...r.days, [date]: corrected } } : r
     ));
     setDirty(true);
   };
@@ -331,21 +331,21 @@ export default function TimesheetPage() {
         grouped[item.projectId].push(item);
       }
       const newRows: WeekRow[] = Object.entries(grouped).map(([pid, items]) => {
-        const hours: Record<string, number> = {};
+        const days: Record<string, number> = {};
         let desc = '';
         items.forEach(item => {
           // 将上周的周几映射到本周的周几
           const dow = dayjs(item.date).isoWeekday();
           const targetDate = currentWeekStart.add(dow - 1, 'day').format('YYYY-MM-DD');
-          hours[targetDate] = item.hours;
+          days[targetDate] = item.days;
           if (item.description) desc = item.description;
         });
-        return { key: `row_${++rowKeyCounter}_${Date.now()}`, projectId: Number(pid), description: desc, hours };
+        return { key: `row_${++rowKeyCounter}_${Date.now()}`, projectId: Number(pid), description: desc, days };
       });
       if (newRows.length === 0) return;
 
       // 本周已有非空数据时，覆盖前需二次确认，避免误丢已填内容
-      const hasCurrentData = rows.some(r => weekDates.some(d => (r.hours[d] || 0) > 0));
+      const hasCurrentData = rows.some(r => weekDates.some(d => (r.days[d] || 0) > 0));
       const doCopy = () => {
         setRows(newRows);
         setDirty(true);
@@ -369,11 +369,11 @@ export default function TimesheetPage() {
   };
 
   /** 计算一行总计 */
-  const rowTotal = (row: WeekRow) => sumRound(weekDates.map(d => row.hours[d] || 0));
+  const rowTotal = (row: WeekRow) => sumRound(weekDates.map(d => row.days[d] || 0));
 
   /** 计算每天列总计 */
   const dayTotals = useMemo(() => {
-    return weekDates.map(d => sumRound(rows.map(r => r.hours[d] || 0)));
+    return weekDates.map(d => sumRound(rows.map(r => r.days[d] || 0)));
   }, [rows, weekDates]);
 
   /** 周总工时 */
@@ -381,13 +381,13 @@ export default function TimesheetPage() {
 
   /** 收集有效数据（所有行） */
   const collectItems = () => {
-    const items: { projectId: number; date: string; hours: number; description?: string }[] = [];
+    const items: { projectId: number; date: string; days: number; description?: string }[] = [];
     for (const row of rows) {
       if (!row.projectId) continue;
       for (const date of weekDates) {
-        const h = row.hours[date];
+        const h = row.days[date];
         if (h && h > 0) {
-          items.push({ projectId: row.projectId, date, hours: h, description: row.description || undefined });
+          items.push({ projectId: row.projectId, date, days: h, description: row.description || undefined });
         }
       }
     }
@@ -395,8 +395,8 @@ export default function TimesheetPage() {
   };
 
   /** 校验周工时 */
-  const validateWeekTotal = (items: { hours: number }[]) => {
-    const total = sumRound(items.map(i => i.hours));
+  const validateWeekTotal = (items: { days: number }[]) => {
+    const total = sumRound(items.map(i => i.days));
     if (total < 5) {
       message.warning(`每周工时合计不得少于5天，当前仅 ${total} 天`);
       return false;
@@ -411,7 +411,7 @@ export default function TimesheetPage() {
     if (snap.projectId !== row.projectId) return true;
     if (snap.description !== row.description) return true;
     for (const date of weekDates) {
-      if ((snap.hours[date] || 0) !== (row.hours[date] || 0)) return true;
+      if ((snap.days[date] || 0) !== (row.days[date] || 0)) return true;
     }
     return false;
   };
@@ -420,14 +420,14 @@ export default function TimesheetPage() {
   const handleSaveDraft = async () => {
     if (editing) {
       // 编辑模式下：只保存有变更的行（对比快照）
-      const submittedRows: { projectId: number; description: string; weekStart: string; entries: { date: string; hours: number }[] }[] = [];
+      const submittedRows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[] = [];
       for (const row of rows) {
         if (!row.projectId || !row.originalStatus || row.originalStatus === 'draft') continue;
         // ★ 跳过未修改的行
         if (!isRowChanged(row)) continue;
         const entries = weekDates
-          .filter(d => row.hours[d] && row.hours[d] > 0)
-          .map(d => ({ date: d, hours: row.hours[d] }));
+          .filter(d => row.days[d] && row.days[d] > 0)
+          .map(d => ({ date: d, days: row.days[d] }));
         if (entries.length === 0) continue;
         submittedRows.push({
           projectId: row.projectId,
@@ -462,13 +462,13 @@ export default function TimesheetPage() {
     }
 
     // 普通模式：保存草稿行
-    const draftRows: { projectId: number; description: string; weekStart: string; entries: { date: string; hours: number }[] }[] = [];
+    const draftRows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[] = [];
     for (const row of rows) {
       if (!row.projectId) continue;
       if (row.originalStatus && row.originalStatus !== 'draft') continue;
       const entries = weekDates
-        .filter(d => row.hours[d] && row.hours[d] > 0)
-        .map(d => ({ date: d, hours: row.hours[d] }));
+        .filter(d => row.days[d] && row.days[d] > 0)
+        .map(d => ({ date: d, days: row.days[d] }));
       if (entries.length === 0) continue;
       draftRows.push({
         projectId: row.projectId,
@@ -494,7 +494,7 @@ export default function TimesheetPage() {
         }
       }
       const draftItems = draftRows.flatMap(r => r.entries.map(e => ({
-        projectId: r.projectId, date: e.date, hours: e.hours, description: r.description || undefined,
+        projectId: r.projectId, date: e.date, days: e.days, description: r.description || undefined,
       })));
       await timesheetApi.batchCreate(draftItems);
       message.success('草稿已保存');
@@ -510,7 +510,7 @@ export default function TimesheetPage() {
   /** 提交审批（按行提交，每行一个审批单，带确认弹窗） */
   const handleSubmitApproval = async () => {
     // 收集有效行（有项目且有工时的；非编辑模式下排除已提交/已审批行）
-    const validRows: { projectId: number; description: string; weekStart: string; entries: { date: string; hours: number }[] }[] = [];
+    const validRows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[] = [];
     for (const row of rows) {
       if (!row.projectId) continue;
       // 非编辑模式下，已通过/审批中的行不参与提交（驳回行和草稿行参与）
@@ -518,8 +518,8 @@ export default function TimesheetPage() {
       // 编辑模式下，已通过/审批中且未修改的行不参与提交
       if (editing && row.originalStatus && row.originalStatus !== 'draft' && !isRowChanged(row)) continue;
       const entries = weekDates
-        .filter(d => row.hours[d] && row.hours[d] > 0)
-        .map(d => ({ date: d, hours: row.hours[d] }));
+        .filter(d => row.days[d] && row.days[d] > 0)
+        .map(d => ({ date: d, days: row.days[d] }));
       if (entries.length === 0) continue;
       validRows.push({
         projectId: row.projectId,
@@ -540,16 +540,16 @@ export default function TimesheetPage() {
     }
     // 校验周工时：计算整周总工时（包括已通过/审批中未修改的行）
     const allWeekItems = validRows.flatMap(r => r.entries);
-    const submittedHours = sumRound(allWeekItems.map(e => e.hours));
-    const approvedHours = sumRound(
+    const submittedDays = sumRound(allWeekItems.map(e => e.days));
+    const approvedDays = sumRound(
       rows
         .filter(r => (r.originalStatus === 'approved' || r.originalStatus === 'submitted')
           && (!editing || !isRowChanged(r)))
-        .flatMap(r => weekDates.map(d => r.hours[d] || 0))
+        .flatMap(r => weekDates.map(d => r.days[d] || 0))
     );
-    const totalWeekHours = sumRound([submittedHours, approvedHours]);
-    if (totalWeekHours < 5) {
-      message.warning(`每周工时合计不得少于5天，当前仅 ${totalWeekHours} 天`);
+    const totalWeekDays = sumRound([submittedDays, approvedDays]);
+    if (totalWeekDays < 5) {
+      message.warning(`每周工时合计不得少于5天，当前仅 ${totalWeekDays} 天`);
       return;
     }
 
@@ -558,7 +558,7 @@ export default function TimesheetPage() {
       const p = projects.find(pp => pp.id === r.projectId);
       return p?.name || `项目#${r.projectId}`;
     });
-    const totalH = sumRound(allWeekItems.map(e => e.hours));
+    const totalH = sumRound(allWeekItems.map(e => e.days));
 
     Modal.confirm({
       title: '确认提交审批',
@@ -567,7 +567,7 @@ export default function TimesheetPage() {
           <p>即将提交 <b>{validRows.length}</b> 个项目行的审批申请：</p>
           <ul style={{ paddingLeft: 20, margin: '8px 0' }}>
             {projectNames.map((name, i) => (
-              <li key={i}>{name}：{sumRound(validRows[i].entries.map(e => e.hours))}{unitLabel}</li>
+              <li key={i}>{name}：{sumRound(validRows[i].entries.map(e => e.days))}{unitLabel}</li>
             ))}
           </ul>
           <p>周合计：<b>{totalH}</b>{unitLabel}</p>
@@ -598,7 +598,7 @@ export default function TimesheetPage() {
     projectName: string;
     weekStart: string;
     weekEnd: string;
-    totalHours: number;
+    totalDays: number;
     status: string;
     description: string;
     targetId: number; // 用于跳转审批详情
@@ -632,7 +632,7 @@ export default function TimesheetPage() {
       const dates = items.map(i => i.date).sort();
       const ws = dayjs(dates[0]).isoWeekday(1).format('YYYY-MM-DD');
       const we = dayjs(ws).add(6, 'day').format('YYYY-MM-DD');
-      const totalHours = sumRound(items.map(i => i.hours));
+      const totalDays = sumRound(items.map(i => i.days));
       // 状态：如果全组都是 deprecated，则显示 deprecated；否则取最高优先级的非 draft 非 deprecated 状态
       const allDeprecated = items.every(i => i.status === 'deprecated');
       const status = allDeprecated
@@ -656,7 +656,7 @@ export default function TimesheetPage() {
         projectName: first.project?.name || `项目#${first.projectId}`,
         weekStart: ws,
         weekEnd: we,
-        totalHours,
+        totalDays,
         status,
         description: items.find(i => i.description)?.description || '',
         targetId: first.id,
@@ -685,8 +685,8 @@ export default function TimesheetPage() {
       render: (_: any, r: HistoryGroup) => `${dayjs(r.weekStart).format('M/D')} ~ ${dayjs(r.weekEnd).format('M/D')}`,
     },
     {
-      title: `工时(${unitLabel})`, dataIndex: 'totalHours', key: 'hours', width: 80,
-      sorter: (a: HistoryGroup, b: HistoryGroup) => a.totalHours - b.totalHours,
+      title: `工时(${unitLabel})`, dataIndex: 'totalDays', key: 'days', width: 80,
+      sorter: (a: HistoryGroup, b: HistoryGroup) => a.totalDays - b.totalDays,
     },
     {
       title: '工作内容', dataIndex: 'description', key: 'description', ellipsis: true,
@@ -829,8 +829,8 @@ export default function TimesheetPage() {
       width: 90,
       render: (_: any, row: WeekRow) =>
         isRowReadonly(row) ? (
-          <Text style={{ color: row.hours[date] ? '#333' : '#ccc' }}>
-            {row.hours[date] || ''}
+          <Text style={{ color: row.days[date] ? '#333' : '#ccc' }}>
+            {row.days[date] || ''}
           </Text>
         ) : (
           <InputNumber
@@ -838,8 +838,8 @@ export default function TimesheetPage() {
             max={1}
             step={unitStep}
             size="small"
-            value={row.hours[date] || null}
-            onChange={(v) => updateHours(row.key, date, v)}
+            value={row.days[date] || null}
+            onChange={(v) => updateDays(row.key, date, v)}
             disabled={!settingsLoaded}
             style={{ width: '100%' }}
           />
@@ -945,7 +945,7 @@ export default function TimesheetPage() {
                                   message.success('已撤回审批中的提交');
                                   // 快照当前行数据，用于后续判断是否有变更
                                   const snap = new Map<string, WeekRow>();
-                                  rows.forEach(r => snap.set(r.key, { ...r, hours: { ...r.hours } }));
+                                  rows.forEach(r => snap.set(r.key, { ...r, days: { ...r.days } }));
                                   rowSnapshotRef.current = snap;
                                   await loadWeekDrafts();
                                   setEditing(true);
@@ -957,7 +957,7 @@ export default function TimesheetPage() {
                           } else {
                             // 无审批中的提交（仅有已通过的）：直接进入编辑（走 modifySubmitted 逻辑）
                             const snap = new Map<string, WeekRow>();
-                            rows.forEach(r => snap.set(r.key, { ...r, hours: { ...r.hours } }));
+                            rows.forEach(r => snap.set(r.key, { ...r, days: { ...r.days } }));
                             rowSnapshotRef.current = snap;
                             setEditing(true);
                           }

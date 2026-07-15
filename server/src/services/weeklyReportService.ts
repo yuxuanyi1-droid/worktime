@@ -14,7 +14,7 @@ export class WeeklyReportService {
   private get notificationService() { return new NotificationService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
 
-  async createOrUpdate(data: { userId: number; weekStart: string; weekEnd: string; content?: string; summary?: string; totalHours?: number }) {
+  async createOrUpdate(data: { userId: number; weekStart: string; weekEnd: string; content?: string; summary?: string; totalDays?: number }) {
     const existing = await this.repo.findOne({
       where: { userId: data.userId, weekStart: data.weekStart },
     });
@@ -24,7 +24,7 @@ export class WeeklyReportService {
       existing.weekEnd = data.weekEnd;
       existing.content = data.content ?? '';
       existing.summary = data.summary ?? '';
-      existing.totalHours = data.totalHours ?? 0;
+      existing.totalDays = data.totalDays ?? 0;
       if (existing.status === 'rejected') {
         existing.status = 'draft';
         existing.currentStep = 0;
@@ -41,7 +41,7 @@ export class WeeklyReportService {
       weekEnd: data.weekEnd,
       content: data.content ?? '',
       summary: data.summary ?? '',
-      totalHours: data.totalHours ?? 0,
+      totalDays: data.totalDays ?? 0,
       status: 'draft',
     });
     return this.repo.save(record);

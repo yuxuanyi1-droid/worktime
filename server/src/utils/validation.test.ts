@@ -6,7 +6,7 @@ import {
   parseEnum,
   parseBooleanQuery,
   parseString,
-  parseHours,
+  parseDays,
   parseArray,
   parsePagination,
   firstQueryValue,
@@ -111,19 +111,19 @@ describe('parseString', () => {
   });
 });
 
-describe('parseHours', () => {
-  it('合法工时', () => {
-    expect(parseHours(8)).toBe(8);
-    expect(parseHours('0.5')).toBe(0.5);
+describe('parseDays', () => {
+  it('合法工时（天）', () => {
+    expect(parseDays(1)).toBe(1);
+    expect(parseDays('0.5')).toBe(0.5);
   });
 
   it('0 或负数抛错', () => {
-    expect(() => parseHours(0)).toThrow();
-    expect(() => parseHours(-1)).toThrow();
+    expect(() => parseDays(0)).toThrow();
+    expect(() => parseDays(-1)).toThrow();
   });
 
-  it('超过 24 抛错', () => {
-    expect(() => parseHours(25)).toThrow();
+  it('超过 1 天抛错', () => {
+    expect(() => parseDays(1.5)).toThrow();
   });
 });
 

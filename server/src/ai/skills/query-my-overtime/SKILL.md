@@ -34,7 +34,7 @@ GET $WORKTIME_API/overtime/my
 GET $WORKTIME_API/overtime/stats?startDate=2026-07-01&endDate=2026-07-31
 ```
 
-返回该范围内总加班小时数、按类型汇总等。
+返回该范围内总加班天数、按类型汇总等。
 
 ## 调用示例
 
@@ -63,7 +63,7 @@ curl -s -H "Authorization: Bearer $WORKTIME_PAT" \
         "endDate": "2026-07-08",
         "startTime": "18:00",
         "endTime": "21:00",
-        "hours": 3.0,
+        "days": 1.0,
         "type": "workday_evening",
         "status": "approved",
         "reason": "赶项目上线"
@@ -76,5 +76,5 @@ curl -s -H "Authorization: Bearer $WORKTIME_PAT" \
 
 ## 回答要求
 
-- 中文回答，给出总加班小时数。
+- 中文回答，给出总加班天数（单位"天"，不要说"小时"）。
 - 区分工作日/周末/节假日加班（`type` 字段）。

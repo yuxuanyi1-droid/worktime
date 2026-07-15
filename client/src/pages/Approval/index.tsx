@@ -136,27 +136,27 @@ function ApprovalDetailView({
                     key: e.date,
                     dayLabel: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][dayjs(e.date).isoWeekday() - 1],
                     date: e.date,
-                    hours: e.hours,
+                    days: e.days,
                   }))}
                   columns={[
                     { title: '', dataIndex: 'dayLabel', width: 60, align: 'center' as const },
                     { title: '日期', dataIndex: 'date', width: 100, align: 'center' as const,
                       render: (d: string) => dayjs(d).format('M/D'),
                     },
-                    { title: '工时(天)', dataIndex: 'hours', width: 80, align: 'center' as const,
+                    { title: '工时(天)', dataIndex: 'days', width: 80, align: 'center' as const,
                       render: (h: number) => <Text strong style={{ color: '#6B8F71' }}>{h}</Text>,
                     },
                   ]}
                 />
                 <div style={{ marginTop: 8 }}>
-                  合计：<Text strong style={{ color: '#6B8F71', fontSize: 15 }}>{c.hours}</Text> 天
+                  合计：<Text strong style={{ color: '#6B8F71', fontSize: 15 }}>{c.days}</Text> 天
                 </div>
               </Descriptions.Item>
             ) : (
               <>
                 <Descriptions.Item label="日期">{c.date || '-'}</Descriptions.Item>
                 <Descriptions.Item label="工时">
-                  <Text strong style={{ color: '#6B8F71' }}>{c.hours}天</Text>
+                  <Text strong style={{ color: '#6B8F71' }}>{c.days}天</Text>
                 </Descriptions.Item>
               </>
             )}
@@ -191,7 +191,7 @@ function ApprovalDetailView({
           <>
             <Descriptions.Item label="日期">{c.date || '-'}</Descriptions.Item>
             <Descriptions.Item label="加班时长">
-              <Text strong style={{ color: '#C0564B' }}>{c.hours}小时</Text>
+              <Text strong style={{ color: '#C0564B' }}>{c.days}天</Text>
             </Descriptions.Item>
             <Descriptions.Item label="加班项目">{c.project?.name || '-'}</Descriptions.Item>
             <Descriptions.Item label="加班类型">{overtimeTypeLabels[c.overtimeType || ''] || c.overtimeType || '-'}</Descriptions.Item>
@@ -203,7 +203,7 @@ function ApprovalDetailView({
           <>
             <Descriptions.Item label="周次">{c.weekStart} ~ {c.weekEnd}</Descriptions.Item>
             <Descriptions.Item label="总工时">
-              <Text strong style={{ color: '#6B8F71' }}>{c.totalHours}天</Text>
+              <Text strong style={{ color: '#6B8F71' }}>{c.totalDays}天</Text>
             </Descriptions.Item>
             <Descriptions.Item label="周报内容" span={2}>
               <RichTextValue value={c.content} />
@@ -706,7 +706,7 @@ function MySubmissionsTab() {
     },
     { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
     {
-      title: '工时(天)', dataIndex: 'hours', key: 'hours', width: 80,
+      title: '工时(天)', dataIndex: 'days', key: 'days', width: 80,
       render: (h: number | undefined) => h ? `${h}天` : '-',
     },
     {
@@ -815,7 +815,7 @@ function PendingApprovalTab() {
     { title: '申请人', dataIndex: 'applicant', key: 'applicant', width: 100 },
     { title: '部门', dataIndex: 'department', key: 'department', width: 120 },
     {
-      title: '工时(天)', dataIndex: 'hours', key: 'hours', width: 80,
+      title: '工时(天)', dataIndex: 'days', key: 'days', width: 80,
       render: (h: number | undefined) => h ? `${h}天` : '-',
     },
     {

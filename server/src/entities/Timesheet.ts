@@ -42,7 +42,7 @@ export class Timesheet {
   date!: string; // YYYY-MM-DD
 
   @Column({ type: 'numeric', precision: 10, scale: 2 })
-  hours!: number;
+  days!: number;
 
   @Column({ type: 'text', nullable: true })
   description!: string;

@@ -9,7 +9,7 @@ export interface MySubmission {
   status: 'draft' | 'submitted' | 'approved' | 'rejected' | 'withdrawn';
   currentStep?: number;
   totalSteps?: number;
-  hours?: number;
+  days?: number;
   date?: string;
   description?: string;
   permissionCode?: string;
@@ -33,14 +33,14 @@ export interface ApprovalDetail {
     createdAt: string;
     updatedAt: string;
     date?: string;
-    hours?: number;
+    days?: number;
     description?: string;
     project?: { id: number; name: string } | null;
     overtimeType?: string;
     reason?: string;
     weekStart?: string;
     weekEnd?: string;
-    totalHours?: number;
+    totalDays?: number;
     content?: string;
     summary?: string;
     permissionCode?: string;
@@ -51,7 +51,7 @@ export interface ApprovalDetail {
     expiresAt?: string | null;
     grantId?: number | null;
     submissionGroupId?: number;
-    weekEntries?: { date: string; hours: number }[];
+    weekEntries?: { date: string; days: number }[];
     previousApproval?: { targetId: number; submissionGroupId: number } | null;
     /** 工时配额信息（timesheet 审批单动态计算，null=未配置配额=不限制） */
     quota?: {

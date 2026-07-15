@@ -9,7 +9,7 @@ import {
   parseArray,
   parseBooleanQuery,
   parseDateString,
-  parseHours,
+  parseDays,
   parseOptionalDateString,
   parseOptionalEnum,
   parsePagination,
@@ -29,7 +29,7 @@ function parseTimesheetItem(item: unknown, index: number) {
   return {
     projectId: parsePositiveInt(row.projectId, `items[${index}].projectId`),
     date: parseDateString(row.date, `items[${index}].date`),
-    hours: parseHours(row.hours, `items[${index}].hours`),
+    days: parseDays(row.days, `items[${index}].days`),
     description: parseString(row.description, `items[${index}].description`, { max: 1000 }),
   };
 }
@@ -47,7 +47,7 @@ function parseTimesheetRow(rowValue: unknown, index: number) {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new BusinessError(`rows[${index}].entries[${entryIndex}]格式无效`);
       return {
         date: parseDateString(entry.date, `rows[${index}].entries[${entryIndex}].date`),
-        hours: parseHours(entry.hours, `rows[${index}].entries[${entryIndex}].hours`),
+        days: parseDays(entry.days, `rows[${index}].entries[${entryIndex}].days`),
       };
     }, { min: 1, max: 7 }),
   };
@@ -121,7 +121,7 @@ router.put('/:id', requirePermission('timesheet:update'), async (req: AuthReques
     const body = req.body as Record<string, unknown>;
     const data = await timesheetService.update(parsePositiveInt(req.params.id, 'id'), req.user!.id, {
       projectId: body.projectId === undefined ? undefined : parsePositiveInt(body.projectId, 'projectId'),
-      hours: body.hours === undefined ? undefined : parseHours(body.hours),
+      days: body.days === undefined ? undefined : parseDays(body.days),
       description: parseString(body.description, 'description', { max: 1000 }),
     });
     res.json({ code: 0, data, message: '更新成功' });
