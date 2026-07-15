@@ -1,6 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
 import { Drawer, Input, Button, Space, Tooltip } from 'antd';
-import { RobotOutlined, CloseOutlined, SendOutlined, ClearOutlined, LoadingOutlined } from '@ant-design/icons';
+import {
+  RobotOutlined,
+  CloseOutlined,
+  SendOutlined,
+  ClearOutlined,
+  LoadingOutlined,
+} from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useChat } from './useChat';
@@ -179,6 +185,7 @@ function MessageBubble({ message }: { message: import('./useChat').ChatMessage }
   const align = isUser ? 'flex-end' : 'flex-start';
   const bg = isUser ? '#6B8F71' : '#F8F4ED';
   const color = isUser ? '#FDFBF7' : '#2C2418';
+  const running = !!message.toolStatus?.running || !!message.loading;
 
   return (
     <div style={{ display: 'flex', justifyContent: align }}>
@@ -195,14 +202,13 @@ function MessageBubble({ message }: { message: import('./useChat').ChatMessage }
           boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
         }}
       >
-        {/* 工具状态提示 */}
-        {message.toolStatus?.running && (
-          <div style={{ fontSize: 12, color: isUser ? 'rgba(253,251,247,0.85)' : '#7A7060', marginBottom: 4, fontStyle: 'italic' }}>
-            <LoadingOutlined style={{ marginRight: 4 }} />
-            {message.toolStatus.toolName}…
+        {/* 中间过程：统一折叠成一行"执行中 Xs"，展开后按时序展示思考与工具 */}
+        {!isUser && message.trace && message.trace.length > 0 && (
+          <div style={{ marginBottom: message.content ? 8 : 0 }}>
+            <TraceSummary trace={message.trace} running={running} startTime={message.startTime} />
           </div>
         )}
-        {/* 内容：用户纯文本，助手 markdown */}
+        {/* 内容：用户纯文本，助手 markdown（最终答案） */}
         {isUser ? (
           <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
         ) : message.error ? (
@@ -212,9 +218,119 @@ function MessageBubble({ message }: { message: import('./useChat').ChatMessage }
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
           </div>
         ) : message.loading ? (
-          <span style={{ color: isUser ? 'rgba(253,251,247,0.85)' : '#9A9080' }}>思考中…</span>
+          <span style={{ color: '#9A9080' }}>思考中…</span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * 中间过程的统一折叠条。
+ * 收起时只占一行："执行中 Xs" / "已完成 · 用时 Xs"。
+ * 展开后按真实时序逐项展示（思考过程 / 工具调用交织，各自可折叠，不合并）。
+ */
+function TraceSummary({
+  trace,
+  running,
+  startTime,
+}: {
+  trace: import('./useChat').TraceItem[];
+  running: boolean;
+  startTime?: number;
+}) {
+  const [now, setNow] = useState(Date.now());
+
+  // 执行中每秒刷新一次计时；完成后停止
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+
+  // 耗时（秒）：用 floor 避免四舍五入导致的跳变
+  const elapsed = startTime ? Math.max(0, Math.floor((now - startTime) / 1000)) : 0;
+  const label = running ? `执行中 ${elapsed}s` : `已完成 · 用时 ${elapsed}s`;
+  // trace 最后一项是否正在流式写入（用于显示光标）
+  const lastIdx = trace.length - 1;
+
+  return (
+    <CollapsibleBar
+      icon={running ? <LoadingOutlined style={{ fontSize: 11 }} /> : undefined}
+      label={label}
+      defaultOpen={false}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {trace.map((item, i) =>
+          item.type === 'thinking' ? (
+            <CollapsibleBar key={i} label="思考过程" defaultOpen={false}>
+              <div
+                style={{
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  color: '#7A7060',
+                  whiteSpace: 'pre-wrap',
+                  maxHeight: 240,
+                  overflowY: 'auto',
+                }}
+              >
+                {item.text}
+                {running && i === lastIdx && <span style={{ color: '#9A9080' }}> ▍</span>}
+              </div>
+            </CollapsibleBar>
+          ) : (
+            <CollapsibleBar key={i} label={`工具调用 · ${item.text}`} defaultOpen={false}>
+              <div style={{ fontSize: 12, lineHeight: 1.8, color: '#7A7060' }}>· {item.text}</div>
+            </CollapsibleBar>
+          ),
+        )}
+      </div>
+    </CollapsibleBar>
+  );
+}
+
+/**
+ * 通用折叠条：一行可点击的标题 + 展开后的内容。默认收起。
+ */
+function CollapsibleBar({
+  label,
+  icon,
+  children,
+  defaultOpen = false,
+}: {
+  label: string;
+  icon?: React.ReactNode;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div
+      style={{
+        marginBottom: 6,
+        padding: '5px 10px',
+        background: 'rgba(44, 36, 24, 0.05)',
+        borderRadius: 8,
+        border: '1px solid rgba(44, 36, 24, 0.08)',
+      }}
+    >
+      <div
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          cursor: 'pointer',
+          color: '#7A7060',
+          fontSize: 12,
+          userSelect: 'none',
+        }}
+      >
+        {icon}
+        <span style={{ fontWeight: 500 }}>{label}</span>
+        <span style={{ fontSize: 11, color: '#9A9080', marginLeft: 'auto' }}>{open ? '收起 ▴' : '展开 ▾'}</span>
+      </div>
+      {open && <div style={{ marginTop: 6 }}>{children}</div>}
     </div>
   );
 }
