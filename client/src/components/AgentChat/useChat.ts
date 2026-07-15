@@ -139,10 +139,28 @@ export function useChat() {
               break;
             }
             case 'message_end':
+              // assistant 消息结束：定稿正文与思考。补 thinking 防御 pi 时序变化导致丢失。
               if (event.message?.role === 'assistant') {
+                const patch: Partial<ChatMessage> = { loading: false };
                 const text = extractText(event.message);
-                if (text) updateAssistant({ content: text, loading: false });
-                else updateAssistant({ loading: false });
+                if (text) patch.content = text;
+                const thinking = extractThinking(event.message);
+                if (thinking) {
+                  setMessages((prev) =>
+                    prev.map((m) => {
+                      if (m.id !== assistantMsg.id) return m;
+                      const trace = [...(m.trace ?? [])];
+                      const last = trace[trace.length - 1];
+                      // 仅当最后一段是 thinking 才更新（避免重复新增）
+                      if (last && last.type === 'thinking') {
+                        trace[trace.length - 1] = { type: 'thinking', text: thinking };
+                      }
+                      return { ...m, trace, ...patch };
+                    }),
+                  );
+                } else {
+                  updateAssistant(patch);
+                }
               }
               break;
             case 'tool_execution_start': {
@@ -205,7 +223,24 @@ export function useChat() {
     setSending(false);
   }, []);
 
-  return { messages, sending, send, stop, clear };
+  /**
+   * 重新生成最后一条助手回答：移除最后的一组（用户+助手），重新发送该用户消息。
+   * 复用 sessionId（保持上下文），但丢弃上次回答。
+   */
+  const regenerate = useCallback(() => {
+    if (sending) return;
+    setMessages((prev) => {
+      if (prev.length < 2) return prev;
+      const last = prev[prev.length - 1];
+      const userMsg = prev[prev.length - 2];
+      if (last.role !== 'assistant' || userMsg.role !== 'user') return prev;
+      // 移除最后这组（用户+助手），稍后由 send 重新加入
+      queueMicrotask(() => send(userMsg.content));
+      return prev.slice(0, -2);
+    });
+  }, [sending, send]);
+
+  return { messages, sending, send, stop, clear, regenerate };
 }
 
 /** 把 pi 的工具名转成中文标签（bash 通常是执行 skill 的 curl） */

@@ -1,14 +1,43 @@
 import { useState, useRef, useEffect } from 'react';
-import { Drawer, Input, Button, Space, Tooltip } from 'antd';
+import { Input, Button, Space, Tooltip, message as antdMessage } from 'antd';
 import {
-  RobotOutlined,
   CloseOutlined,
-  SendOutlined,
+  ArrowUpOutlined,
   ClearOutlined,
   LoadingOutlined,
+  CopyOutlined,
+  ReloadOutlined,
+  CheckOutlined,
 } from '@ant-design/icons';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+// 用 PrismLight 按需注册语言，避免打包全部语言（默认会引入数百种，体积巨大）
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import jsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx';
+import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx';
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
+import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript';
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash';
+import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
+import css from 'react-syntax-highlighter/dist/esm/languages/prism/css';
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python';
+
+SyntaxHighlighter.registerLanguage('jsx', jsx);
+SyntaxHighlighter.registerLanguage('tsx', tsx);
+SyntaxHighlighter.registerLanguage('typescript', typescript);
+SyntaxHighlighter.registerLanguage('ts', typescript);
+SyntaxHighlighter.registerLanguage('javascript', javascript);
+SyntaxHighlighter.registerLanguage('js', javascript);
+SyntaxHighlighter.registerLanguage('json', json);
+SyntaxHighlighter.registerLanguage('bash', bash);
+SyntaxHighlighter.registerLanguage('sh', bash);
+SyntaxHighlighter.registerLanguage('shell', bash);
+SyntaxHighlighter.registerLanguage('sql', sql);
+SyntaxHighlighter.registerLanguage('css', css);
+SyntaxHighlighter.registerLanguage('python', python);
+SyntaxHighlighter.registerLanguage('py', python);
 import { useChat } from './useChat';
 
 /**
@@ -19,7 +48,7 @@ import { useChat } from './useChat';
 export default function AgentChat() {
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
-  const { messages, sending, send, stop, clear } = useChat();
+  const { messages, sending, send, stop, clear, regenerate } = useChat();
   const listRef = useRef<HTMLDivElement>(null);
 
   // 新消息时自动滚到底
@@ -28,6 +57,22 @@ export default function AgentChat() {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // 注入浮动按钮脉冲动画（仅一次）。项目无全局 CSS，用 <style> 注入 keyframes。
+  useEffect(() => {
+    const id = 'agent-chat-keyframes';
+    if (document.getElementById(id)) return;
+    const style = document.createElement('style');
+    style.id = id;
+    style.textContent = `@keyframes agentPulse {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-4px); }
+    }`;
+    document.head.appendChild(style);
+    return () => {
+      document.getElementById(id)?.remove();
+    };
+  }, []);
 
   const handleSend = () => {
     const text = input.trim();
@@ -38,7 +83,7 @@ export default function AgentChat() {
 
   return (
     <>
-      {/* 浮动按钮 */}
+      {/* 浮动按钮：渐变圆形 + 统一品牌徽标 + 轻微脉冲提示 */}
       {!open && (
         <div
           onClick={() => setOpen(true)}
@@ -46,39 +91,60 @@ export default function AgentChat() {
             position: 'fixed',
             right: 32,
             bottom: 32,
-            width: 56,
-            height: 56,
-            borderRadius: '50%',
-            background: '#6B8F71',
-            color: '#FDFBF7',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            boxShadow: '0 6px 20px rgba(107, 143, 113, 0.45)',
             zIndex: 1000,
-            transition: 'transform 0.2s ease',
+            cursor: 'pointer',
+            animation: 'agentPulse 2.4s ease-in-out infinite',
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.08)')}
-          onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
           title="AI 助手"
         >
-          <RobotOutlined style={{ fontSize: 26 }} />
+          {/* 外圈光晕 */}
+          <div
+            style={{
+              width: 56,
+              height: 56,
+              borderRadius: '50%',
+              background: 'linear-gradient(135deg, #7BA281 0%, #5C7E63 100%)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              boxShadow: '0 8px 24px rgba(92, 126, 99, 0.5), inset 0 1px 2px rgba(255,255,255,0.25)',
+              transition: 'transform 0.2s ease',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.08)')}
+            onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
+          >
+            <BrandLogo size={30} />
+          </div>
         </div>
       )}
 
-      {/* 聊天抽屉 */}
-      <Drawer
-        placement="right"
-        open={open}
-        onClose={() => setOpen(false)}
-        width={420}
-        closable={false}
-        styles={{
-          body: { padding: 0, display: 'flex', flexDirection: 'column', background: '#FDFBF7' },
-          header: { display: 'none' },
-        }}
-      >
+      {/* 聊天浮窗：自定义悬浮卡片（不用 Drawer，避免其多层 DOM 的默认背景导致圆角弧线）。
+          约占视口 2/3 高，上/下/右留白，16px 圆角，整体一个元素控制圆角无歧义。 */}
+      {open && (
+        <>
+          {/* 半透明遮罩：点击关闭 */}
+          <div
+            onClick={() => setOpen(false)}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(44,36,24,0.18)', zIndex: 1000 }}
+          />
+          {/* 浮窗主体 */}
+          <div
+            style={{
+              position: 'fixed',
+              top: 24,
+              right: 24,
+              bottom: 24,
+              width: 420,
+              maxWidth: 'calc(100vw - 48px)',
+              display: 'flex',
+              flexDirection: 'column',
+              background: '#FDFBF7',
+              borderRadius: 16,
+              boxShadow: '0 12px 40px rgba(44, 36, 24, 0.22)',
+              overflow: 'hidden',
+              zIndex: 1001,
+            }}
+          >
         {/* 顶栏 */}
         <div
           style={{
@@ -91,8 +157,8 @@ export default function AgentChat() {
             flexShrink: 0,
           }}
         >
-          <Space>
-            <RobotOutlined style={{ fontSize: 18 }} />
+          <Space size={8} align="center">
+            <BrandLogo size={22} withBackground />
             <span style={{ fontWeight: 600, fontSize: 15 }}>AI 助手</span>
           </Space>
           <Space size={4}>
@@ -127,7 +193,22 @@ export default function AgentChat() {
         >
           {messages.length === 0 && (
             <div style={{ textAlign: 'center', color: '#9A9080', fontSize: 13, marginTop: 40, padding: '0 12px' }}>
-              <RobotOutlined style={{ fontSize: 36, color: '#6B8F71', marginBottom: 12, display: 'block' }} />
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 14 }}>
+                <div
+                  style={{
+                    width: 52,
+                    height: 52,
+                    borderRadius: 16,
+                    background: 'linear-gradient(135deg, #7BA281 0%, #5C7E63 100%)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: '0 4px 12px rgba(92, 126, 99, 0.3)',
+                  }}
+                >
+                  <BrandLogo size={30} />
+                </div>
+              </div>
               你好，我是工时助手。可以问我：
               <div style={{ marginTop: 8, lineHeight: 1.8 }}>
                 「我这周填了多少工时」<br />
@@ -136,59 +217,160 @@ export default function AgentChat() {
               </div>
             </div>
           )}
-          {messages.map((m) => (
-            <MessageBubble key={m.id} message={m} />
+          {messages.map((m, i) => (
+            <MessageBubble
+              key={m.id}
+              message={m}
+              isLast={i === messages.length - 1}
+              onRegenerate={regenerate}
+              sending={sending}
+            />
           ))}
         </div>
 
-        {/* 输入区 */}
+        {/* 输入区：输入框与发送按钮水平排列，按钮垂直居中（单行）/贴底（多行） */}
         <div style={{ borderTop: '1px solid #E8E0D4', padding: 12, flexShrink: 0, background: '#FDFBF7' }}>
-          <Input.TextArea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onPressEnter={(e) => {
-              if (!e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-            autoSize={{ minRows: 1, maxRows: 4 }}
-            style={{ borderRadius: 10, borderColor: '#E8E0D4', marginBottom: 8 }}
-            disabled={sending}
-          />
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+            <Input.TextArea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onPressEnter={(e) => {
+                if (!e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+              autoSize={{ minRows: 1, maxRows: 4 }}
+              style={{ borderRadius: 10, borderColor: '#E8E0D4', flex: 1 }}
+              disabled={sending}
+            />
+            {/* 圆形发送/停止按钮：flex 兄弟，垂直居中 */}
             {sending ? (
-              <Button size="small" onClick={stop} icon={<CloseOutlined />}>停止</Button>
+              <button
+                onClick={stop}
+                title="停止"
+                style={{
+                  width: 30,
+                  height: 30,
+                  flexShrink: 0,
+                  borderRadius: '50%',
+                  border: 'none',
+                  background: '#9A9080',
+                  color: '#FDFBF7',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: 0,
+                }}
+              >
+                {/* 实心方块（停止符号） */}
+                <span style={{ width: 10, height: 10, background: '#FDFBF7', borderRadius: 1, display: 'block' }} />
+              </button>
             ) : (
-              <Button
-                type="primary"
-                size="small"
+              <button
                 onClick={handleSend}
                 disabled={!input.trim()}
-                icon={<SendOutlined />}
-                style={{ background: '#6B8F71', borderColor: '#6B8F71' }}
+                title="发送"
+                style={{
+                  width: 30,
+                  height: 30,
+                  flexShrink: 0,
+                  borderRadius: '50%',
+                  border: 'none',
+                  background: input.trim() ? '#6B8F71' : '#D8D0C2',
+                  color: '#FDFBF7',
+                  cursor: input.trim() ? 'pointer' : 'not-allowed',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: 0,
+                  transition: 'background 0.15s',
+                }}
               >
-                发送
-              </Button>
+                <ArrowUpOutlined style={{ fontSize: 14 }} />
+              </button>
             )}
           </div>
         </div>
-      </Drawer>
+          </div>
+        </>
+      )}
     </>
   );
 }
 
+/**
+ * 统一品牌徽标：圆角方块内含「对话气泡 + 闪光」AI 图标。
+ * - 浮动按钮场景：透明底，图标用浅色（叠在绿色渐变圆上）。
+ * - 顶栏场景（withBackground）：自带半透明白底，贴在绿色顶栏上更醒目。
+ */
+function BrandLogo({ size = 22, withBackground = false }: { size?: number; withBackground?: boolean }) {
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size * 0.3,
+        background: withBackground ? 'rgba(253, 251, 247, 0.22)' : 'transparent',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+    >
+      {/* 对话气泡 + 内部闪光（AI 感） */}
+      <svg
+        width={size * 0.62}
+        height={size * 0.62}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="#FDFBF7"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {/* 气泡主体 */}
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+        {/* 内部四角闪光（AI 智能感） */}
+        <path d="M12 8l.7 2.3L15 11l-2.3.7L12 14l-.7-2.3L9 11l2.3-.7z" fill="#FDFBF7" stroke="none" />
+      </svg>
+    </div>
+  );
+}
+
 /** 单条消息气泡 */
-function MessageBubble({ message }: { message: import('./useChat').ChatMessage }) {
+function MessageBubble({
+  message,
+  isLast,
+  onRegenerate,
+  sending,
+}: {
+  message: import('./useChat').ChatMessage;
+  isLast: boolean;
+  onRegenerate: () => void;
+  sending: boolean;
+}) {
   const isUser = message.role === 'user';
   const align = isUser ? 'flex-end' : 'flex-start';
   const bg = isUser ? '#6B8F71' : '#F8F4ED';
   const color = isUser ? '#FDFBF7' : '#2C2418';
   const running = !!message.toolStatus?.running || !!message.loading;
+  // 助手消息且已完成（有正文、不在 loading）才显示操作按钮
+  const showActions = !isUser && !running && !!message.content && !message.error;
+  // 重新生成仅对最后一条助手消息显示
+  const canRegenerate = showActions && isLast && !sending;
+
+  const handleCopy = () => {
+    navigator.clipboard
+      .writeText(message.content)
+      .then(() => antdMessage.success('已复制'))
+      .catch(() => antdMessage.error('复制失败'));
+  };
 
   return (
-    <div style={{ display: 'flex', justifyContent: align }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: align }}>
       <div
         style={{
           maxWidth: '85%',
@@ -215,12 +397,27 @@ function MessageBubble({ message }: { message: import('./useChat').ChatMessage }
           <span style={{ color: '#C0564B' }}>{message.error}</span>
         ) : message.content ? (
           <div className="agent-md">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+              {message.content}
+            </ReactMarkdown>
           </div>
         ) : message.loading ? (
           <span style={{ color: '#9A9080' }}>思考中…</span>
         ) : null}
       </div>
+      {/* 助手消息的操作按钮（复制 / 重新生成） */}
+      {showActions && (
+        <div style={{ display: 'flex', gap: 4, marginTop: 3, marginRight: isUser ? 0 : 0, marginLeft: isUser ? 0 : 0 }}>
+          <Tooltip title="复制">
+            <Button type="text" size="small" icon={<CopyOutlined />} onClick={handleCopy} style={{ color: '#9A9080' }} />
+          </Tooltip>
+          {canRegenerate && (
+            <Tooltip title="重新生成">
+              <Button type="text" size="small" icon={<ReloadOutlined />} onClick={onRegenerate} style={{ color: '#9A9080' }} />
+            </Tooltip>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -334,3 +531,125 @@ function CollapsibleBar({
     </div>
   );
 }
+
+/**
+ * 带复制按钮的代码块。
+ */
+function CodeBlock({ language, children }: { language: string; children: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard
+      .writeText(children)
+      .then(() => {
+        setCopied(true);
+        antdMessage.success('代码已复制');
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => antdMessage.error('复制失败'));
+  };
+  return (
+    <div style={{ position: 'relative', margin: '8px 0', borderRadius: 8, overflow: 'hidden' }}>
+      {/* 顶栏：语言名 + 复制按钮 */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '4px 10px',
+          background: '#EEE7DA',
+          fontSize: 11,
+          color: '#7A7060',
+        }}
+      >
+        <span>{language || 'text'}</span>
+        <Button
+          type="text"
+          size="small"
+          icon={copied ? <CheckOutlined /> : <CopyOutlined />}
+          onClick={handleCopy}
+          style={{ color: '#7A7060', fontSize: 11 }}
+        >
+          {copied ? '已复制' : '复制'}
+        </Button>
+      </div>
+      <SyntaxHighlighter
+        language={language || 'text'}
+        style={oneLight}
+        customStyle={{ margin: 0, fontSize: 12.5, borderRadius: 0, padding: '10px 12px' }}
+      >
+        {children}
+      </SyntaxHighlighter>
+    </div>
+  );
+}
+
+/**
+ * react-markdown 的组件覆盖：代码高亮 + 暖色调 Markdown 样式。
+ * 区分行内代码（inline）与代码块。
+ */
+const markdownComponents: Components = {
+  // code：react-markdown v10 中，行内 code 的 props 有 inline 标志
+  code(props) {
+    const { children, className, node, ...rest } = props;
+    const match = /language-(\w+)/.exec(className || '');
+    const text = String(children).replace(/\n$/, '');
+    // 有 language-xxx 类名 → 代码块；否则行内 code
+    if (match) {
+      return <CodeBlock language={match[1]}>{text}</CodeBlock>;
+    }
+    // 行内代码：判断是否多行（含换行则当代码块处理）
+    if (text.includes('\n')) {
+      return <CodeBlock language="">{text}</CodeBlock>;
+    }
+    return (
+      <code
+        {...rest}
+        style={{
+          background: 'rgba(44, 36, 24, 0.08)',
+          padding: '1px 5px',
+          borderRadius: 4,
+          fontSize: 12.5,
+          fontFamily: 'Consolas, Monaco, monospace',
+        }}
+      >
+        {children}
+      </code>
+    );
+  },
+  // 表格
+  table({ children }) {
+    return (
+      <table style={{ borderCollapse: 'collapse', width: '100%', margin: '8px 0', fontSize: 12.5 }}>{children}</table>
+    );
+  },
+  th({ children }) {
+    return (
+      <th style={{ border: '1px solid #E8E0D4', padding: '5px 8px', background: '#F8F4ED', textAlign: 'left' }}>
+        {children}
+      </th>
+    );
+  },
+  td({ children }) {
+    return <td style={{ border: '1px solid #E8E0D4', padding: '5px 8px' }}>{children}</td>;
+  },
+  // 引用块
+  blockquote({ children }) {
+    return (
+      <blockquote
+        style={{ borderLeft: '3px solid #6B8F71', margin: '8px 0', padding: '2px 10px', color: '#7A7060' }}
+      >
+        {children}
+      </blockquote>
+    );
+  },
+  // 列表
+  ul({ children }) {
+    return <ul style={{ margin: '6px 0', paddingLeft: 20 }}>{children}</ul>;
+  },
+  ol({ children }) {
+    return <ol style={{ margin: '6px 0', paddingLeft: 20 }}>{children}</ol>;
+  },
+  p({ children }) {
+    return <p style={{ margin: '6px 0' }}>{children}</p>;
+  },
+};
