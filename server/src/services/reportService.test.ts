@@ -108,4 +108,19 @@ describe('dedupReportTimesheets', () => {
     const total = result.reduce((s, r) => s + r.hours, 0);
     expect(total).toBe(1.0);
   });
+
+  it('同一天多项目各自独立 submissionGroupId 且都 approved → 都保留（核心 bug 修复场景）', () => {
+    // submitByRows 每个项目独立分配 submissionGroupId。
+    // 旧实现按 (userId, date) 取 MAX group 会只留 group 最大的项目，丢失其他项目。
+    // 修复后按 (userId, projectId, date) 取 MAX group，3 个项目各自保留。
+    const records = [
+      mk(1, 10, '2024-01-01', 100, 0.3, 'approved', 10), // 项目100 group10
+      mk(2, 10, '2024-01-01', 200, 0.3, 'approved', 9),  // 项目200 group9
+      mk(3, 10, '2024-01-01', 300, 0.4, 'approved', 8),  // 项目300 group8
+    ];
+    const result = dedupReportTimesheets(records);
+    expect(result).toHaveLength(3);
+    const total = result.reduce((s, r) => s + r.hours, 0);
+    expect(total).toBe(1.0);
+  });
 });

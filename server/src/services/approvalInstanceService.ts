@@ -60,17 +60,22 @@ export class ApprovalInstanceService {
     }
 
     const steps: ApprovalInstanceStepSnapshot[] = [];
+    // 跨步骤去重：同一审批人在整个流程中只审一次（避免直属/上级兜底指向同人时的重复审批）。
+    // 规则：按人过滤——某步若部分审批人已在前序步骤出现，仅保留未重复者；全部重复则跳过该步。
+    const seenApprovers = new Set<number>();
     for (const sourceStep of [...version.steps].sort((a, b) => a.stepOrder - b.stepOrder)) {
       const approvers = await this.flowEngine.resolveApprovers(sourceStep, params.applicantId, params.projectId ?? undefined);
       const uniqueApprovers = new Map<number, string>();
 
       for (const approver of approvers) {
-        if (approver.userId !== params.applicantId) {
+        // 排除申请人自己 + 跨步骤已出现过的审批人
+        if (approver.userId !== params.applicantId && !seenApprovers.has(approver.userId)) {
           uniqueApprovers.set(approver.userId, approver.userName);
         }
       }
 
       if (uniqueApprovers.size > 0) {
+        uniqueApprovers.forEach((_, id) => seenApprovers.add(id));
         steps.push({
           stepOrder: steps.length + 1,
           sourceStepOrder: sourceStep.stepOrder,

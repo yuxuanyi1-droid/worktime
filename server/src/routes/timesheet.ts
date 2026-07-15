@@ -39,7 +39,8 @@ function parseTimesheetRow(rowValue: unknown, index: number) {
   if (!row || typeof row !== 'object' || Array.isArray(row)) throw new BusinessError(`rows[${index}]格式无效`);
   return {
     projectId: parsePositiveInt(row.projectId, `rows[${index}].projectId`),
-    description: parseString(row.description, `rows[${index}].description`, { max: 1000 }) || '',
+    // 提交审批/修改时工作内容必填（草稿不经过此解析，允许空）。required 由 parseString 内部 trim 校验。
+    description: parseString(row.description, `rows[${index}].description`, { required: true, max: 1000 })!,
     weekStart: parseDateString(row.weekStart, `rows[${index}].weekStart`),
     entries: parseArray(row.entries, `rows[${index}].entries`, (entryValue, entryIndex) => {
       const entry = entryValue as Record<string, unknown>;

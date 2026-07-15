@@ -4,7 +4,7 @@ import { Timesheet } from '../entities/Timesheet';
 import { SystemSetting } from '../entities/SystemSetting';
 import { SubmissionSequence } from '../entities/SubmissionSequence';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
-import { Between, In, Not } from 'typeorm';
+import { Between, In, Not, Brackets } from 'typeorm';
 import { NotificationService } from './notificationService';
 import { User } from '../entities/User';
 import { ApprovalInstanceService } from './approvalInstanceService';
@@ -18,24 +18,30 @@ dayjs.extend(isoWeek);
 function dayjsExt(d: string | dayjs.Dayjs) { return dayjs(d); }
 
 /**
- * 按日期维度去重：同一 date 只保留 submissionGroupId 最大（最新版本）的记录。
- * 排除 deprecated/rejected/withdrawn 状态。同一天多个项目在同一 submissionGroup 下各自保留。
+ * 按「项目+日期」维度去重：同一 (projectId, date) 只保留 submissionGroupId 最大（最新版本）的记录。
+ * 排除 deprecated/rejected/withdrawn 状态。
+ *
+ * 说明：submitByRows 提交时每个 projectId 独立分配一个 submissionGroupId，因此同一天多个项目
+ * 会有多个不同 submissionGroupId。去重必须按 (projectId, date) 取各自最新版本，否则会丢失
+ * 同一天的其他项目（仅保留 submissionGroupId 最大的那一个项目）。
+ * 入参 records 应已是单用户范围。
  */
-function dedupByLatestSubmissionGroup(records: Timesheet[]): Timesheet[] {
-  // 找出每个 date 对应的最大 submissionGroupId
-  const maxGroupByDate = new Map<string, number>();
+export function dedupByLatestSubmissionGroup(records: Timesheet[]): Timesheet[] {
+  // 找出每个 (projectId, date) 对应的最大 submissionGroupId
+  const maxGroupByKey = new Map<string, number>();
   for (const r of records) {
     if (r.status === 'deprecated' || r.status === 'rejected' || r.status === 'withdrawn') continue;
     if (!r.submissionGroupId) continue;
-    const cur = maxGroupByDate.get(r.date);
+    const key = `${r.projectId}_${r.date}`;
+    const cur = maxGroupByKey.get(key);
     if (cur === undefined || r.submissionGroupId > cur) {
-      maxGroupByDate.set(r.date, r.submissionGroupId);
+      maxGroupByKey.set(key, r.submissionGroupId);
     }
   }
-  // 只保留属于该 date 最大 submissionGroupId 的记录
+  // 只保留属于该 (projectId, date) 最大 submissionGroupId 的记录
   return records.filter(r =>
     r.status !== 'deprecated' && r.status !== 'rejected' && r.status !== 'withdrawn'
-    && r.submissionGroupId === maxGroupByDate.get(r.date)
+    && r.submissionGroupId === maxGroupByKey.get(`${r.projectId}_${r.date}`)
   );
 }
 
@@ -157,14 +163,19 @@ export class TimesheetService {
       .where('t.userId = :userId', { userId });
 
     if (!includeAll) {
-      // 去重：同一 date 取最大的 submissionGroupId（最新提交版本），返回该版本下该 date 的所有记录。
-      // 两步查询：先查出每个 date 的最大 submissionGroupId，再按这些 group 查完整记录。
+      // 周填报表查询：并集返回「已提交的最新版本」+「真草稿(draft)」。
+      //
+      // 路径A（已分组最新版本）：submitByRows 每个 projectId 独立分配 submissionGroupId，
+      //   故按 (projectId, date) 取 MAX(submissionGroupId) 得到各项目最新提交版本。
+      // 路径B（真草稿）：draft 的 submissionGroupId 本就是 null（未提交），单独查 status='draft'。
+      //   撤回记录(status=withdrawn, group 保留)被两路都排除：路径A按 status 排除 withdrawn，
+      //   路径B要求 status=draft。故撤回记录不显示（仅历史记录可见）。
       const maxGroupQb = this.repo.createQueryBuilder('d')
         .select('MAX(d.submissionGroupId)', 'maxGroup')
         .where('d.userId = :uid', { uid: userId })
         .andWhere('d.status NOT IN (:...excl)', { excl: ['deprecated', 'rejected', 'withdrawn'] })
         .andWhere('d.submissionGroupId IS NOT NULL')
-        .groupBy('d.date');
+        .groupBy('d.projectId, d.date');
       if (startDate && endDate) {
         maxGroupQb.andWhere('d.date BETWEEN :ds AND :de', { ds: startDate, de: endDate });
       }
@@ -174,12 +185,24 @@ export class TimesheetService {
       const maxGroupRows = await maxGroupQb.getRawMany<{ maxGroup: number }>();
       const maxGroups = maxGroupRows.map(r => r.maxGroup).filter(Boolean);
 
-      if (maxGroups.length === 0) {
-        return { list: [], total: 0, page, pageSize };
+      if (startDate && endDate) {
+        qb.andWhere('t.date BETWEEN :ds AND :de', { ds: startDate, de: endDate });
       }
-
-      qb.andWhere('t.submissionGroupId IN (:...maxGroups)', { maxGroups });
-      qb.andWhere('t.status NOT IN (:...mainExcl)', { mainExcl: ['deprecated', 'rejected', 'withdrawn'] });
+      // 并集：已提交最新版本(路径A) 或 真草稿(路径B)
+      qb.andWhere(new Brackets(qb1 => {
+        // 路径A：maxGroups 非空时取这些 group 的非终态记录
+        if (maxGroups.length > 0) {
+          qb1.where('t.submissionGroupId IN (:...maxGroups)', { maxGroups })
+            .andWhere('t.status NOT IN (:...mainExcl)', { mainExcl: ['deprecated', 'rejected', 'withdrawn'] })
+            .orWhere('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' });
+        } else {
+          // 无已提交版本：只查真草稿
+          qb1.where('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' });
+        }
+      }));
+      if (status) {
+        qb.andWhere('t.status = :status', { status });
+      }
     } else {
       // includeAll（历史记录）：按提交时间筛选，而非工时日期。
       // 这样跨周/跨月的提交记录能整组完整返回（一组工时共享同一个 submissionGroupId），
@@ -371,10 +394,19 @@ export class TimesheetService {
             }
             removedIds.add(rec.id);
           }
+        } else if (rec.status === 'approved' || rec.status === 'submitted') {
+          // 被删除的项目（本次 rows 未包含该项目，!dates 为 true）→ 立即 deprecate。
+          // 本次提交的项目(A/B)的旧记录不在此处理——它们在下方按行循环里按天 deprecate。
+          //
+          // 设计语义：修改提交即生效（不可逆，驳回需重提）。被删项目无新版本、无审批实例，
+          // 没有任何审批事件能干净地触发其 deprecate，故必须在提交时由 submitByRows 自己处理。
+          // 报表在修改审批通过前会少统计这些被删项目（已接受此取舍，换取界面立即反映最新意图）。
+          if (!dates) {
+            rec.status = 'deprecated';
+            await txService.repo.save(rec);
+            removedIds.add(rec.id);
+          }
         }
-        // approved/submitted 的旧记录保持原状态不变（不再立即 deprecate）。
-        // 新版本审批通过时由 approvalService 按 rootGroupId deprecate 整条旧链。
-        // 这样修改期间旧版本仍参与报表统计（报表只取最新 approved 的 submissionGroup）。
       }
 
       for (const row of rows) {

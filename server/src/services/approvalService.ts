@@ -606,9 +606,10 @@ export class ApprovalService {
         if (instanceId) {
           await txService.freezeTimesheetQuotaSnapshot(instanceId, target.submissionGroupId, userId);
         }
-        // 撤回恢复为未分组草稿：清空 submissionGroupId，避免下次提交误走 deprecated 重建分支。
-        // previousGroupId 保留，以维持与原审批的版本链追溯（rootGroupId 亦不变）。
-        updateData.submissionGroupId = null;
+        // 撤回保留 submissionGroupId（维持分组归属：历史按组展示、修改链追溯）。
+        // previousGroupId / rootGroupId 亦保留。下次提交时 submitByRows 的 existingRecords
+        // 只查 draft/rejected/approved/submitted，不含 withdrawn，故撤回记录不会被当作
+        // "已存在版本"误走 deprecated 重建分支——无需清空 group。
         await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
       } else {
         await repo!.update(targetId, updateData);

@@ -519,13 +519,22 @@ export class SystemService {
     return Number(result?.total || 0);
   }
 
-  /** 获取所有用户列表（供选择器用） */
+  /** 获取所有用户列表（供选择器用，含部门/组归属以便前端按归属过滤负责人人选） */
   async getAllUsers() {
-    return this.userRepo.find({
+    // department/group 是 ManyToOne 关系，外键 id 不会自动出现在实体实例上，
+    // 需加载关系后从 u.department?.id / u.group?.id 取值。
+    const users = await this.userRepo.find({
       where: { status: 1 },
-      select: ['id', 'username', 'realName'],
+      relations: ['department', 'group'],
       order: { realName: 'ASC' },
     });
+    return users.map(u => ({
+      id: u.id,
+      username: u.username,
+      realName: u.realName,
+      departmentId: u.department?.id ?? null,
+      groupId: u.group?.id ?? null,
+    }));
   }
 
   // ==================== 项目管理员 ====================
