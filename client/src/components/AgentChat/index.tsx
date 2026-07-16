@@ -1,13 +1,27 @@
 import { useState, useRef, useEffect } from 'react';
-import { Input, Button, Space, Tooltip, message as antdMessage } from 'antd';
+import {
+  Input,
+  Button,
+  Space,
+  Tooltip,
+  Popover,
+  Popconfirm,
+  Spin,
+  message as antdMessage,
+} from 'antd';
 import {
   CloseOutlined,
   ArrowUpOutlined,
-  ClearOutlined,
   LoadingOutlined,
   CopyOutlined,
   ReloadOutlined,
   CheckOutlined,
+  HistoryOutlined,
+  PlusOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  DownOutlined,
+  ArrowDownOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -48,17 +62,52 @@ import { useChat } from './useChat';
 export default function AgentChat() {
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
-  const { messages, sending, send, stop, clear, regenerate } = useChat();
+  const [showLatest, setShowLatest] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const inputRef = useRef<any>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const {
+    messages,
+    sessions,
+    currentSessionId,
+    sending,
+    loadingSession,
+    queuedMessages,
+    initialize,
+    switchSession,
+    newSession,
+    renameSession,
+    deleteSession,
+    send,
+    stop,
+    regenerate,
+  } = useChat();
 
-  // 新消息时自动滚到底
+  const currentTitle = sessions.find((session) => session.id === currentSessionId)?.title || '新对话';
+
   useEffect(() => {
-    if (listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight;
-    }
+    if (!open) return;
+    void initialize();
+    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 120);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [initialize, open]);
+
+  useEffect(() => {
+    if (!stickToBottomRef.current || !listRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
   }, [messages]);
 
-  // 注入浮动按钮脉冲动画（仅一次）。项目无全局 CSS，用 <style> 注入 keyframes。
   useEffect(() => {
     const id = 'agent-chat-keyframes';
     if (document.getElementById(id)) return;
@@ -67,75 +116,92 @@ export default function AgentChat() {
     style.textContent = `@keyframes agentPulse {
       0%, 100% { transform: translateY(0); }
       50% { transform: translateY(-4px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .agent-chat-trigger { animation: none !important; }
     }`;
     document.head.appendChild(style);
-    return () => {
-      document.getElementById(id)?.remove();
-    };
+    return () => document.getElementById(id)?.remove();
   }, []);
+
+  const scrollToLatest = () => {
+    stickToBottomRef.current = true;
+    setShowLatest(false);
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
+  };
+
+  const handleScroll = () => {
+    const element = listRef.current;
+    if (!element) return;
+    const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+    stickToBottomRef.current = nearBottom;
+    setShowLatest(!nearBottom);
+  };
 
   const handleSend = () => {
     const text = input.trim();
-    if (!text || sending) return;
-    send(text);
+    if (!text) return;
     setInput('');
+    stickToBottomRef.current = true;
+    setShowLatest(false);
+    void send(text).catch((error: any) => {
+      setInput(text);
+      antdMessage.error(error?.response?.data?.message || error?.message || '消息发送失败');
+    });
   };
+
+  const handleSuggestion = (suggestion: string) => {
+    setInput('');
+    stickToBottomRef.current = true;
+    setShowLatest(false);
+    void send(suggestion).catch((error: any) => {
+      antdMessage.error(error?.response?.data?.message || error?.message || '消息发送失败');
+    });
+  };
+
+  const suggestions = ['我这周填了多少工时', '我有几条待审批', '统计一下本月加班'];
 
   return (
     <>
-      {/* 浮动按钮：渐变圆形 + 统一品牌徽标 + 轻微脉冲提示 */}
       {!open && (
-        <div
+        <button
+          className="agent-chat-trigger"
+          type="button"
           onClick={() => setOpen(true)}
+          aria-label="打开 AI 助手"
           style={{
             position: 'fixed',
             right: 32,
             bottom: 32,
             zIndex: 1000,
+            width: 56,
+            height: 56,
+            padding: 0,
+            border: 0,
+            borderRadius: '50%',
             cursor: 'pointer',
             animation: 'agentPulse 2.4s ease-in-out infinite',
+            background: 'linear-gradient(135deg, #7BA281 0%, #5C7E63 100%)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 8px 24px rgba(92, 126, 99, 0.5), inset 0 1px 2px rgba(255,255,255,0.25)',
           }}
-          title="AI 助手"
         >
-          {/* 外圈光晕 */}
-          <div
-            style={{
-              width: 56,
-              height: 56,
-              borderRadius: '50%',
-              background: 'linear-gradient(135deg, #7BA281 0%, #5C7E63 100%)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 8px 24px rgba(92, 126, 99, 0.5), inset 0 1px 2px rgba(255,255,255,0.25)',
-              transition: 'transform 0.2s ease',
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.08)')}
-            onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
-          >
-            <BrandLogo size={30} />
-          </div>
-        </div>
+          <BrandLogo size={30} />
+        </button>
       )}
 
-      {/* 聊天浮窗：自定义悬浮卡片（不用 Drawer，避免其多层 DOM 的默认背景导致圆角弧线）。
-          约占视口 2/3 高，上/下/右留白，16px 圆角，整体一个元素控制圆角无歧义。 */}
       {open && (
-        <>
-          {/* 半透明遮罩：点击关闭 */}
-          <div
-            onClick={() => setOpen(false)}
-            style={{ position: 'fixed', inset: 0, background: 'rgba(44,36,24,0.18)', zIndex: 1000 }}
-          />
-          {/* 浮窗主体 */}
-          <div
+          <aside
+            aria-label="AI 工时助手"
             style={{
               position: 'fixed',
-              top: 24,
-              right: 24,
-              bottom: 24,
-              width: 420,
-              maxWidth: 'calc(100vw - 48px)',
+              top: 16,
+              right: 16,
+              bottom: 16,
+              width: 440,
+              maxWidth: 'calc(100% - 32px)',
               display: 'flex',
               flexDirection: 'column',
               background: '#FDFBF7',
@@ -145,160 +211,389 @@ export default function AgentChat() {
               zIndex: 1001,
             }}
           >
-        {/* 顶栏 */}
-        <div
-          style={{
-            padding: '14px 18px',
-            background: '#6B8F71',
-            color: '#FDFBF7',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexShrink: 0,
-          }}
-        >
-          <Space size={8} align="center">
-            <BrandLogo size={22} withBackground />
-            <span style={{ fontWeight: 600, fontSize: 15 }}>AI 助手</span>
-          </Space>
-          <Space size={4}>
-            <Tooltip title="清空对话">
-              <Button
-                type="text"
-                size="small"
-                icon={<ClearOutlined style={{ color: '#FDFBF7' }} />}
-                onClick={clear}
-              />
-            </Tooltip>
-            <Button
-              type="text"
-              size="small"
-              icon={<CloseOutlined style={{ color: '#FDFBF7' }} />}
-              onClick={() => setOpen(false)}
-            />
-          </Space>
-        </div>
+            <header
+              style={{
+                minHeight: 58,
+                padding: '10px 14px',
+                background: '#6B8F71',
+                color: '#FDFBF7',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexShrink: 0,
+              }}
+            >
+              <Space size={9} align="center">
+                <BrandLogo size={24} withBackground />
+                <Popover
+                  trigger="click"
+                  placement="bottomLeft"
+                  open={historyOpen}
+                  onOpenChange={setHistoryOpen}
+                  content={
+                    <SessionList
+                      sessions={sessions}
+                      currentSessionId={currentSessionId}
+                      disabled={sending}
+                      onSwitch={async (sessionId) => {
+                        await switchSession(sessionId);
+                        setHistoryOpen(false);
+                      }}
+                      onRename={renameSession}
+                      onDelete={deleteSession}
+                    />
+                  }
+                >
+                  <button
+                    type="button"
+                    aria-label="查看最近对话"
+                    style={{
+                      maxWidth: 230,
+                      padding: '4px 6px',
+                      border: 0,
+                      borderRadius: 7,
+                      background: 'transparent',
+                      color: '#FDFBF7',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span style={{ display: 'block', fontSize: 11, opacity: 0.78 }}>AI 助手</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 14, fontWeight: 600 }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentTitle}</span>
+                      <DownOutlined style={{ fontSize: 9 }} />
+                    </span>
+                  </button>
+                </Popover>
+              </Space>
+              <Space size={2}>
+                <Tooltip title="新对话">
+                  <Button
+                    type="text"
+                    aria-label="新建对话"
+                    icon={<PlusOutlined style={{ color: '#FDFBF7' }} />}
+                    disabled={sending || loadingSession}
+                    onClick={() => {
+                      setHistoryOpen(false);
+                      void newSession().catch(() => antdMessage.error('新建对话失败'));
+                    }}
+                  />
+                </Tooltip>
+                <Tooltip title="关闭">
+                  <Button
+                    type="text"
+                    aria-label="关闭 AI 助手"
+                    icon={<CloseOutlined style={{ color: '#FDFBF7' }} />}
+                    onClick={() => setOpen(false)}
+                  />
+                </Tooltip>
+              </Space>
+            </header>
 
-        {/* 消息列表 */}
-        <div
-          ref={listRef}
-          style={{
-            flex: 1,
-            overflowY: 'auto',
-            padding: '16px 14px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-          }}
-        >
-          {messages.length === 0 && (
-            <div style={{ textAlign: 'center', color: '#9A9080', fontSize: 13, marginTop: 40, padding: '0 12px' }}>
-              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 14 }}>
-                <div
+            <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+              <div
+                ref={listRef}
+                onScroll={handleScroll}
+                aria-live="polite"
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflowY: 'auto',
+                  padding: '18px 16px 24px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 14,
+                }}
+              >
+                {loadingSession && <Spin style={{ margin: '40px auto' }} />}
+                {!loadingSession && messages.length === 0 && (
+                  <div style={{ textAlign: 'center', color: '#7A7060', fontSize: 13, marginTop: 36, padding: '0 12px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 14 }}>
+                      <div
+                        style={{
+                          width: 52,
+                          height: 52,
+                          borderRadius: 16,
+                          background: 'linear-gradient(135deg, #7BA281 0%, #5C7E63 100%)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          boxShadow: '0 4px 12px rgba(92, 126, 99, 0.3)',
+                        }}
+                      >
+                        <BrandLogo size={30} />
+                      </div>
+                    </div>
+                    <div style={{ color: '#2C2418', fontSize: 15, fontWeight: 600 }}>今天想了解什么？</div>
+                    <div style={{ marginTop: 6, color: '#9A9080' }}>我可以帮你查询工时、加班、周报和审批进度</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 18 }}>
+                      {suggestions.map((suggestion) => (
+                        <button
+                          type="button"
+                          key={suggestion}
+                          disabled={loadingSession}
+                          onClick={() => handleSuggestion(suggestion)}
+                          style={{
+                            padding: '9px 12px',
+                            border: '1px solid #E8E0D4',
+                            borderRadius: 10,
+                            background: '#FFFFFF',
+                            color: '#5F5648',
+                            cursor: loadingSession ? 'not-allowed' : 'pointer',
+                            textAlign: 'left',
+                          }}
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {messages.map((message, index) => (
+                  <MessageBubble
+                    key={message.id}
+                    message={message}
+                    isLast={index === messages.length - 1}
+                    onRegenerate={regenerate}
+                    sending={sending}
+                  />
+                ))}
+              </div>
+              {showLatest && (
+                <Button
+                  size="small"
+                  icon={<ArrowDownOutlined />}
+                  onClick={scrollToLatest}
                   style={{
-                    width: 52,
-                    height: 52,
-                    borderRadius: 16,
-                    background: 'linear-gradient(135deg, #7BA281 0%, #5C7E63 100%)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    boxShadow: '0 4px 12px rgba(92, 126, 99, 0.3)',
+                    position: 'absolute',
+                    left: '50%',
+                    bottom: 10,
+                    transform: 'translateX(-50%)',
+                    borderColor: '#D8D0C2',
+                    color: '#5F5648',
+                    boxShadow: '0 3px 10px rgba(44,36,24,0.12)',
                   }}
                 >
-                  <BrandLogo size={30} />
+                  回到最新
+                </Button>
+              )}
+            </div>
+
+            <footer style={{ padding: '10px 12px 12px', flexShrink: 0, background: '#FDFBF7' }}>
+              {queuedMessages.length > 0 && (
+                <div style={{ margin: '0 6px 7px', fontSize: 12, color: '#7A7060' }}>
+                  已排队 {queuedMessages.length} 条：{queuedMessages[queuedMessages.length - 1]}
+                </div>
+              )}
+              <div
+                style={{
+                  background: '#FFFFFF',
+                  border: '1px solid #D8D0C2',
+                  borderRadius: 18,
+                  boxShadow: '0 2px 8px rgba(44,36,24,0.06)',
+                  padding: '8px 9px 8px 14px',
+                }}
+              >
+                <Input.TextArea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onPressEnter={(event) => {
+                    if (!event.shiftKey && !(event.nativeEvent as any).isComposing) {
+                      event.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  placeholder={sending ? '继续输入，发送后将排队处理' : '输入问题，Enter 发送'}
+                  autoSize={{ minRows: 2, maxRows: 5 }}
+                  variant="borderless"
+                  style={{ padding: '3px 2px 7px', fontSize: 14, lineHeight: 1.55, resize: 'none' }}
+                />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 34 }}>
+                  <span style={{ fontSize: 11, color: '#A39A8B' }}>Shift + Enter 换行</span>
+                  <Space size={6}>
+                    {sending && (
+                      <Tooltip title="停止当前回答">
+                        <button
+                          type="button"
+                          aria-label="停止当前回答"
+                          onClick={stop}
+                          style={{
+                            width: 34,
+                            height: 34,
+                            borderRadius: '50%',
+                            border: '1px solid #D8D0C2',
+                            background: '#FFFFFF',
+                            color: '#7A7060',
+                            cursor: 'pointer',
+                            display: 'grid',
+                            placeItems: 'center',
+                          }}
+                        >
+                          <span style={{ width: 9, height: 9, background: '#7A7060', borderRadius: 1 }} />
+                        </button>
+                      </Tooltip>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      disabled={!input.trim() || loadingSession}
+                      aria-label={sending ? '将消息加入队列' : '发送消息'}
+                      title={sending ? '加入队列' : '发送'}
+                      style={{
+                        width: 34,
+                        height: 34,
+                        borderRadius: '50%',
+                        border: 'none',
+                        background: input.trim() && !loadingSession ? '#6B8F71' : '#D8D0C2',
+                        color: '#FDFBF7',
+                        cursor: input.trim() && !loadingSession ? 'pointer' : 'not-allowed',
+                        display: 'grid',
+                        placeItems: 'center',
+                      }}
+                    >
+                      <ArrowUpOutlined style={{ fontSize: 14 }} />
+                    </button>
+                  </Space>
                 </div>
               </div>
-              你好，我是工时助手。可以问我：
-              <div style={{ marginTop: 8, lineHeight: 1.8 }}>
-                「我这周填了多少工时」<br />
-                「我有几条待审批」<br />
-                「我的加班统计」
-              </div>
-            </div>
-          )}
-          {messages.map((m, i) => (
-            <MessageBubble
-              key={m.id}
-              message={m}
-              isLast={i === messages.length - 1}
-              onRegenerate={regenerate}
-              sending={sending}
-            />
-          ))}
-        </div>
-
-        {/* 输入区：输入框与发送按钮水平排列，按钮垂直居中（单行）/贴底（多行） */}
-        <div style={{ borderTop: '1px solid #E8E0D4', padding: 12, flexShrink: 0, background: '#FDFBF7' }}>
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
-            <Input.TextArea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onPressEnter={(e) => {
-                if (!e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-              autoSize={{ minRows: 1, maxRows: 4 }}
-              style={{ borderRadius: 10, borderColor: '#E8E0D4', flex: 1 }}
-              disabled={sending}
-            />
-            {/* 圆形发送/停止按钮：flex 兄弟，垂直居中 */}
-            {sending ? (
-              <button
-                onClick={stop}
-                title="停止"
-                style={{
-                  width: 30,
-                  height: 30,
-                  flexShrink: 0,
-                  borderRadius: '50%',
-                  border: 'none',
-                  background: '#9A9080',
-                  color: '#FDFBF7',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: 0,
-                }}
-              >
-                {/* 实心方块（停止符号） */}
-                <span style={{ width: 10, height: 10, background: '#FDFBF7', borderRadius: 1, display: 'block' }} />
-              </button>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={!input.trim()}
-                title="发送"
-                style={{
-                  width: 30,
-                  height: 30,
-                  flexShrink: 0,
-                  borderRadius: '50%',
-                  border: 'none',
-                  background: input.trim() ? '#6B8F71' : '#D8D0C2',
-                  color: '#FDFBF7',
-                  cursor: input.trim() ? 'pointer' : 'not-allowed',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: 0,
-                  transition: 'background 0.15s',
-                }}
-              >
-                <ArrowUpOutlined style={{ fontSize: 14 }} />
-              </button>
-            )}
-          </div>
-        </div>
-          </div>
-        </>
+            </footer>
+          </aside>
       )}
     </>
   );
+}
+
+function SessionList({
+  sessions,
+  currentSessionId,
+  disabled,
+  onSwitch,
+  onRename,
+  onDelete,
+}: {
+  sessions: import('../../api/agent').AgentSessionSummary[];
+  currentSessionId?: string;
+  disabled: boolean;
+  onSwitch: (sessionId: string) => Promise<void>;
+  onRename: (sessionId: string, title: string) => Promise<void>;
+  onDelete: (sessionId: string) => Promise<void>;
+}) {
+  const [editingId, setEditingId] = useState<string>();
+  const [title, setTitle] = useState('');
+
+  const commitRename = async (sessionId: string) => {
+    const nextTitle = title.trim();
+    if (!nextTitle) return;
+    try {
+      await onRename(sessionId, nextTitle);
+      setEditingId(undefined);
+    } catch {
+      antdMessage.error('重命名失败');
+    }
+  };
+
+  return (
+    <div style={{ width: 310, maxWidth: 'calc(100vw - 64px)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 9, color: '#2C2418', fontWeight: 600 }}>
+        <HistoryOutlined /> 最近对话
+      </div>
+      <div style={{ maxHeight: 330, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {sessions.length === 0 && <div style={{ padding: '22px 8px', color: '#9A9080', textAlign: 'center' }}>暂无历史对话</div>}
+        {sessions.map((session) => (
+          <div
+            key={session.id}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              padding: '5px 6px 5px 9px',
+              borderRadius: 9,
+              background: session.id === currentSessionId ? '#EEF3ED' : 'transparent',
+            }}
+          >
+            {editingId === session.id ? (
+              <Input
+                size="small"
+                value={title}
+                maxLength={50}
+                autoFocus
+                onChange={(event) => setTitle(event.target.value)}
+                onPressEnter={(event) => event.currentTarget.blur()}
+                onBlur={() => void commitRename(session.id)}
+                style={{ flex: 1 }}
+              />
+            ) : (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => void onSwitch(session.id).catch(() => antdMessage.error('加载对话失败'))}
+                style={{
+                  minWidth: 0,
+                  flex: 1,
+                  padding: '3px 0',
+                  border: 0,
+                  background: 'transparent',
+                  textAlign: 'left',
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                  color: '#2C2418',
+                }}
+              >
+                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
+                  {session.title}
+                </span>
+                <span style={{ display: 'block', marginTop: 1, fontSize: 11, color: '#9A9080' }}>
+                  {formatSessionTime(session.updatedAt)} · {session.messageCount} 条消息
+                </span>
+              </button>
+            )}
+            {editingId !== session.id && (
+              <>
+                <Tooltip title="重命名">
+                  <Button
+                    type="text"
+                    size="small"
+                    aria-label={`重命名 ${session.title}`}
+                    disabled={disabled}
+                    icon={<EditOutlined />}
+                    onClick={() => {
+                      setEditingId(session.id);
+                      setTitle(session.title);
+                    }}
+                  />
+                </Tooltip>
+                <Popconfirm
+                  title="删除这条对话？"
+                  description="删除后无法恢复"
+                  okText="删除"
+                  cancelText="取消"
+                  onConfirm={() => void onDelete(session.id).catch(() => antdMessage.error('删除对话失败'))}
+                >
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    aria-label={`删除 ${session.title}`}
+                    disabled={disabled}
+                    icon={<DeleteOutlined />}
+                  />
+                </Popconfirm>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatSessionTime(value: string): string {
+  const date = new Date(value);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) {
+    return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  }
+  return date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
 }
 
 /**
@@ -354,17 +649,53 @@ function MessageBubble({
 }) {
   const isUser = message.role === 'user';
   const align = isUser ? 'flex-end' : 'flex-start';
-  const bg = isUser ? '#6B8F71' : '#F8F4ED';
+  const bg = isUser ? '#6B8F71' : 'transparent';
   const color = isUser ? '#FDFBF7' : '#2C2418';
-  const running = !!message.toolStatus?.running || !!message.loading;
-  // 助手消息且已完成（有正文、不在 loading）才显示操作按钮
-  const showActions = !isUser && !running && !!message.content && !message.error;
-  // 重新生成仅对最后一条助手消息显示
-  const canRegenerate = showActions && isLast && !sending;
+  const running = !!message.loading;
 
+  // 用户消息：直接显示文本
+  if (isUser) {
+    const userText = message.parts.find((p) => p.type === 'text')?.text ?? '';
+    return (
+      <div style={{ display: 'flex', justifyContent: align }}>
+        <div
+          style={{
+            maxWidth: '85%',
+            padding: '9px 13px',
+            borderRadius: '14px 14px 4px 14px',
+            background: bg,
+            color,
+            fontSize: 13.5,
+            lineHeight: 1.6,
+            wordBreak: 'break-word',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {userText}
+        </div>
+      </div>
+    );
+  }
+
+  // 助手消息：parts 时间线
+  // 划分：最终答案（最后一个 text part）在外面显示；
+  //       其余 text part（中间过渡文案）+ thinking/tool 统一收进折叠区。
+  const allTextParts = message.parts.filter((p) => p.type === 'text');
+  const lastTextPart = allTextParts[allTextParts.length - 1]; // 最终答案 / 当前正在生成的文案
+  // 过程 part = thinking/tool + 非最后的 text（过渡文案）
+  const processParts = message.parts.filter((p) => p.type !== 'text' || p.id !== lastTextPart?.id);
+  // 正文 = 仅最后一个 text part（最终答案）
+  const textParts = lastTextPart ? [lastTextPart] : [];
+  const hasProcess = processParts.length > 0;
+  // 完成且有 text part 才显示操作按钮
+  const showActions = !running && textParts.length > 0 && !message.error;
+  const canRegenerate = showActions && isLast && !sending;
+  // 复制时只用最终答案
   const handleCopy = () => {
+    const text = textParts.map((p) => p.text).join('\n\n');
     navigator.clipboard
-      .writeText(message.content)
+      .writeText(text)
       .then(() => antdMessage.success('已复制'))
       .catch(() => antdMessage.error('复制失败'));
   };
@@ -373,41 +704,37 @@ function MessageBubble({
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: align }}>
       <div
         style={{
-          maxWidth: '85%',
-          padding: '9px 13px',
-          borderRadius: isUser ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+          width: '100%',
+          padding: '4px 2px',
+          borderRadius: 0,
           background: bg,
           color,
           fontSize: 13.5,
           lineHeight: 1.6,
           wordBreak: 'break-word',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+          boxShadow: 'none',
         }}
       >
-        {/* 中间过程：统一折叠成一行"执行中 Xs"，展开后按时序展示思考与工具 */}
-        {!isUser && message.trace && message.trace.length > 0 && (
-          <div style={{ marginBottom: message.content ? 8 : 0 }}>
-            <TraceSummary trace={message.trace} running={running} startTime={message.startTime} />
+        {/* 过程（思考/工具）统一折叠成一个"执行中 Xs"总条 */}
+        {hasProcess && (
+          <div style={{ marginBottom: textParts.length ? 8 : 0 }}>
+            <ProcessGroup parts={processParts} running={running} startTime={message.startTime} />
           </div>
         )}
-        {/* 内容：用户纯文本，助手 markdown（最终答案） */}
-        {isUser ? (
-          <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
-        ) : message.error ? (
-          <span style={{ color: '#C0564B' }}>{message.error}</span>
-        ) : message.content ? (
-          <div className="agent-md">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {message.content}
-            </ReactMarkdown>
-          </div>
-        ) : message.loading ? (
+        {/* 正文（text parts）：markdown 渲染 */}
+        {textParts.map((part, i) => (
+          <PartView key={part.id} part={part} isLast={i === textParts.length - 1 && message.parts[message.parts.length - 1]?.type === 'text'} running={running} />
+        ))}
+        {/* 错误 */}
+        {message.error && <div style={{ color: '#C0564B' }}>{message.error}</div>}
+        {/* 等待首个 part */}
+        {message.parts.length === 0 && !message.error && running && (
           <span style={{ color: '#9A9080' }}>思考中…</span>
-        ) : null}
+        )}
       </div>
       {/* 助手消息的操作按钮（复制 / 重新生成） */}
       {showActions && (
-        <div style={{ display: 'flex', gap: 4, marginTop: 3, marginRight: isUser ? 0 : 0, marginLeft: isUser ? 0 : 0 }}>
+        <div style={{ display: 'flex', gap: 4, marginTop: 3 }}>
           <Tooltip title="复制">
             <Button type="text" size="small" icon={<CopyOutlined />} onClick={handleCopy} style={{ color: '#9A9080' }} />
           </Tooltip>
@@ -423,66 +750,94 @@ function MessageBubble({
 }
 
 /**
- * 中间过程的统一折叠条。
- * 收起时只占一行："执行中 Xs" / "已完成 · 用时 Xs"。
- * 展开后按真实时序逐项展示（思考过程 / 工具调用交织，各自可折叠，不合并）。
+ * 过程总折叠：所有思考/工具 part 统一收进一个"执行中 Xs / 已完成"条，
+ * 展开后内部再按时间线展示各步骤（思考过程、工具调用，各自可折叠）。
  */
-function TraceSummary({
-  trace,
+function ProcessGroup({
+  parts,
   running,
   startTime,
 }: {
-  trace: import('./useChat').TraceItem[];
+  parts: import('./useChat').Part[];
   running: boolean;
   startTime?: number;
 }) {
   const [now, setNow] = useState(Date.now());
-
-  // 执行中每秒刷新一次计时；完成后停止
   useEffect(() => {
     if (!running) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [running]);
-
-  // 耗时（秒）：用 floor 避免四舍五入导致的跳变
   const elapsed = startTime ? Math.max(0, Math.floor((now - startTime) / 1000)) : 0;
-  const label = running ? `执行中 ${elapsed}s` : `已完成 · 用时 ${elapsed}s`;
-  // trace 最后一项是否正在流式写入（用于显示光标）
-  const lastIdx = trace.length - 1;
+  // 统计步骤数
+  const stepCount = parts.length;
 
   return (
     <CollapsibleBar
       icon={running ? <LoadingOutlined style={{ fontSize: 11 }} /> : undefined}
-      label={label}
+      label={running ? `执行中 ${elapsed}s` : `已完成 · 用时 ${elapsed}s · ${stepCount} 步`}
       defaultOpen={false}
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {trace.map((item, i) =>
-          item.type === 'thinking' ? (
-            <CollapsibleBar key={i} label="思考过程" defaultOpen={false}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        {parts.map((part) => {
+          const label = part.type === 'tool'
+            ? `${part.text}${part.status === 'error' ? '失败' : part.done ? '完成' : '中'}`
+            : part.type === 'thinking'
+              ? part.done ? '问题分析完成' : '正在分析问题'
+              : part.done ? '整理结果完成' : '正在整理结果';
+          return (
+            <CollapsibleBar
+              key={part.id}
+              icon={!part.done
+                ? <LoadingOutlined style={{ fontSize: 11 }} />
+                : <CheckOutlined style={{ fontSize: 11, color: part.status === 'error' ? '#C0564B' : '#6B8F71' }} />}
+              label={label}
+              defaultOpen={false}
+            >
               <div
                 style={{
+                  maxHeight: 280,
+                  overflow: 'auto',
+                  padding: '2px 3px',
+                  color: '#5F5648',
                   fontSize: 12,
-                  lineHeight: 1.6,
-                  color: '#7A7060',
+                  lineHeight: 1.65,
                   whiteSpace: 'pre-wrap',
-                  maxHeight: 240,
-                  overflowY: 'auto',
+                  wordBreak: 'break-word',
+                  fontFamily: part.type === 'tool' ? 'Consolas, Monaco, monospace' : 'inherit',
                 }}
               >
-                {item.text}
-                {running && i === lastIdx && <span style={{ color: '#9A9080' }}> ▍</span>}
+                {part.type === 'tool' ? part.detail || '正在等待查询结果…' : part.text || '正在生成分析内容…'}
               </div>
             </CollapsibleBar>
-          ) : (
-            <CollapsibleBar key={i} label={`工具调用 · ${item.text}`} defaultOpen={false}>
-              <div style={{ fontSize: 12, lineHeight: 1.8, color: '#7A7060' }}>· {item.text}</div>
-            </CollapsibleBar>
-          ),
-        )}
+          );
+        })}
       </div>
     </CollapsibleBar>
+  );
+}
+
+/**
+ * 正文 part 渲染：markdown，正在生成时尾部加光标。
+ * 仅处理 text part（思考/工具由 ProcessGroup 统一折叠）。
+ */
+function PartView({
+  part,
+  isLast,
+  running,
+}: {
+  part: import('./useChat').Part;
+  isLast: boolean;
+  running: boolean;
+}) {
+  const streaming = running && isLast && !part.done;
+  return (
+    <div className="agent-md" style={{ marginBottom: 6 }}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {part.text}
+      </ReactMarkdown>
+      {streaming && <span style={{ color: '#9A9080' }}> ▍</span>}
+    </div>
   );
 }
 
@@ -511,9 +866,15 @@ function CollapsibleBar({
         border: '1px solid rgba(44, 36, 24, 0.08)',
       }}
     >
-      <div
+      <button
+        type="button"
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         style={{
+          width: '100%',
+          padding: 0,
+          border: 0,
+          background: 'transparent',
           display: 'flex',
           alignItems: 'center',
           gap: 6,
@@ -526,7 +887,7 @@ function CollapsibleBar({
         {icon}
         <span style={{ fontWeight: 500 }}>{label}</span>
         <span style={{ fontSize: 11, color: '#9A9080', marginLeft: 'auto' }}>{open ? '收起 ▴' : '展开 ▾'}</span>
-      </div>
+      </button>
       {open && <div style={{ marginTop: 6 }}>{children}</div>}
     </div>
   );
@@ -619,7 +980,9 @@ const markdownComponents: Components = {
   // 表格
   table({ children }) {
     return (
-      <table style={{ borderCollapse: 'collapse', width: '100%', margin: '8px 0', fontSize: 12.5 }}>{children}</table>
+      <div style={{ maxWidth: '100%', overflowX: 'auto', margin: '8px 0' }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 360, fontSize: 12.5 }}>{children}</table>
+      </div>
     );
   },
   th({ children }) {

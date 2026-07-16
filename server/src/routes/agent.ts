@@ -2,101 +2,194 @@ import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
-import { getOrCreateSession, promptSession, isAiReady } from '../ai/agentRunner';
+import {
+  abortSession,
+  deleteSession,
+  getOrCreateSession,
+  getSessionHistory,
+  isAiReady,
+  listSessions,
+  promptSession,
+  queueSessionMessage,
+  regenerateSession,
+  renameSession,
+} from '../ai/agentRunner';
 
 const router = Router();
-
-// 聊天端点走 JWT 会话鉴权（聊天不用 PAT，PAT 是给 skill 的 curl 用的）
 router.use(authMiddleware);
 
-/**
- * 把一条事件作为 SSE data 帧写出。
- * SSE 帧格式：`data: <单行JSON>\n\n`
- */
+function ensureAiReady() {
+  if (!isAiReady()) {
+    throw new BusinessError('AI 助手未配置，请联系管理员完成服务端配置', 503, 503);
+  }
+}
+
+function parseSessionId(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 100) {
+    throw new BusinessError('会话标识无效');
+  }
+  return value.trim();
+}
+
+function parseMessage(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) throw new BusinessError('消息不能为空');
+  const message = value.trim();
+  if (message.length > 10000) throw new BusinessError('消息过长，请控制在 10000 字以内');
+  return message;
+}
+
 function writeSse(res: Response, payload: unknown) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  // Express 的 res.write 不一定立即刷新到底层 socket（尤其经反向代理时），
-  // 显式 flush 确保 SSE 帧及时送达客户端，避免前端长时间"思考中"。
   (res as any).flush?.();
 }
 
+router.get('/sessions', async (req: AuthRequest, res, next) => {
+  try {
+    ensureAiReady();
+    const sessions = await listSessions(req.user!.id);
+    res.json({ code: 0, data: sessions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/sessions', async (req: AuthRequest, res, next) => {
+  try {
+    ensureAiReady();
+    const result = await getOrCreateSession(req.user!.id, undefined, {});
+    res.json({ code: 0, data: { id: result.sessionId, title: '新对话' } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/sessions/:sessionId/messages', async (req: AuthRequest, res, next) => {
+  try {
+    ensureAiReady();
+    const sessionId = parseSessionId(req.params.sessionId);
+    const messages = await getSessionHistory(req.user!.id, sessionId);
+    res.json({ code: 0, data: messages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/sessions/:sessionId', async (req: AuthRequest, res, next) => {
+  try {
+    ensureAiReady();
+    const sessionId = parseSessionId(req.params.sessionId);
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    if (!title) throw new BusinessError('会话名称不能为空');
+    if (title.length > 50) throw new BusinessError('会话名称不能超过 50 字');
+    await renameSession(req.user!.id, sessionId, title);
+    res.json({ code: 0, data: { id: sessionId, title } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/sessions/:sessionId', async (req: AuthRequest, res, next) => {
+  try {
+    ensureAiReady();
+    const sessionId = parseSessionId(req.params.sessionId);
+    await deleteSession(req.user!.id, sessionId);
+    res.json({ code: 0, message: '对话已删除' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/sessions/:sessionId/abort', async (req: AuthRequest, res, next) => {
+  try {
+    ensureAiReady();
+    const sessionId = parseSessionId(req.params.sessionId);
+    await abortSession(req.user!.id, sessionId);
+    res.json({ code: 0, message: '已停止当前任务' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/sessions/:sessionId/queue', async (req: AuthRequest, res, next) => {
+  try {
+    ensureAiReady();
+    const sessionId = parseSessionId(req.params.sessionId);
+    const message = parseMessage(req.body?.message);
+    const mode = req.body?.mode === 'steer' ? 'steer' : 'followUp';
+    await queueSessionMessage(req.user!.id, sessionId, message, mode);
+    res.json({ code: 0, data: { mode }, message: mode === 'steer' ? '已调整当前任务' : '消息已排队' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /**
- * POST /agent/chat  —— 流式聊天（SSE）。
- *
- * 请求体：{ message: string, sessionId?: string }
- * 响应：text/event-stream，逐条推送 pi 事件（透传），末尾推一个 { type: 'done' } 收尾。
- *
- * 事件类型（前端按 type 处理）：
- * - message_start / message_update / message_end：助手消息（含流式文本增量）
- * - tool_execution_start / tool_execution_end：工具（skill 的 bash/curl）执行
- * - turn_end：本轮结束
- * - error：错误
- * - done：本次 SSE 流结束
+ * 流式聊天。兼容旧客户端的 sessionId 字段；未传时自动创建新会话。
  */
 router.post('/chat', async (req: AuthRequest, res: Response, next) => {
-  // AI 未配置时直接返回 503（不走 SSE，普通 JSON 错误）
-  if (!isAiReady()) {
-    return res.status(503).json({
-      code: 503,
-      message: 'AI 助手未配置，请联系管理员在服务端配置 AI_API_KEY 后重启服务',
-    });
+  try {
+    ensureAiReady();
+  } catch (error) {
+    return next(error);
   }
 
-  const { message, sessionId } = req.body || {};
-  if (!message || typeof message !== 'string' || !message.trim()) {
-    return res.status(400).json({ code: 400, message: '消息不能为空' });
+  let message: string;
+  let requestedSessionId: string | undefined;
+  let regenerate = false;
+  try {
+    message = parseMessage(req.body?.message);
+    requestedSessionId = req.body?.sessionId ? parseSessionId(req.body.sessionId) : undefined;
+    regenerate = req.body?.regenerate === true;
+    if (regenerate && !requestedSessionId) throw new BusinessError('重新生成需要指定会话');
+  } catch (error) {
+    return next(error);
   }
 
-  // 设置 SSE 响应头（关键：禁用压缩、禁用 buffering）
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // nginx 不缓冲
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
-  // 客户端断开时标记，避免继续写已关闭的连接
   let clientClosed = false;
-  req.on('close', () => { clientClosed = true; });
+  let streamCompleted = false;
+  let activeSessionId: string | undefined;
+  res.on('close', () => {
+    clientClosed = true;
+    if (!streamCompleted && activeSessionId) {
+      abortSession(req.user!.id, activeSessionId).catch((error) => {
+        logger.warn({ err: error, sessionId: activeSessionId }, '[agent] 客户端断开后停止会话失败');
+      });
+    }
+  });
 
-  // 发送一个 meta 帧让前端知道流已建立
   writeSse(res, { type: 'meta', userId: req.user!.id });
 
   try {
-    // 创建/复用会话：onEvent 把 pi 事件逐条转 SSE 推给前端
-    const { sessionId: sid } = await getOrCreateSession(req.user!.id, sessionId, {
+    const result = await getOrCreateSession(req.user!.id, requestedSessionId, {
       onEvent: (event) => {
-        if (clientClosed) return;
-        try {
-          writeSse(res, event);
-        } catch (e) {
-          logger.error({ err: e }, '[agent] SSE 写入失败');
-        }
+        if (!clientClosed) writeSse(res, event);
       },
-      onError: (errMsg) => {
-        if (clientClosed) return;
-        try {
-          writeSse(res, { type: 'error', message: errMsg });
-        } catch { /* 连接已关 */ }
+      onError: (errorMessage) => {
+        if (!clientClosed) writeSse(res, { type: 'error', message: errorMessage });
       },
     });
-    writeSse(res, { type: 'session', sessionId: sid });
-
-    // 发送消息；promptSession 在 worker 完成本次 turn 时 resolve
-    await promptSession(sid, message);
+    activeSessionId = result.sessionId;
+    writeSse(res, { type: 'session', sessionId: result.sessionId, isNew: result.isNew });
+    if (regenerate) await regenerateSession(req.user!.id, result.sessionId, message);
+    else await promptSession(req.user!.id, result.sessionId, message);
 
     if (!clientClosed) {
-      writeSse(res, { type: 'done', sessionId: sid });
+      streamCompleted = true;
+      writeSse(res, { type: 'done', sessionId: result.sessionId });
       res.end();
     }
-  } catch (e: any) {
-    logger.error({ err: e }, '[agent] chat 处理失败');
+  } catch (error: any) {
+    logger.error({ err: error }, '[agent] chat 处理失败');
     if (!clientClosed) {
-      try {
-        writeSse(res, { type: 'error', message: e?.message || 'AI 处理失败' });
-        res.end();
-      } catch {
-        /* 连接已关 */
-      }
+      streamCompleted = true;
+      writeSse(res, { type: 'error', message: error?.message || 'AI 处理失败' });
+      res.end();
     }
   }
 });

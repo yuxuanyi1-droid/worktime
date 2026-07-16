@@ -27,7 +27,7 @@ function buildUrl(): string {
  * @returns AbortController（调用 .abort() 可中断流，如用户关闭抽屉）
  */
 export function startChat(
-  body: { message: string; sessionId?: string },
+  body: { message: string; sessionId?: string; regenerate?: boolean },
   handlers: SseHandlers,
 ): AbortController {
   const controller = new AbortController();

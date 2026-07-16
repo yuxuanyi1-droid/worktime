@@ -1,172 +1,220 @@
 import { Worker } from 'node:worker_threads';
-import path from 'path';
+import crypto from 'node:crypto';
+import path from 'node:path';
 import { logger } from '../utils/logger';
 import { aiConfig, aiReady, piModelsJsonPath } from '../config/ai';
 import { PatService } from '../services/patService';
 
-/**
- * pi agent 主线程适配层。
- *
- * pi SDK 在 worker 线程运行（agentWorker.ts），主线程通过消息驱动。
- * 原因：pi 是纯 ESM 大包，在已加载 CJS 模块的主线程里动态 import() 会死锁事件循环。
- *
- * 单 worker 实例承载所有用户的 pi 会话（pi 的会话在进程内隔离，靠 sessionId 区分）。
- * worker 启动时 import pi（~1.2s），就绪后处理 create/prompt/dispose 消息。
- */
-
-// worker 文件：tsx 运行时直接加载 .ts；生产构建后用 .js。
-// 用 existsSync 兼容两种场景。
 const WORKER_FILE = ((): string => {
   const base = path.resolve(__dirname, 'agentWorker');
   const fs = require('fs');
   return fs.existsSync(base + '.ts') ? base + '.ts' : base + '.js';
 })();
 
-let worker: Worker | null = null;
-let workerReady = false;
-let workerReadyResolvers: Array<() => void> = [];
-
-/** 会话级回调注册：sessionId → { onEvent, onCreated, onError, resolvePrompt } */
 interface SessionCallbacks {
   onEvent?: (event: any) => void;
-  onCreated?: () => void;
   onError?: (message: string) => void;
-  resolvePrompt?: () => void;
 }
-const sessionCallbacks = new Map<string, SessionCallbacks>();
 
-/** 后端进程内调本机 API 的 base 地址（PORT 与 app 一致） */
+interface PendingRequest {
+  resolve: (message: any) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+export interface AgentSessionSummary {
+  id: string;
+  title: string;
+  preview: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+let worker: Worker | null = null;
+let workerReady = false;
+let workerReadyPromise: Promise<void> | null = null;
+const pendingRequests = new Map<string, PendingRequest>();
+const sessionCallbacks = new Map<string, SessionCallbacks>();
+const sessionOwners = new Map<string, number>();
+
 function buildWorktimeApiBase(): string {
   const port = Number(process.env.PORT) || 3000;
   const base = (process.env.BASE_PATH || '').replace(/\/+$/, '');
   return `http://127.0.0.1:${port}${base}/api/v1`;
 }
 
-/** 启动 worker（服务启动时调用一次）。返回 ready promise，供预加载等待。 */
-let workerReadyPromise: Promise<void> | null = null;
+function settleRequest(message: any): boolean {
+  if (!message.requestId) return false;
+  const pending = pendingRequests.get(message.requestId);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingRequests.delete(message.requestId);
+  if (message.type === 'error') pending.reject(new Error(message.message || 'Agent 操作失败'));
+  else pending.resolve(message);
+  return true;
+}
+
+function rejectAllPending(error: Error) {
+  for (const pending of pendingRequests.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+  pendingRequests.clear();
+}
+
 export function startWorker(): Promise<void> {
   if (workerReadyPromise) return workerReadyPromise;
-  workerReadyPromise = new Promise<void>((resolve) => {
+  workerReadyPromise = new Promise<void>((resolve, reject) => {
     worker = new Worker(WORKER_FILE);
-    worker.on('message', (msg: any) => {
-      if (msg.type === 'ready') {
+    worker.on('message', (message: any) => {
+      if (message.type === 'ready') {
         workerReady = true;
         logger.info('[ai] pi worker 就绪');
-        // worker 重启后所有 session 回调失效，清空待解析的 create 请求
-        workerReadyResolvers.forEach((r) => r());
-        workerReadyResolvers = [];
         resolve();
-      } else if (msg.type === 'created') {
-        sessionCallbacks.get(msg.sessionId)?.onCreated?.();
-      } else if (msg.type === 'event') {
-        sessionCallbacks.get(msg.sessionId)?.onEvent?.(msg.payload);
-      } else if (msg.type === 'prompt-done') {
-        // worker 的一次 prompt 完成，resolve 对应的 promptSession Promise
-        sessionCallbacks.get(msg.sessionId)?.resolvePrompt?.();
-      } else if (msg.type === 'error') {
-        logger.error({ msg, sessionId: msg.sessionId }, '[ai] worker 报错');
-        sessionCallbacks.get(msg.sessionId)?.onError?.(msg.message);
-        sessionCallbacks.get(msg.sessionId)?.resolvePrompt?.();
+        return;
+      }
+      if (message.type === 'error' && !message.requestId && !message.sessionId && !workerReady) {
+        const error = new Error(message.message || 'pi worker 启动失败');
+        logger.error({ err: error }, '[ai] worker 启动失败');
+        reject(error);
+        worker?.terminate().catch(() => undefined);
+        return;
+      }
+      if (message.type === 'event') {
+        sessionCallbacks.get(message.sessionId)?.onEvent?.(message.payload);
+        return;
+      }
+      if (message.type === 'error' && message.sessionId) {
+        sessionCallbacks.get(message.sessionId)?.onError?.(message.message);
+      }
+      if (!settleRequest(message) && message.type === 'error') {
+        logger.error({ message }, '[ai] worker 报错');
       }
     });
-    worker.on('error', (err) => {
-      logger.error({ err }, '[ai] worker 线程异常');
+    worker.on('error', (error) => {
+      logger.error({ err: error }, '[ai] worker 线程异常');
       workerReady = false;
+      rejectAllPending(error);
+      reject(error);
     });
     worker.on('exit', (code) => {
       logger.warn({ code }, '[ai] worker 线程退出');
       workerReady = false;
       workerReadyPromise = null;
+      sessionOwners.clear();
+      sessionCallbacks.clear();
+      rejectAllPending(new Error('AI worker 已退出'));
     });
   });
   return workerReadyPromise;
 }
 
-/**
- * 创建（或复用）一个 chat 会话。
- * 主线程取 PAT 后通过消息传给 worker，worker 在其线程内创建 pi session。
- */
-export async function getOrCreateSession(
-  userId: number,
-  sessionId: string | undefined,
-  callbacks: SessionCallbacks,
-): Promise<{ sessionId: string; isNew: boolean }> {
-  if (!aiReady) {
-    throw new Error('AI 未配置（缺少 AI_API_KEY 或 provider 配置），请在服务端配置后重启');
-  }
-  if (!workerReady) {
-    await startWorker();
-  }
-
-  // 复用已有会话：sessionId 已在 worker 里存在。
-  // 必须更新 sessionCallbacks 为本次请求的回调（新请求有新的 SSE res / onEvent），
-  // 否则事件会发到上一轮已关闭的连接。
-  if (sessionId) {
-    sessionCallbacks.set(sessionId, callbacks);
-    return { sessionId, isNew: false };
-  }
-
-  const pat = await new PatService().getPlainForAgent(userId);
-  const worktimeApi = buildWorktimeApiBase();
-  const newSessionId = `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-  // 等 worker 的 created 回执——worker 创建 session 是异步的（reload + createAgentSession），
-  // 必须等创建完成才能 prompt，否则 prompt 发过去时 session 还没在 worker 里
-  const created = new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('创建会话超时（30s）')), 30000);
-    sessionCallbacks.set(newSessionId, {
-      ...callbacks,
-      onCreated: () => { clearTimeout(timer); resolve(); },
-      onError: (msg) => { clearTimeout(timer); reject(new Error(msg)); },
-    });
+async function requestWorker(type: string, payload: Record<string, unknown> = {}, timeoutMs = 30000): Promise<any> {
+  if (!aiReady) throw new Error('AI 未配置，请联系管理员完成服务端配置');
+  if (!workerReady) await startWorker();
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequests.delete(requestId);
+      reject(new Error('Agent 操作超时'));
+    }, timeoutMs);
+    pendingRequests.set(requestId, { resolve, reject, timer });
+    worker!.postMessage({ type, requestId, ...payload });
   });
+}
 
-  worker!.postMessage({
-    type: 'create',
-    sessionId: newSessionId,
+async function openSession(userId: number, sessionId?: string): Promise<string> {
+  const pat = await new PatService().getPlainForAgent(userId);
+  const response = await requestWorker('create', {
     userId,
+    sessionId,
     pat,
-    worktimeApi,
+    worktimeApi: buildWorktimeApiBase(),
     piModelsJsonPath,
     aiConfig: {
       piProviderName: aiConfig.piProviderName,
       apiKey: aiConfig.apiKey,
       modelId: aiConfig.modelId,
     },
-  });
-
-  await created;
-  // created 后换回持久 callbacks（onEvent/onError/resolvePrompt），供后续 prompt 用
-  sessionCallbacks.set(newSessionId, callbacks);
-  return { sessionId: newSessionId, isNew: true };
+  }, 45000);
+  sessionOwners.set(response.sessionId, userId);
+  return response.sessionId;
 }
 
-/**
- * 发送一条消息并订阅事件流。事件通过 getOrCreateSession 注册的 onEvent 回调逐条返回。
- * 返回的 Promise 在 worker 完成本次 prompt（prompt-done 或 error）时 resolve。
- */
-export function promptSession(sessionId: string, text: string): Promise<void> {
-  if (!workerReady || !worker) {
-    return Promise.reject(new Error('AI worker 未就绪'));
+async function ensureOwnedSession(userId: number, sessionId: string): Promise<string> {
+  const owner = sessionOwners.get(sessionId);
+  if (owner !== undefined) {
+    if (owner !== userId) throw new Error('会话不存在');
+    return sessionId;
   }
-  return new Promise<void>((resolve) => {
-    const cb = sessionCallbacks.get(sessionId);
-    if (cb) cb.resolvePrompt = resolve;
-    else resolve(); // 会话不存在，直接 resolve（onError 已在 worker 侧触发）
-    worker!.postMessage({ type: 'prompt', sessionId, message: text });
-  });
+  return openSession(userId, sessionId);
 }
 
-/** AI 是否就绪（供路由层快速判断） */
+export async function getOrCreateSession(
+  userId: number,
+  sessionId: string | undefined,
+  callbacks: SessionCallbacks,
+): Promise<{ sessionId: string; isNew: boolean }> {
+  const sid = sessionId ? await ensureOwnedSession(userId, sessionId) : await openSession(userId);
+  sessionCallbacks.set(sid, callbacks);
+  return { sessionId: sid, isNew: !sessionId };
+}
+
+export async function listSessions(userId: number): Promise<AgentSessionSummary[]> {
+  const response = await requestWorker('list', { userId });
+  return response.sessions;
+}
+
+export async function getSessionHistory(userId: number, sessionId: string): Promise<any[]> {
+  const sid = await ensureOwnedSession(userId, sessionId);
+  const response = await requestWorker('history', { userId, sessionId: sid });
+  return response.messages;
+}
+
+export async function promptSession(userId: number, sessionId: string, text: string): Promise<void> {
+  const sid = await ensureOwnedSession(userId, sessionId);
+  await requestWorker('prompt', { userId, sessionId: sid, message: text }, 10 * 60 * 1000);
+}
+
+export async function regenerateSession(userId: number, sessionId: string, text: string): Promise<void> {
+  const sid = await ensureOwnedSession(userId, sessionId);
+  await requestWorker('regenerate', { userId, sessionId: sid, message: text }, 10 * 60 * 1000);
+}
+
+export async function queueSessionMessage(
+  userId: number,
+  sessionId: string,
+  text: string,
+  mode: 'steer' | 'followUp' = 'followUp',
+): Promise<void> {
+  const sid = await ensureOwnedSession(userId, sessionId);
+  await requestWorker('queue', { userId, sessionId: sid, message: text, mode });
+}
+
+export async function abortSession(userId: number, sessionId: string): Promise<void> {
+  const sid = await ensureOwnedSession(userId, sessionId);
+  await requestWorker('abort', { userId, sessionId: sid });
+}
+
+export async function renameSession(userId: number, sessionId: string, title: string): Promise<void> {
+  const sid = await ensureOwnedSession(userId, sessionId);
+  await requestWorker('rename', { userId, sessionId: sid, title });
+}
+
+export async function deleteSession(userId: number, sessionId: string): Promise<void> {
+  await ensureOwnedSession(userId, sessionId);
+  await requestWorker('delete', { userId, sessionId });
+  sessionOwners.delete(sessionId);
+  sessionCallbacks.delete(sessionId);
+}
+
 export function isAiReady(): boolean {
   return aiReady;
 }
 
-/**
- * 服务启动时调用：预启动 worker 并 import pi，避免首次请求时才加载。
- */
 export function preloadPi(): void {
-  startWorker().catch((e) => {
-    logger.error({ err: e }, '[ai] 预启动 worker 失败');
+  startWorker().catch((error) => {
+    logger.error({ err: error }, '[ai] 预启动 worker 失败');
   });
 }

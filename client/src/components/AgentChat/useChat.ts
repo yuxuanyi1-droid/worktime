@@ -1,251 +1,398 @@
-import { useState, useRef, useCallback } from 'react';
+import { useCallback, useRef, useState } from 'react';
+import { agentApi, type AgentSessionSummary } from '../../api/agent';
 import { startChat } from './sseClient';
 
 export type ChatRole = 'user' | 'assistant';
+export type PartType = 'text' | 'thinking' | 'tool';
 
-/**
- * 中间过程的单个事件（按真实时序排列，保留"思考→工具→思考→工具"的交织顺序）。
- * 一个气泡的 trace 是一个有序列表，渲染时按顺序展示，不合并同类。
- */
-export interface TraceItem {
-  /** 思考片段 / 工具调用 */
-  type: 'thinking' | 'tool';
-  /** 内容：thinking=推理文本，tool=工具名标签 */
+export interface Part {
+  id: string;
+  type: PartType;
   text: string;
+  contentIndex?: number;
+  toolCallId?: string;
+  /** 工具参数或返回结果，仅用于折叠详情展示 */
+  detail?: string;
+  status?: 'running' | 'success' | 'error';
+  done?: boolean;
 }
 
 export interface ChatMessage {
   id: string;
   role: ChatRole;
-  /** 文本内容：用户消息=原文；助手消息=最终答案（最后一轮非空 text） */
-  content: string;
-  /** 中间过程（按真实时序：思考片段与工具调用交织），整体折叠展示 */
-  trace?: TraceItem[];
-  /** 正在进行的工具调用（skill 执行），展示"正在查询..." */
-  toolStatus?: { toolName: string; running: boolean } | null;
-  /** 消息是否仍在生成中 */
+  parts: Part[];
   loading?: boolean;
-  /** 错误信息 */
   error?: string;
-  /** 本次回答开始时间戳（用于计算执行耗时） */
   startTime?: number;
 }
 
 let idSeq = 0;
-const genId = () => `m${Date.now()}_${idSeq++}`;
+const genId = () => `p${Date.now()}_${idSeq++}`;
 
-/**
- * 从 pi 的 message 对象中提取纯文本。
- * message.content 通常是 [{type:'text', text:'...'}, ...]，也可能直接是字符串。
- */
-function extractText(message: any): string {
+function extractContent(message: any, type: 'text' | 'thinking'): string {
   if (!message) return '';
-  if (typeof message === 'string') return message;
+  if (type === 'text' && typeof message === 'string') return message;
   const content = message.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c: any) => (c && typeof c === 'object' && c.type === 'text' ? c.text || '' : ''))
-      .join('');
-  }
-  return '';
-}
-
-/**
- * 从 pi 的 message 对象中提取思考过程（reasoning 模型的 thinking 块）。
- * thinking 块形如 { type:'thinking', thinking:'...', thinkingSignature:'...' }。
- */
-function extractThinking(message: any): string {
-  if (!message) return '';
-  const content = message.content;
+  if (type === 'text' && typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content
-    .map((c: any) => (c && typeof c === 'object' && c.type === 'thinking' ? c.thinking || '' : ''))
+    .map((part: any) => {
+      if (!part || typeof part !== 'object' || part.type !== type) return '';
+      return type === 'text' ? part.text || '' : part.thinking || '';
+    })
     .join('');
 }
 
-/**
- * 聊天状态管理 hook。
- * 维护消息列表 + sessionId，调用后端 /agent/chat（SSE）。
- */
+function labelTool(toolName: string): string {
+  if (!toolName || toolName === 'worktime_query') return '查询工时数据';
+  return toolName;
+}
+
+function formatDetail(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2).slice(0, 20000);
+    } catch {
+      return value.slice(0, 20000);
+    }
+  }
+  if (typeof value === 'object') {
+    const result = value as any;
+    if (Array.isArray(result.content)) {
+      const text = result.content
+        .filter((item: any) => item?.type === 'text')
+        .map((item: any) => item.text || '')
+        .join('\n');
+      if (text) return formatDetail(text);
+    }
+    try {
+      return JSON.stringify(value, null, 2).slice(0, 20000);
+    } catch {
+      return String(value).slice(0, 20000);
+    }
+  }
+  return String(value);
+}
+
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessions, setSessions] = useState<AgentSessionSummary[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string>();
   const [sending, setSending] = useState(false);
-  const sessionIdRef = useRef<string | undefined>(undefined);
+  const [loadingSession, setLoadingSession] = useState(false);
+  const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
+  const sessionIdRef = useRef<string>();
+  const sendingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const initializedRef = useRef(false);
 
-  const send = useCallback((text: string) => {
+  const setSessionId = useCallback((sessionId?: string) => {
+    sessionIdRef.current = sessionId;
+    setCurrentSessionId(sessionId);
+  }, []);
+
+  const updateParts = useCallback(
+    (messageId: string, updater: (parts: Part[]) => Part[], extra?: Partial<ChatMessage>) => {
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.id === messageId
+            ? { ...message, parts: updater(message.parts), ...extra }
+            : message,
+        ),
+      );
+    },
+    [],
+  );
+
+  const refreshSessions = useCallback(async () => {
+    const response = await agentApi.getSessions();
+    setSessions(response.data);
+    return response.data;
+  }, []);
+
+  const switchSession = useCallback(async (sessionId: string) => {
+    if (sendingRef.current || sessionId === sessionIdRef.current) return;
+    setLoadingSession(true);
+    try {
+      const response = await agentApi.getHistory(sessionId);
+      setMessages(response.data);
+      setQueuedMessages([]);
+      setSessionId(sessionId);
+    } finally {
+      setLoadingSession(false);
+    }
+  }, [setSessionId]);
+
+  const initialize = useCallback(async () => {
+    if (initializedRef.current) return;
+    initializedRef.current = true;
+    try {
+      const available = await refreshSessions();
+      if (available[0] && !sessionIdRef.current) await switchSession(available[0].id);
+    } catch {
+      initializedRef.current = false;
+    }
+  }, [refreshSessions, switchSession]);
+
+  const newSession = useCallback(async () => {
+    if (sendingRef.current) return;
+    setSessionId(undefined);
+    setMessages([]);
+    setQueuedMessages([]);
+  }, [setSessionId]);
+
+  const renameSession = useCallback(async (sessionId: string, title: string) => {
+    await agentApi.renameSession(sessionId, title);
+    setSessions((previous) =>
+      previous.map((session) => (session.id === sessionId ? { ...session, title } : session)),
+    );
+  }, []);
+
+  const deleteSession = useCallback(async (sessionId: string) => {
+    if (sendingRef.current && sessionId === sessionIdRef.current) return;
+    await agentApi.deleteSession(sessionId);
+    const remaining = await refreshSessions();
+    if (sessionId === sessionIdRef.current) {
+      setSessionId(undefined);
+      setMessages([]);
+      setQueuedMessages([]);
+      if (remaining[0]) await switchSession(remaining[0].id);
+    }
+  }, [refreshSessions, setSessionId, switchSession]);
+
+  const queueMessage = useCallback(async (text: string) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return false;
+    await agentApi.queueMessage(sessionId, text, 'followUp');
+    setQueuedMessages((previous) => [...previous, text]);
+    return true;
+  }, []);
+
+  const send = useCallback(async (text: string, options?: { regenerate?: boolean }) => {
     const trimmed = text.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed) return false;
+    if (sendingRef.current) {
+      if (options?.regenerate) return false;
+      return queueMessage(trimmed);
+    }
 
-    const userMsg: ChatMessage = { id: genId(), role: 'user', content: trimmed };
-    const assistantMsg: ChatMessage = {
+    let sessionId = sessionIdRef.current;
+    if (!sessionId) {
+      const response = await agentApi.createSession();
+      sessionId = response.data.id;
+      setSessionId(sessionId);
+    }
+
+    const userMessage: ChatMessage = {
+      id: genId(),
+      role: 'user',
+      parts: [{ id: genId(), type: 'text', text: trimmed, done: true }],
+    };
+    const assistantMessage: ChatMessage = {
       id: genId(),
       role: 'assistant',
-      content: '',
+      parts: [],
       loading: true,
-      toolStatus: null,
       startTime: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    setMessages((previous) => [...previous, userMessage, assistantMessage]);
+    sendingRef.current = true;
     setSending(true);
-
-    const updateAssistant = (patch: Partial<ChatMessage>) => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === assistantMsg.id ? { ...m, ...patch } : m)),
-      );
-    };
+    const assistantId = assistantMessage.id;
 
     abortRef.current = startChat(
-      { message: trimmed, sessionId: sessionIdRef.current },
+      { message: trimmed, sessionId, regenerate: options?.regenerate },
       {
         onEvent: (event) => {
-          const subType = event.assistantMessageEvent?.type;
+          const subtype = event.assistantMessageEvent?.type;
+          const isAssistant = event.message?.role === 'assistant';
           switch (event.type) {
             case 'session':
-              sessionIdRef.current = event.sessionId;
+              setSessionId(event.sessionId);
               break;
             case 'message_start':
             case 'message_update': {
-              // 只处理 assistant 消息（pi 还会发 role:toolResult/user 等，不显示）。
-              if (event.message?.role === 'assistant') {
-                const text = extractText(event.message);
-                const thinking = extractThinking(event.message);
-                if (thinking) {
-                  // 思考段：thinking_start 新开一段；否则延续最后一段（若被打断则新开）。
-                  // 这样保留"思考→工具→思考→工具"的真实交织顺序。
-                  setMessages((prev) =>
-                    prev.map((m) => {
-                      if (m.id !== assistantMsg.id) return m;
-                      const trace = [...(m.trace ?? [])];
-                      const last = trace[trace.length - 1];
-                      const shouldAppend =
-                        subType === 'thinking_start' || !last || last.type !== 'thinking';
-                      if (shouldAppend) {
-                        trace.push({ type: 'thinking', text: thinking });
-                      } else {
-                        // 延续：更新最后一段思考的全文
-                        trace[trace.length - 1] = { type: 'thinking', text: thinking };
-                      }
-                      return { ...m, trace, loading: true };
-                    }),
-                  );
-                }
-                // text 作为正文（最终答案）流式展示
-                if (text) {
-                  updateAssistant({ content: text, loading: true });
-                }
+              if (!isAssistant) break;
+              const contentIndex = event.assistantMessageEvent?.contentIndex;
+              const isThinking = subtype?.startsWith('thinking_');
+              const isText = subtype?.startsWith('text_');
+              if (!isThinking && !isText) break;
+              const type: 'thinking' | 'text' = isThinking ? 'thinking' : 'text';
+              const content = extractContent(event.message, type);
+              if (subtype.endsWith('_start')) {
+                updateParts(assistantId, (parts) => [
+                  ...parts,
+                  { id: genId(), type, text: content, contentIndex },
+                ]);
+              } else {
+                if (!content) break;
+                updateParts(assistantId, (parts) => {
+                  let index = -1;
+                  for (let i = parts.length - 1; i >= 0; i -= 1) {
+                    const part = parts[i];
+                    if (part.type === type && part.contentIndex === contentIndex && !part.done) {
+                      index = i;
+                      break;
+                    }
+                  }
+                  if (index < 0) return parts;
+                  const updated = {
+                    ...parts[index],
+                    text: content,
+                    done: subtype.endsWith('_end') || undefined,
+                  };
+                  return [...parts.slice(0, index), updated, ...parts.slice(index + 1)];
+                });
               }
               break;
             }
-            case 'message_end':
-              // assistant 消息结束：定稿正文与思考。补 thinking 防御 pi 时序变化导致丢失。
-              if (event.message?.role === 'assistant') {
-                const patch: Partial<ChatMessage> = { loading: false };
-                const text = extractText(event.message);
-                if (text) patch.content = text;
-                const thinking = extractThinking(event.message);
-                if (thinking) {
-                  setMessages((prev) =>
-                    prev.map((m) => {
-                      if (m.id !== assistantMsg.id) return m;
-                      const trace = [...(m.trace ?? [])];
-                      const last = trace[trace.length - 1];
-                      // 仅当最后一段是 thinking 才更新（避免重复新增）
-                      if (last && last.type === 'thinking') {
-                        trace[trace.length - 1] = { type: 'thinking', text: thinking };
-                      }
-                      return { ...m, trace, ...patch };
-                    }),
-                  );
-                } else {
-                  updateAssistant(patch);
-                }
-              }
+            case 'tool_execution_start':
+              updateParts(assistantId, (parts) => [
+                ...parts,
+                {
+                  id: genId(),
+                  type: 'tool',
+                  text: labelTool(event.toolName),
+                  toolCallId: event.toolCallId,
+                  detail: formatDetail(event.args),
+                  status: 'running',
+                },
+              ]);
               break;
-            case 'tool_execution_start': {
-              // 工具调用：追加一个 tool 项。它会"打断"当前思考段——
-              // 之后的 thinking 因 last.type !== 'thinking' 会自动新开一段。
-              const label = labelTool(event.toolName);
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantMsg.id
+            case 'tool_execution_end':
+              updateParts(assistantId, (parts) =>
+                parts.map((part) =>
+                  part.type === 'tool' && part.toolCallId === event.toolCallId
                     ? {
-                        ...m,
-                        trace: [...(m.trace ?? []), { type: 'tool', text: label }],
-                        toolStatus: { toolName: label, running: true },
-                        loading: true,
+                        ...part,
+                        status: event.isError ? 'error' : 'success',
+                        detail: formatDetail(event.result) || part.detail,
+                        done: true,
                       }
-                    : m,
+                    : part,
                 ),
               );
               break;
-            }
-            case 'tool_execution_end':
-              updateAssistant({ toolStatus: null });
-              break;
-            case 'turn_end':
-              updateAssistant({ loading: false, toolStatus: null });
-              break;
             case 'error':
-              updateAssistant({ loading: false, error: event.message || 'AI 处理失败' });
+              setMessages((previous) =>
+                previous.map((message) =>
+                  message.id === assistantId
+                    ? {
+                        ...message,
+                        loading: false,
+                        error: event.message || 'AI 处理失败',
+                        parts: message.parts.map((part) => ({
+                          ...part,
+                          done: true,
+                          status: part.type === 'tool' && part.status === 'running' ? 'error' : part.status,
+                        })),
+                      }
+                    : message,
+                ),
+              );
               break;
             default:
-              // 其他事件（queue_update 等）暂不处理
               break;
           }
         },
-        onError: (msg) => {
-          updateAssistant({ loading: false, error: msg });
+        onError: (errorMessage) => {
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === assistantId
+                ? {
+                    ...message,
+                    loading: false,
+                    error: errorMessage,
+                    parts: message.parts.map((part) => ({
+                      ...part,
+                      done: true,
+                      status: part.type === 'tool' && part.status === 'running' ? 'error' : part.status,
+                    })),
+                  }
+                : message,
+            ),
+          );
+          sendingRef.current = false;
           setSending(false);
+          setQueuedMessages([]);
         },
         onDone: () => {
-          updateAssistant({ loading: false, toolStatus: null });
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === assistantId
+                ? {
+                    ...message,
+                    loading: false,
+                    parts: message.parts.map((part) => ({
+                      ...part,
+                      done: true,
+                      status: part.type === 'tool' && part.status === 'running' ? 'success' : part.status,
+                    })),
+                  }
+                : message,
+            ),
+          );
+          abortRef.current = null;
+          sendingRef.current = false;
           setSending(false);
+          setQueuedMessages([]);
+          void refreshSessions();
         },
       },
     );
-  }, [sending]);
+    return true;
+  }, [queueMessage, refreshSessions, setSessionId, updateParts]);
 
   const stop = useCallback(() => {
+    const sessionId = sessionIdRef.current;
     abortRef.current?.abort();
     abortRef.current = null;
+    if (sessionId) void agentApi.abortSession(sessionId).catch(() => undefined);
+    sendingRef.current = false;
     setSending(false);
-    setMessages((prev) =>
-      prev.map((m) => (m.loading ? { ...m, loading: false, content: m.content || '（已中断）' } : m)),
+    setQueuedMessages([]);
+    setMessages((previous) =>
+      previous.map((message) =>
+        message.loading
+          ? {
+              ...message,
+              loading: false,
+              parts: message.parts.map((part) => ({ ...part, done: true })),
+            }
+          : message,
+      ),
     );
   }, []);
 
-  const clear = useCallback(() => {
-    abortRef.current?.abort();
-    sessionIdRef.current = undefined;
-    setMessages([]);
-    setSending(false);
-  }, []);
-
-  /**
-   * 重新生成最后一条助手回答：移除最后的一组（用户+助手），重新发送该用户消息。
-   * 复用 sessionId（保持上下文），但丢弃上次回答。
-   */
   const regenerate = useCallback(() => {
-    if (sending) return;
-    setMessages((prev) => {
-      if (prev.length < 2) return prev;
-      const last = prev[prev.length - 1];
-      const userMsg = prev[prev.length - 2];
-      if (last.role !== 'assistant' || userMsg.role !== 'user') return prev;
-      // 移除最后这组（用户+助手），稍后由 send 重新加入
-      queueMicrotask(() => send(userMsg.content));
-      return prev.slice(0, -2);
+    if (sendingRef.current) return;
+    setMessages((previous) => {
+      if (previous.length < 2) return previous;
+      const assistantMessage = previous[previous.length - 1];
+      const userMessage = previous[previous.length - 2];
+      if (assistantMessage.role !== 'assistant' || userMessage.role !== 'user') return previous;
+      const userText = userMessage.parts.find((part) => part.type === 'text')?.text;
+      if (userText) queueMicrotask(() => void send(userText, { regenerate: true }));
+      return previous.slice(0, -2);
     });
-  }, [sending, send]);
+  }, [send]);
 
-  return { messages, sending, send, stop, clear, regenerate };
-}
-
-/** 把 pi 的工具名转成中文标签（bash 通常是执行 skill 的 curl） */
-function labelTool(toolName: string): string {
-  if (!toolName) return '正在处理';
-  if (toolName === 'bash') return '正在查询数据';
-  return `正在执行 ${toolName}`;
+  return {
+    messages,
+    sessions,
+    currentSessionId,
+    sending,
+    loadingSession,
+    queuedMessages,
+    initialize,
+    refreshSessions,
+    switchSession,
+    newSession,
+    renameSession,
+    deleteSession,
+    send,
+    stop,
+    regenerate,
+  };
 }
