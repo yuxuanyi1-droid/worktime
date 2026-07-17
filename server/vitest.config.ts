@@ -10,5 +10,9 @@ export default defineConfig({
     isolate: true,
     // 默认超时（DB 初始化可能较慢）
     testTimeout: 15000,
+    // 审批后置同步，避免测试依赖 Redis 队列竞态
+    env: {
+      SUBMIT_APPROVAL_SYNC: '1',
+    },
   },
 });

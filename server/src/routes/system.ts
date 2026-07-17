@@ -749,6 +749,8 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
       setting = settingRepo.create({ key, value });
       await settingRepo.save(setting);
     }
+    const { invalidateSetting } = await import('../config/cache');
+    await invalidateSetting(key);
     auditService.log({
       userId: req.user!.id,
       action: 'settings.update',

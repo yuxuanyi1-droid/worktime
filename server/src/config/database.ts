@@ -69,6 +69,7 @@ function buildDataSourceOptions(): DataSourceOptions {
   const common = { entities, migrations, synchronize: shouldSynchronize, logging: false };
 
   if (dbType === 'postgres') {
+    const poolMax = parseInt(process.env.DB_POOL_MAX || '20', 10);
     return {
       ...common,
       type: 'postgres',
@@ -79,6 +80,9 @@ function buildDataSourceOptions(): DataSourceOptions {
       database: process.env.DB_DATABASE || 'worktime',
       // 生产建议开启 ssl（按云服务商配置调整）
       ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+      extra: {
+        max: Number.isFinite(poolMax) && poolMax > 0 ? poolMax : 20,
+      },
     };
   }
 
@@ -111,11 +115,17 @@ export const databaseType = dbType;
 export async function ensureSchema(): Promise<void> {
   const queryRunner = AppDataSource.createQueryRunner();
   try {
+    // 只看业务 schema：Postgres 的 getTables() 会带出 pg_catalog 等系统表，
+    // 若用「任意非系统表」判断会导致永远跳过 synchronize。
     const tables = await queryRunner.getTables();
-    // 排除 TypeORM 系统表（各数据库不同：sqlite 有 sqlite_sequence，postgres 无）
     const SYSTEM_TABLES = new Set(['migrations', 'typeorm_metadata', 'sqlite_sequence']);
-    const hasEntityTable = tables.some((t) => !SYSTEM_TABLES.has(t.name));
-    if (!hasEntityTable) {
+    const businessTables = tables.filter((t) => {
+      const schema = (t as { schema?: string }).schema;
+      // sqlite 无 schema；postgres 业务表在 public
+      if (schema && schema !== 'public') return false;
+      return !SYSTEM_TABLES.has(t.name) && !t.name.startsWith('pg_');
+    });
+    if (businessTables.length === 0) {
       await AppDataSource.synchronize(false);
     }
   } finally {

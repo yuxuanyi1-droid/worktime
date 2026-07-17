@@ -23,123 +23,205 @@ export class ApprovalInstanceService {
     applicantId: number;
     projectId?: number | null;
   }) {
-    const version = await this.flowEngine.getDefaultFlowVersion(params.targetType);
-    const now = new Date();
+    const [result] = await this.startMany([params]);
+    return result;
+  }
 
-    // 无流程版本：直接创建已通过的 instance + auto_approve 记录（统一审计轨迹）
-    if (!version || !version.steps?.length) {
-      const autoInstance = await this.instanceRepo.save(this.instanceRepo.create({
-        targetType: params.targetType,
-        targetId: params.targetId,
-        applicantId: params.applicantId,
-        status: 'approved',
-        currentStepOrder: null,
-        totalSteps: 0,
-        flowId: version?.flowId ?? null,
-        flowVersionId: version?.id ?? null,
-        flowName: version?.flowName ?? '无审批流程',
-        flowVersionNumber: version?.version ?? 0,
-        stepsSnapshot: [],
-        submittedAt: now,
-        finishedAt: now,
-      }));
-      await this.recordRepo.save(this.recordRepo.create({
-        targetType: params.targetType as any,
-        targetId: params.targetId,
-        instanceId: autoInstance.id,
-        taskId: null,
-        approverId: params.applicantId,
-        approverName: '系统',
-        action: 'approve',
-        comment: '无审批流程，系统自动通过',
-        stepOrder: 0,
-        stepType: 'auto' as any,
-        stepLabel: '自动通过',
-      }));
-      return { status: 'approved' as const, instance: autoInstance, firstApproverIds: [] as number[] };
+  /**
+   * 批量创建审批实例：共享默认流程版本，按 (applicantId, projectId) 缓存步骤解析，
+   * 再批量 insert instance / record / task。
+   */
+  async startMany(paramsList: Array<{
+    targetType: ApprovalTargetType;
+    targetId: number;
+    applicantId: number;
+    projectId?: number | null;
+  }>): Promise<Array<{
+    status: 'approved' | 'submitted';
+    instance: ApprovalInstance;
+    firstApproverIds: number[];
+  }>> {
+    if (!paramsList.length) return [];
+
+    // 同批按 targetType 分组（工时队列通常全是 timesheet）
+    const byType = new Map<ApprovalTargetType, typeof paramsList>();
+    for (const p of paramsList) {
+      const list = byType.get(p.targetType) || [];
+      list.push(p);
+      byType.set(p.targetType, list);
     }
 
-    const steps: ApprovalInstanceStepSnapshot[] = [];
-    // 跨步骤去重：同一审批人在整个流程中只审一次（避免直属/上级兜底指向同人时的重复审批）。
-    // 规则：按人过滤——某步若部分审批人已在前序步骤出现，仅保留未重复者；全部重复则跳过该步。
-    const seenApprovers = new Set<number>();
-    for (const sourceStep of [...version.steps].sort((a, b) => a.stepOrder - b.stepOrder)) {
-      const approvers = await this.flowEngine.resolveApprovers(sourceStep, params.applicantId, params.projectId ?? undefined);
-      const uniqueApprovers = new Map<number, string>();
+    const results: Array<{
+      status: 'approved' | 'submitted';
+      instance: ApprovalInstance;
+      firstApproverIds: number[];
+    } | undefined> = new Array(paramsList.length);
 
-      for (const approver of approvers) {
-        // 排除申请人自己 + 跨步骤已出现过的审批人
-        if (approver.userId !== params.applicantId && !seenApprovers.has(approver.userId)) {
-          uniqueApprovers.set(approver.userId, approver.userName);
+    for (const [targetType, group] of byType) {
+      const version = await this.flowEngine.getDefaultFlowVersion(targetType);
+      const now = new Date();
+      const stepsCache = new Map<string, ApprovalInstanceStepSnapshot[]>();
+
+      const buildSteps = async (applicantId: number, projectId?: number | null) => {
+        const cacheKey = `${applicantId}:${projectId ?? ''}`;
+        const hit = stepsCache.get(cacheKey);
+        if (hit) return hit;
+
+        if (!version || !version.steps?.length) {
+          stepsCache.set(cacheKey, []);
+          return [];
         }
-      }
 
-      if (uniqueApprovers.size > 0) {
-        uniqueApprovers.forEach((_, id) => seenApprovers.add(id));
-        steps.push({
-          stepOrder: steps.length + 1,
-          sourceStepOrder: sourceStep.stepOrder,
-          stepType: sourceStep.stepType,
-          label: sourceStep.label,
-          approvers: Array.from(uniqueApprovers.entries()).map(([id, name]) => ({ id, name })),
-          requireAllApprovers: !!(sourceStep as any).requireAllApprovers,
+        const steps: ApprovalInstanceStepSnapshot[] = [];
+        const seenApprovers = new Set<number>();
+        for (const sourceStep of [...version.steps].sort((a, b) => a.stepOrder - b.stepOrder)) {
+          const approvers = await this.flowEngine.resolveApprovers(
+            sourceStep,
+            applicantId,
+            projectId ?? undefined,
+          );
+          const uniqueApprovers = new Map<number, string>();
+          for (const approver of approvers) {
+            if (approver.userId !== applicantId && !seenApprovers.has(approver.userId)) {
+              uniqueApprovers.set(approver.userId, approver.userName);
+            }
+          }
+          if (uniqueApprovers.size > 0) {
+            uniqueApprovers.forEach((_, id) => seenApprovers.add(id));
+            steps.push({
+              stepOrder: steps.length + 1,
+              sourceStepOrder: sourceStep.stepOrder,
+              stepType: sourceStep.stepType,
+              label: sourceStep.label,
+              approvers: Array.from(uniqueApprovers.entries()).map(([id, name]) => ({ id, name })),
+              requireAllApprovers: !!(sourceStep as any).requireAllApprovers,
+            });
+          }
+        }
+        stepsCache.set(cacheKey, steps);
+        return steps;
+      };
+
+      // 先解析全部步骤（带缓存），再一次性 save
+      const typeIndices: number[] = [];
+      paramsList.forEach((p, i) => {
+        if (p.targetType === targetType) typeIndices.push(i);
+      });
+
+      const prepared: Array<{
+        globalIdx: number;
+        params: (typeof paramsList)[0];
+        steps: ApprovalInstanceStepSnapshot[];
+      }> = [];
+
+      for (let gi = 0; gi < group.length; gi++) {
+        const p = group[gi];
+        prepared.push({
+          globalIdx: typeIndices[gi],
+          params: p,
+          steps: await buildSteps(p.applicantId, p.projectId),
         });
       }
+
+      const instanceEntities = prepared.map(({ params: p, steps }) => {
+        const noFlow = !version || !version.steps?.length;
+        if (noFlow) {
+          return this.instanceRepo.create({
+            targetType: p.targetType,
+            targetId: p.targetId,
+            applicantId: p.applicantId,
+            status: 'approved',
+            currentStepOrder: null,
+            totalSteps: 0,
+            flowId: version?.flowId ?? null,
+            flowVersionId: version?.id ?? null,
+            flowName: version?.flowName ?? '无审批流程',
+            flowVersionNumber: version?.version ?? 0,
+            stepsSnapshot: [],
+            submittedAt: now,
+            finishedAt: now,
+          });
+        }
+        return this.instanceRepo.create({
+          targetType: p.targetType,
+          targetId: p.targetId,
+          applicantId: p.applicantId,
+          status: steps.length ? 'pending' : 'approved',
+          currentStepOrder: steps.length ? 1 : null,
+          totalSteps: steps.length,
+          flowId: version!.flowId,
+          flowVersionId: version!.id,
+          flowName: version!.flowName,
+          flowVersionNumber: version!.version,
+          stepsSnapshot: steps,
+          submittedAt: now,
+          finishedAt: steps.length ? null : now,
+        });
+      });
+
+      const savedInstances = await this.instanceRepo.save(instanceEntities);
+
+      const autoRecords: ApprovalRecord[] = [];
+      const tasks: ApprovalTask[] = [];
+
+      prepared.forEach((row, i) => {
+        const instance = savedInstances[i];
+        const steps = row.steps;
+        const noFlow = !version || !version.steps?.length;
+        const autoApproved = noFlow || steps.length === 0;
+
+        if (autoApproved) {
+          autoRecords.push(this.recordRepo.create({
+            targetType: row.params.targetType as any,
+            targetId: row.params.targetId,
+            instanceId: instance.id,
+            taskId: null,
+            approverId: row.params.applicantId,
+            approverName: '系统',
+            action: 'approve',
+            comment: noFlow ? '无审批流程，系统自动通过' : '无审批人，系统自动通过',
+            stepOrder: 0,
+            stepType: 'auto' as any,
+            stepLabel: '自动通过',
+          }));
+          results[row.globalIdx] = {
+            status: 'approved',
+            instance,
+            firstApproverIds: [],
+          };
+        } else {
+          for (const step of steps) {
+            for (const approver of step.approvers) {
+              tasks.push(this.taskRepo.create({
+                instanceId: instance.id,
+                targetType: row.params.targetType,
+                targetId: row.params.targetId,
+                stepOrder: step.stepOrder,
+                sourceStepOrder: step.sourceStepOrder,
+                stepType: step.stepType,
+                stepLabel: step.label,
+                approverId: approver.id,
+                approverName: approver.name,
+                status: step.stepOrder === 1 ? 'pending' : 'waiting',
+              }));
+            }
+          }
+          results[row.globalIdx] = {
+            status: 'submitted',
+            instance,
+            firstApproverIds: steps[0].approvers.map((a) => a.id),
+          };
+        }
+      });
+
+      if (autoRecords.length) await this.recordRepo.save(autoRecords);
+      if (tasks.length) await this.taskRepo.save(tasks);
     }
 
-    const instance = await this.instanceRepo.save(this.instanceRepo.create({
-      targetType: params.targetType,
-      targetId: params.targetId,
-      applicantId: params.applicantId,
-      status: steps.length ? 'pending' : 'approved',
-      currentStepOrder: steps.length ? 1 : null,
-      totalSteps: steps.length,
-      flowId: version.flowId,
-      flowVersionId: version.id,
-      flowName: version.flowName,
-      flowVersionNumber: version.version,
-      stepsSnapshot: steps,
-      submittedAt: now,
-      finishedAt: steps.length ? null : now,
-    }));
-
-    if (!steps.length) {
-      // 自动通过：写一条 auto_approve 审批记录，保留审计轨迹（A5）
-      await this.recordRepo.save(this.recordRepo.create({
-        targetType: params.targetType as any,
-        targetId: params.targetId,
-        instanceId: instance.id,
-        taskId: null,
-        approverId: params.applicantId,
-        approverName: '系统',
-        action: 'approve',
-        comment: '无审批人，系统自动通过',
-        stepOrder: 0,
-        stepType: 'auto' as any,
-        stepLabel: '自动通过',
-      }));
-      return { status: 'approved' as const, instance, firstApproverIds: [] as number[] };
-    }
-
-    const tasks = steps.flatMap(step => step.approvers.map(approver => this.taskRepo.create({
-      instanceId: instance.id,
-      targetType: params.targetType,
-      targetId: params.targetId,
-      stepOrder: step.stepOrder,
-      sourceStepOrder: step.sourceStepOrder,
-      stepType: step.stepType,
-      stepLabel: step.label,
-      approverId: approver.id,
-      approverName: approver.name,
-      status: step.stepOrder === 1 ? 'pending' : 'waiting',
-    })));
-    await this.taskRepo.save(tasks);
-
-    return {
-      status: 'submitted' as const,
-      instance,
-      firstApproverIds: steps[0].approvers.map(approver => approver.id),
-    };
+    return results.map((r, i) => {
+      if (!r) throw new Error(`startMany 结果缺失 index=${i}`);
+      return r;
+    });
   }
 
   async getLatestInstance(targetType: string, targetId: number) {

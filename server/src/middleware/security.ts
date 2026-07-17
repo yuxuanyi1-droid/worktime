@@ -1,50 +1,71 @@
-import rateLimit from 'express-rate-limit';
-import { NextFunction, Request, Response } from 'express';
+import rateLimit, { type Options, type RateLimitRequestHandler } from 'express-rate-limit';
+import { RedisStore, type RedisReply } from 'rate-limit-redis';
+import { RequestHandler } from 'express';
+import { getRedis, isRedisReady } from '../config/redis';
+
+type LimiterOpts = Partial<Options> & { windowMs: number; max: number; message: object; prefix: string };
+
+function buildStore(prefix: string) {
+  const client = getRedis();
+  if (!client || !isRedisReady()) return undefined;
+  return new RedisStore({
+    prefix,
+    sendCommand: (...args: string[]) => client.sendCommand(args) as Promise<RedisReply>,
+  });
+}
+
+function createLimiter(opts: LimiterOpts): RateLimitRequestHandler {
+  const { prefix, ...rest } = opts;
+  return rateLimit({
+    standardHeaders: true,
+    legacyHeaders: false,
+    passOnStoreError: true,
+    store: buildStore(prefix),
+    ...rest,
+  });
+}
+
+/** 可在 Redis 就绪后替换实现的占位中间件 */
+function deferredLimiter(): RequestHandler & { replace: (h: RequestHandler) => void } {
+  let impl: RequestHandler = (_req, _res, next) => next();
+  const mw = ((req, res, next) => impl(req, res, next)) as RequestHandler & { replace: (h: RequestHandler) => void };
+  mw.replace = (h) => { impl = h; };
+  return mw;
+}
 
 /**
  * 全局限流：每个 IP 每 15 分钟最多 1000 次请求。
- * 生产环境应配合反向代理的 trust proxy + Redis store（多实例共享计数）。
+ * 启动时先放行，initRedis 成功后由 activateRateLimiters() 挂上真实限流（含 Redis store）。
  */
-export const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { code: 429, message: '请求过于频繁，请稍后再试' },
-});
+export const globalLimiter = deferredLimiter();
+export const loginLimiter = deferredLimiter();
+export const oidcCallbackLimiter = deferredLimiter();
+export const agentLimiter = deferredLimiter();
 
-/**
- * 登录接口限流：同一 IP 每 10 分钟最多 20 次登录尝试。
- * 与 auth.ts 内存级登录失败计数互补——后者防单账号爆破，这里防 IP 维度扫描。
- */
-export const loginLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { code: 429, message: '登录尝试过于频繁，请稍后再试' },
-});
-
-/**
- * OIDC 回调限流：同一 IP 每 10 分钟最多 30 次回调。
- * 回调是换 token 的敏感端点，限制比通用接口更严格以防重放/探测。
- */
-export const oidcCallbackLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { code: 429, message: 'SSO 回调请求过于频繁，请稍后再试' },
-});
-
-/**
- * AI 聊天限流：同一 IP 每分钟最多 30 次对话。
- * 每次对话会触发 LLM 调用（成本与延时较高），需比通用接口更严格。
- */
-export const agentLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { code: 429, message: '对话请求过于频繁，请稍后再试' },
-});
+/** Redis 连接完成后（或确认无 Redis）调用，启用限流 */
+export function activateRateLimiters(): void {
+  globalLimiter.replace(createLimiter({
+    windowMs: 15 * 60 * 1000,
+    max: Number(process.env.GLOBAL_RATE_MAX || 1000),
+    prefix: 'rl:global:',
+    message: { code: 429, message: '请求过于频繁，请稍后再试' },
+  }));
+  loginLimiter.replace(createLimiter({
+    windowMs: 10 * 60 * 1000,
+    max: Number(process.env.LOGIN_RATE_MAX || 20),
+    prefix: 'rl:login:',
+    message: { code: 429, message: '登录尝试过于频繁，请稍后再试' },
+  }));
+  oidcCallbackLimiter.replace(createLimiter({
+    windowMs: 10 * 60 * 1000,
+    max: 30,
+    prefix: 'rl:oidc:',
+    message: { code: 429, message: 'SSO 回调请求过于频繁，请稍后再试' },
+  }));
+  agentLimiter.replace(createLimiter({
+    windowMs: 60 * 1000,
+    max: 30,
+    prefix: 'rl:agent:',
+    message: { code: 429, message: '对话请求过于频繁，请稍后再试' },
+  }));
+}

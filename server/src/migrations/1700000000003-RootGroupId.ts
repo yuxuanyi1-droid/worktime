@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import { MigrationInterface, QueryRunner, TableColumn, TableIndex } from 'typeorm';
 
 /**
  * 修改链根分组：给 timesheets 加 rootGroupId 列。
@@ -15,35 +15,51 @@ export class RootGroupId1700000000003 implements MigrationInterface {
   name = 'RootGroupId1700000000003';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // SQLite 不支持 ADD COLUMN IF NOT EXISTS，用 catch 兜底（列已存在则跳过）
-    try {
-      await queryRunner.query(`ALTER TABLE "timesheets" ADD COLUMN "rootGroupId" integer`);
-    } catch {
-      // 列已存在，跳过
+    const table = await queryRunner.getTable('timesheets');
+    if (!table) return;
+
+    if (!table.findColumnByName('rootGroupId')) {
+      await queryRunner.addColumn(
+        'timesheets',
+        new TableColumn({
+          name: 'rootGroupId',
+          type: 'integer',
+          isNullable: true,
+        }),
+      );
     }
-    // 回填：rootGroupId 为空但 submissionGroupId 非空的历史记录，以自身 submissionGroupId 为根
-    try {
-      await queryRunner.query(`UPDATE "timesheets" SET "rootGroupId" = "submissionGroupId" WHERE "rootGroupId" IS NULL AND "submissionGroupId" IS NOT NULL`);
-    } catch {
-      // 忽略回填失败
-    }
-    try {
-      await queryRunner.query(`CREATE INDEX "idx_timesheet_root_group" ON "timesheets" ("rootGroupId")`);
-    } catch {
-      // 索引已存在，跳过
+
+    await queryRunner.query(
+      `UPDATE "timesheets" SET "rootGroupId" = "submissionGroupId" WHERE "rootGroupId" IS NULL AND "submissionGroupId" IS NOT NULL`,
+    );
+
+    const hasIndex = table.indices.some((i) => i.name === 'idx_timesheet_root_group')
+      || (await queryRunner.getTable('timesheets'))?.indices.some((i) => i.name === 'idx_timesheet_root_group');
+    if (!hasIndex) {
+      try {
+        await queryRunner.createIndex(
+          'timesheets',
+          new TableIndex({
+            name: 'idx_timesheet_root_group',
+            columnNames: ['rootGroupId'],
+          }),
+        );
+      } catch {
+        // 索引已存在
+      }
     }
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    const table = await queryRunner.getTable('timesheets');
+    if (!table) return;
     try {
-      await queryRunner.query(`DROP INDEX "idx_timesheet_root_group"`);
+      await queryRunner.dropIndex('timesheets', 'idx_timesheet_root_group');
     } catch {
-      // 忽略
+      // ignore
     }
-    try {
-      await queryRunner.query(`ALTER TABLE "timesheets" DROP COLUMN "rootGroupId"`);
-    } catch {
-      // 列不存在，跳过
+    if (table.findColumnByName('rootGroupId')) {
+      await queryRunner.dropColumn('timesheets', 'rootGroupId');
     }
   }
 }

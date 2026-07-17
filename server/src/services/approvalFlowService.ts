@@ -13,6 +13,13 @@ import {
   ApprovalFlowVersion,
   ApprovalTargetType,
 } from '../entities/ApprovalFlowVersion';
+import {
+  CacheKeys,
+  cacheGet,
+  cacheSet,
+  invalidateAllDefaultFlows,
+  invalidateDefaultFlow,
+} from '../config/cache';
 
 type ApprovalFlowStepLike = {
   stepOrder: number;
@@ -20,6 +27,25 @@ type ApprovalFlowStepLike = {
   label: string;
   parentLevel?: number;
   customApproverId?: number | null;
+};
+
+/** 项目审批用投影（managers + module SE），供 resolveApprovers 缓存 */
+export type ProjectApprovalCache = {
+  managers: { userId: number; userName: string }[];
+  moduleSEs: { groupId: number; userId: number; userName: string }[];
+};
+
+/** 默认可审批流版本的可序列化快照 */
+type CachedFlowVersion = {
+  id: number;
+  flowId: number | null;
+  flowName: string;
+  type: ApprovalTargetType;
+  version: number;
+  description: string | null;
+  isDefault: boolean;
+  enabled: boolean;
+  steps: ApprovalFlowStepSnapshot[];
 };
 
 /**
@@ -50,6 +76,30 @@ export class ApprovalFlowEngine {
     // 按步骤顺序排列
     flow.steps.sort((a, b) => a.stepOrder - b.stepOrder);
     return flow as any;
+  }
+
+  /** 加载项目审批配置（managers + SE），带 Redis 缓存 */
+  async getProjectApprovalConfig(projectId: number): Promise<ProjectApprovalCache> {
+    const cacheKey = CacheKeys.projectApproval(projectId);
+    const cached = await cacheGet<ProjectApprovalCache>(cacheKey);
+    if (cached) return cached;
+
+    const project = await this.projectRepo.findOne({
+      where: { id: projectId },
+      relations: ['managers'],
+    });
+    const ses = await this.projectSERepo.find({
+      where: { projectId },
+      relations: ['user'],
+    });
+    const data: ProjectApprovalCache = {
+      managers: (project?.managers || []).map((m) => ({ userId: m.id, userName: m.realName })),
+      moduleSEs: ses
+        .filter((se) => se.user)
+        .map((se) => ({ groupId: se.groupId, userId: se.user.id, userName: se.user.realName })),
+    };
+    await cacheSet(cacheKey, data);
+    return data;
   }
 
   /**
@@ -125,14 +175,13 @@ export class ApprovalFlowEngine {
         if (!projectId) return [];
         if (!applicant.group) return [];
 
+        const projectCfg = await this.getProjectApprovalConfig(projectId);
         // 沿组层级向上查找匹配的SE
         let searchGroupId: number | null = applicant.group.id;
         while (searchGroupId) {
-          const ses = await this.projectSERepo.find({
-            where: { projectId, groupId: searchGroupId },
-            relations: ['user'],
-          });
-          const validSes = ses.filter(se => se.user).map(se => ({ userId: se.user.id, userName: se.user.realName }));
+          const validSes = projectCfg.moduleSEs
+            .filter((se) => se.groupId === searchGroupId)
+            .map((se) => ({ userId: se.userId, userName: se.userName }));
           if (validSes.length > 0) return validSes;
 
           // 向上一级组查找
@@ -148,12 +197,8 @@ export class ApprovalFlowEngine {
       case 'project_manager': {
         // 项目管理员（所有管理员）
         if (!projectId) return [];
-        const project = await this.projectRepo.findOne({
-          where: { id: projectId },
-          relations: ['managers'],
-        });
-        if (!project?.managers?.length) return [];
-        return project.managers.map(m => ({ userId: m.id, userName: m.realName }));
+        const projectCfg = await this.getProjectApprovalConfig(projectId);
+        return projectCfg.managers.map((m) => ({ userId: m.userId, userName: m.userName }));
       }
 
       case 'custom': {
@@ -253,6 +298,13 @@ export class ApprovalFlowEngine {
   }
 
   async getDefaultFlowVersion(type: ApprovalTargetType) {
+    const cacheKey = CacheKeys.defaultFlow(type);
+    const cached = await cacheGet<CachedFlowVersion>(cacheKey);
+    if (cached) {
+      // 还原为 ApprovalFlowVersion 形状（下游只读字段）
+      return cached as unknown as ApprovalFlowVersion;
+    }
+
     const flow = await this.getDefaultFlow(type);
     if (!flow) return null;
 
@@ -263,6 +315,19 @@ export class ApprovalFlowEngine {
     if (!version) {
       version = await this.createFlowVersion(flow.id);
     }
+
+    const snap: CachedFlowVersion = {
+      id: version.id,
+      flowId: version.flowId,
+      flowName: version.flowName,
+      type: version.type,
+      version: version.version,
+      description: version.description,
+      isDefault: version.isDefault,
+      enabled: version.enabled,
+      steps: version.steps,
+    };
+    await cacheSet(cacheKey, snap);
     return version;
   }
 
@@ -289,6 +354,7 @@ export class ApprovalFlowEngine {
     });
     const saved = await this.flowRepo.save(flow);
     await this.createFlowVersion(saved.id);
+    await invalidateDefaultFlow(data.type);
     return this.getFlow(saved.id);
   }
 
@@ -321,11 +387,16 @@ export class ApprovalFlowEngine {
 
     const saved = await this.flowRepo.save(flow);
     await this.createFlowVersion(saved.id);
+    await invalidateDefaultFlow(flow.type);
     return this.getFlow(saved.id);
   }
 
   async deleteFlow(id: number) {
+    const flow = await this.flowRepo.findOne({ where: { id } });
     await this.stepRepo.delete({ flowId: id });
-    return this.flowRepo.delete(id);
+    const result = await this.flowRepo.delete(id);
+    if (flow) await invalidateDefaultFlow(flow.type);
+    else await invalidateAllDefaultFlows();
+    return result;
   }
 }

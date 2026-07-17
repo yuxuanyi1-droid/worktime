@@ -66,10 +66,17 @@ function snapToStep(value: number, step: number): number {
  * JS 浮点 0.1+0.2=0.30000000000000004，直接 reduce 多个 0.1 步长会得到
  * 1.0999999999999999 这种值。这里累加后四舍五入到 2 位小数
  * （最小步长 0.1，合计最多 1 位小数，2 位容差足够消除误差）。
+ * 注意：Postgres numeric 经 JSON 常为字符串，必须 Number()，否则 "0.5"+0.5 会变成字符串拼接。
  */
-function sumRound(values: number[]): number {
-  const total = values.reduce((s, v) => s + (v || 0), 0);
+function sumRound(values: Array<number | string | null | undefined>): number {
+  const total = values.reduce<number>((s, v) => s + (Number(v) || 0), 0);
   return Number(total.toFixed(2));
+}
+
+/** API 工时天数 → number（兼容 PG numeric 字符串） */
+function toDays(raw: unknown): number {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export default function TimesheetPage() {
@@ -196,7 +203,7 @@ export default function TimesheetPage() {
           const days: Record<string, number> = {};
           let desc = '';
           group.items.forEach(item => {
-            days[item.date] = item.days;
+            days[item.date] = toDays(item.days);
             if (item.description) desc = item.description;
           });
           return {
@@ -337,7 +344,7 @@ export default function TimesheetPage() {
           // 将上周的周几映射到本周的周几
           const dow = dayjs(item.date).isoWeekday();
           const targetDate = currentWeekStart.add(dow - 1, 'day').format('YYYY-MM-DD');
-          days[targetDate] = item.days;
+          days[targetDate] = toDays(item.days);
           if (item.description) desc = item.description;
         });
         return { key: `row_${++rowKeyCounter}_${Date.now()}`, projectId: Number(pid), description: desc, days };
