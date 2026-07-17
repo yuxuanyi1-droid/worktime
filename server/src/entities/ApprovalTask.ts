@@ -70,7 +70,7 @@ export class ApprovalTask {
   @Column({ type: 'text', nullable: true })
   comment!: string | null;
 
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ type: 'timestamp', nullable: true })
   actedAt!: Date | null;
 
   @CreateDateColumn()

@@ -46,11 +46,11 @@ export class PersonalAccessToken {
   @Column({ type: 'varchar', length: 500, nullable: true })
   scopes!: string | null;
 
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ type: 'timestamp', nullable: true })
   lastUsedAt!: Date | null;
 
   /** 过期时间，空=永不过期 */
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ type: 'timestamp', nullable: true })
   expiresAt!: Date | null;
 
   @CreateDateColumn()

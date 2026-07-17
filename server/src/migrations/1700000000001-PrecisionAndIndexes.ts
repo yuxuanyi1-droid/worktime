@@ -13,10 +13,16 @@ export class PrecisionAndIndexes1700000000001 implements MigrationInterface {
   name = 'PrecisionAndIndexes1700000000001';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // 1. days/totalDays 类型修正（SQLite 用 CAST 转 numeric 亲和，幂等）
+    const hasTimesheets = await queryRunner.hasTable('timesheets');
+    if (!hasTimesheets) {
+      // 空库：ensureSchema 的 synchronize 尚未建表（或由后续流程建表），跳过数据修正
+      return;
+    }
+
+    // 1. days/totalDays 类型修正（SQLite 用 CAST；Postgres 同样可用 REAL/数值亲和）
     await queryRunner.query(`UPDATE timesheets SET days = CAST(days AS REAL) WHERE 1=1`);
     await queryRunner.query(`UPDATE overtime_applications SET days = CAST(days AS REAL) WHERE 1=1`);
-    await queryRunner.query(`UPDATE weekly_reports SET totalDays = CAST(totalDays AS REAL) WHERE 1=1`);
+    await queryRunner.query(`UPDATE weekly_reports SET "totalDays" = CAST("totalDays" AS REAL) WHERE 1=1`);
 
     // 2. timesheets 索引（IF NOT EXISTS 幂等，synchronize 已建的不会重复）
     await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_timesheet_user_date" ON "timesheets" ("userId", "date")`);

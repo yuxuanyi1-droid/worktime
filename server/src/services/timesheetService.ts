@@ -11,6 +11,12 @@ import { ApprovalInstanceService } from './approvalInstanceService';
 import { AccessPolicyService, OrgSnapshot } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
 import { round2 } from '../utils/validation';
+import { logger } from '../utils/logger';
+import { CacheKeys, cacheGet, cacheSet } from '../config/cache';
+import {
+  enqueueTimesheetApprovals,
+  type TimesheetApprovalJob,
+} from './approvalQueue';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 dayjs.extend(isoWeek);
@@ -65,11 +71,23 @@ export class TimesheetService {
     return this.repo.create({ ...data, ...orgSnapshot });
   }
 
+  /** 读系统设置（Redis 缓存，未命中回落 DB） */
+  private async getSettingValue(settingKey: string): Promise<string | null> {
+    const cacheKey = CacheKeys.setting(settingKey);
+    const cached = await cacheGet<{ value: string | null }>(cacheKey);
+    if (cached) return cached.value;
+
+    const row = await this.settingRepo.findOne({ where: { key: settingKey } });
+    const value = row?.value ?? null;
+    await cacheSet(cacheKey, { value });
+    return value;
+  }
+
   /** 检查工时锁定 */
   private async checkTimesheetLock(dates: string[]) {
-    const lockSetting = await this.settingRepo.findOne({ where: { key: 'timesheet_lock_day' } });
-    if (!lockSetting?.value) return;
-    const lockDay = parseInt(lockSetting.value, 10);
+    const raw = await this.getSettingValue('timesheet_lock_day');
+    if (!raw) return;
+    const lockDay = parseInt(raw, 10);
     if (isNaN(lockDay) || lockDay < 1 || lockDay > 28) return;
     const now = dayjs();
     const currentMonthStart = now.startOf('month');
@@ -90,8 +108,8 @@ export class TimesheetService {
 
   /** 读取工时填报单位步长（天）；缺失/非法返回默认 0.5 */
   private async loadUnitStep(): Promise<number> {
-    const setting = await this.settingRepo.findOne({ where: { key: 'timesheet_unit' } });
-    const n = Number(setting?.value);
+    const raw = await this.getSettingValue('timesheet_unit');
+    const n = Number(raw);
     return TimesheetService.UNIT_OPTIONS.includes(n) ? n : TimesheetService.DEFAULT_UNIT;
   }
 
@@ -227,22 +245,135 @@ export class TimesheetService {
     const records = dedupByLatestSubmissionGroup(rawRecords);
     return records.sort((a, b) => a.date.localeCompare(b.date));
   }
-  /** 在事务内原子地分配下一个 submissionGroupId */
+  /** 在事务内原子地分配下一个 submissionGroupId（优先 Redis INCR，失败回退 DB 行锁） */
   private async nextSubmissionGroupId(): Promise<number> {
-    const existing = await this.seqRepo.findOneBy({ id: 1 });
-    if (!existing) {
-      const maxGroup = await this.repo.createQueryBuilder('t')
-        .select('MAX(t.submissionGroupId)', 'maxId')
-        .getRawOne<{ maxId: number | null }>();
-      // 关键：currentValue 必须等于返回的 nextId。
-      // 若写入 seed 而返回 seed+1，下次调用会从 seed 自增到 seed+1，与本次返回值撞车。
-      const nextId = (maxGroup?.maxId ?? 0) + 1;
-      await this.seqRepo.save(this.seqRepo.create({ id: 1, currentValue: nextId }));
-      return nextId;
+    const ids = await this.nextSubmissionGroupIds(1);
+    return ids[0];
+  }
+
+  /** 一次分配 count 个连续序号，减少多项目提交往返 */
+  private async nextSubmissionGroupIds(count: number): Promise<number[]> {
+    if (count <= 0) return [];
+    const { redisNextSubmissionGroupIds } = await import('../config/redis');
+    const fromRedis = await redisNextSubmissionGroupIds(count);
+    if (fromRedis) return fromRedis;
+
+    const out: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const existing = await this.seqRepo.findOneBy({ id: 1 });
+      if (!existing) {
+        const maxGroup = await this.repo.createQueryBuilder('t')
+          .select('MAX(t.submissionGroupId)', 'maxId')
+          .getRawOne<{ maxId: number | null }>();
+        const nextId = (maxGroup?.maxId ?? 0) + 1;
+        await this.seqRepo.save(this.seqRepo.create({ id: 1, currentValue: nextId }));
+        out.push(nextId);
+        continue;
+      }
+      await this.seqRepo.increment({ id: 1 }, 'currentValue', 1);
+      const updated = await this.seqRepo.findOneBy({ id: 1 });
+      out.push(updated!.currentValue);
     }
-    await this.seqRepo.increment({ id: 1 }, 'currentValue', 1);
-    const updated = await this.seqRepo.findOneBy({ id: 1 });
-    return updated!.currentValue;
+    return out;
+  }
+
+  /**
+   * 事务提交后创建审批实例并回写工时状态。
+   * - SUBMIT_APPROVAL_SYNC=1：同步执行（测试）
+   * - 否则优先入 Redis 队列由 worker 消费；入队失败则 setImmediate 降级
+   */
+  private scheduleTimesheetApprovals(jobs: TimesheetApprovalJob[]): Promise<void> | void {
+    if (!jobs.length) return;
+    if (process.env.SUBMIT_APPROVAL_SYNC === '1') {
+      return this.processApprovalJobs(jobs).catch((err) => {
+        logger.error({ err, jobs: jobs.map((j) => j.targetId) }, '[timesheet] 后置审批失败');
+      });
+    }
+    return enqueueTimesheetApprovals(jobs).then((ok) => {
+      if (ok) return;
+      setImmediate(() => {
+        this.processApprovalJobs(jobs).catch((err) => {
+          logger.error({ err, jobs: jobs.map((j) => j.targetId) }, '[timesheet] 后置审批降级失败');
+        });
+      });
+    });
+  }
+
+  /** 供队列 worker / 同步路径调用（支持批量 start） */
+  async processApprovalJobs(jobs: TimesheetApprovalJob[]) {
+    if (!jobs.length) return;
+    const notifications: PendingNotification[] = [];
+    const svc = new TimesheetService();
+    const submitterCache = new Map<number, User | null>();
+
+    const heads = await svc.repo.findBy({ id: In(jobs.map((j) => j.targetId)) });
+    const headById = new Map(heads.map((h) => [h.id, h]));
+
+    const activeJobs: TimesheetApprovalJob[] = [];
+    for (const job of jobs) {
+      const head = headById.get(job.targetId);
+      if (!head || head.status === 'deprecated' || head.status === 'withdrawn') {
+        logger.info({ targetId: job.targetId, status: head?.status }, '[timesheet] 跳过过期审批任务');
+        continue;
+      }
+      activeJobs.push(job);
+    }
+    if (!activeJobs.length) return;
+
+    const resolvedList = await svc.approvalInstanceService.startMany(
+      activeJobs.map((job) => ({
+        targetType: 'timesheet' as const,
+        targetId: job.targetId,
+        applicantId: job.userId,
+        projectId: job.projectId,
+      })),
+    );
+
+    // 按结果分组批量回写工时（同一批内 instance 字段不同，仍逐条 update；减少 find）
+    for (let i = 0; i < activeJobs.length; i++) {
+      const job = activeJobs[i];
+      const resolved = resolvedList[i];
+      if (resolved.status === 'submitted' && resolved.instance) {
+        await svc.repo.update(
+          { id: In(job.recordIds), status: 'submitted' },
+          {
+            status: 'submitted',
+            currentStep: resolved.instance.currentStepOrder || 1,
+            approvalFlowId: resolved.instance.flowId,
+            approvalInstanceId: resolved.instance.id,
+            totalSteps: resolved.instance.totalSteps,
+          },
+        );
+        if (resolved.firstApproverIds.length) {
+          let submitter = submitterCache.get(job.userId);
+          if (submitter === undefined) {
+            submitter = await svc.userRepo.findOneBy({ id: job.userId });
+            submitterCache.set(job.userId, submitter);
+          }
+          if (submitter) {
+            notifications.push({
+              kind: 'pending',
+              approverIds: resolved.firstApproverIds,
+              targetType: 'timesheet',
+              targetId: job.targetId,
+              applicantName: submitter.realName,
+              title: job.title,
+            });
+          }
+        }
+      } else {
+        await svc.repo.update(
+          { id: In(job.recordIds), status: 'submitted' },
+          {
+            status: 'approved',
+            currentStep: 0,
+            totalSteps: 0,
+            approvalInstanceId: resolved.instance?.id ?? null,
+          },
+        );
+      }
+    }
+    await svc.flushNotifications(notifications);
   }
 
   /** 提交审批 */
@@ -251,8 +382,11 @@ export class TimesheetService {
 
     // 预读工时填报单位（天步长），供校验
     const unitStep = await this.loadUnitStep();
+    const approvalJobs: TimesheetApprovalJob[] = [];
 
-    const notifications: PendingNotification[] = [];
+    // 锁检查移出事务，缩短写事务持锁时间
+    const preview = await this.repo.findBy({ id: In(ids) });
+    await this.checkTimesheetLock(preview.map((r) => r.date));
 
     await AppDataSource.transaction(async (manager) => {
       const txService = new TimesheetService(manager);
@@ -264,59 +398,44 @@ export class TimesheetService {
         Object.assign(r, orgSnapshot);
       }
 
-      // 与 submitByRows 对齐的校验：工时锁定、每日上限、步长倍数
-      await txService.checkTimesheetLock(records.map(r => r.date));
       const entries = records.map(r => ({ date: r.date, days: Number(r.days) }));
       txService.validateStepMultiple(entries, unitStep, '记录');
       const dailyDays: Record<string, number> = {};
       for (const e of entries) dailyDays[e.date] = (dailyDays[e.date] || 0) + e.days;
       txService.validateDailyDays(dailyDays);
 
-      await txService.repo.save(records);
+      // 批量 UPDATE，避免逐条 save
+      const recordIds = records.map((r) => r.id);
+      await txService.repo.update(
+        { id: In(recordIds) },
+        {
+          status: 'submitted',
+          currentStep: 0,
+          totalSteps: 0,
+          approvalFlowId: null,
+          approvalInstanceId: null,
+          ...orgSnapshot,
+        },
+      );
 
-      const submitter = await txService.userRepo.findOneBy({ id: userId });
       for (const r of records) {
-        const resolved = await txService.approvalInstanceService.start({
-          targetType: 'timesheet',
+        approvalJobs.push({
           targetId: r.id,
-          applicantId: userId,
+          recordIds: [r.id],
           projectId: r.projectId,
+          userId,
+          title: `工时审批 ${r.days}天`,
         });
-        if (resolved.status === 'submitted' && resolved.instance) {
-          await txService.repo.update(r.id, {
-            status: 'submitted',
-            currentStep: resolved.instance.currentStepOrder || 1,
-            approvalFlowId: resolved.instance.flowId,
-            approvalInstanceId: resolved.instance.id,
-            totalSteps: resolved.instance.totalSteps,
-          });
-          if (submitter && resolved.firstApproverIds.length) {
-            notifications.push({
-              kind: 'pending',
-              approverIds: resolved.firstApproverIds,
-              targetType: 'timesheet',
-              targetId: r.id,
-              applicantName: submitter.realName,
-              title: `工时审批 ${r.days}天`,
-            });
-          }
-        } else {
-          await txService.repo.update(r.id, {
-            status: 'approved',
-            currentStep: 0,
-            totalSteps: 0,
-            approvalInstanceId: resolved.instance?.id ?? null,
-          });
-        }
       }
     });
 
-    await this.flushNotifications(notifications);
+    const maybeWait = this.scheduleTimesheetApprovals(approvalJobs);
+    if (maybeWait) await maybeWait;
     return true;
   }
 
   /**
-   * 按行提交审批（事务化，submissionGroupId 通过序列表原子分配）
+   * 按行提交审批（事务化写工时；审批实例入 Redis 队列异步创建）
    */
   async submitByRows(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[]) {
     if (!rows?.length) throw new BusinessError('请选择要提交的记录');
@@ -336,11 +455,12 @@ export class TimesheetService {
     }
     this.validateDailyDays(dailyDays);
 
-    const notifications: PendingNotification[] = [];
+    const approvalJobs: TimesheetApprovalJob[] = [];
 
     await AppDataSource.transaction(async (manager) => {
       const txService = new TimesheetService(manager);
       const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(userId);
+      const submitter = await txService.userRepo.findOneBy({ id: userId });
 
       const weekStart = rows[0].weekStart;
       const weekEnd = dayjsExt(weekStart).add(6, 'day').format('YYYY-MM-DD');
@@ -371,43 +491,54 @@ export class TimesheetService {
       }
 
       const removedIds = new Set<number>();
-      // 已撤回的 submissionGroupId 集合：避免循环内对同一 group 多行重复 withdraw（实例只挂首行）
+      const toRemoveIds: number[] = [];
+      const toDeprecateIds: number[] = [];
+      // 已撤回的 submissionGroupId 集合：避免循环内对同一 group 多行重复 withdraw
       const withdrawnGroupIds = new Set<number>();
+
+      // 第一遍：分类清理，批量写库（替代逐条 save/remove）
       for (const rec of existingRecords) {
         const dates = projectDates.get(rec.projectId);
         const isInEntries = dates ? dates.has(rec.date) : allEntryDates.has(rec.date);
 
         if (rec.status === 'rejected') {
-          // 该项目不在本次提交中（dates 为空）或该天被移除 → 删除 rejected 记录
           if (!dates || (dates && !isInEntries)) {
-            await txService.repo.remove(rec);
+            toRemoveIds.push(rec.id);
             removedIds.add(rec.id);
           }
         } else if (rec.status === 'draft') {
-          // 该项目不在本次提交中（dates 为空）或该天被移除 → 删除/deprecate draft 记录
           if (!dates || !isInEntries) {
             if (rec.submissionGroupId) {
-              rec.status = 'deprecated';
-              await txService.repo.save(rec);
+              toDeprecateIds.push(rec.id);
             } else {
-              await txService.repo.remove(rec);
+              toRemoveIds.push(rec.id);
             }
             removedIds.add(rec.id);
           }
         } else if (rec.status === 'approved' || rec.status === 'submitted') {
-          // 被删除的项目（本次 rows 未包含该项目，!dates 为 true）→ 立即 deprecate。
-          // 本次提交的项目(A/B)的旧记录不在此处理——它们在下方按行循环里按天 deprecate。
-          //
-          // 设计语义：修改提交即生效（不可逆，驳回需重提）。被删项目无新版本、无审批实例，
-          // 没有任何审批事件能干净地触发其 deprecate，故必须在提交时由 submitByRows 自己处理。
-          // 报表在修改审批通过前会少统计这些被删项目（已接受此取舍，换取界面立即反映最新意图）。
+          // 被删项目立即 deprecate（见原注释：修改提交即生效）
           if (!dates) {
-            rec.status = 'deprecated';
-            await txService.repo.save(rec);
+            toDeprecateIds.push(rec.id);
             removedIds.add(rec.id);
           }
         }
       }
+
+      if (toDeprecateIds.length) {
+        await txService.repo.update({ id: In(toDeprecateIds) }, { status: 'deprecated' });
+      }
+      if (toRemoveIds.length) {
+        await txService.repo.delete(toRemoveIds);
+      }
+
+      type RowBuild = {
+        projectId: number;
+        description: string;
+        records: Timesheet[];
+        totalDays: number;
+      };
+      const builtRows: RowBuild[] = [];
+      const deprecateInLoop: number[] = [];
 
       for (const row of rows) {
         if (!row.entries?.length) continue;
@@ -424,8 +555,7 @@ export class TimesheetService {
           if (existingRec && existingRec.status === 'draft') {
             if (existingRec.submissionGroupId) {
               const oldSubGroupId = existingRec.submissionGroupId;
-              existingRec.status = 'deprecated';
-              await txService.repo.save(existingRec);
+              deprecateInLoop.push(existingRec.id);
               removedIds.add(existingRec.id);
               records.push(txService.createRecord({
                 userId,
@@ -444,32 +574,35 @@ export class TimesheetService {
           } else if (existingRec && (existingRec.status === 'rejected' || existingRec.status === 'approved' || existingRec.status === 'submitted')) {
             const oldSubGroupId = existingRec.submissionGroupId;
             if (existingRec.status === 'submitted') {
-              // 同一 submissionGroup 的审批实例只挂载在首行，withdraw 按 group 整体撤回。
-              // 循环内多行 submitted 会重复进入此分支，必须按 group 去重，
-              // 否则第一行撤回后实例已结束，后续行再 withdraw 会抛"审批实例不存在或已结束"。
               const groupIdKey = existingRec.submissionGroupId ?? 0;
               if (groupIdKey && !withdrawnGroupIds.has(groupIdKey)) {
                 withdrawnGroupIds.add(groupIdKey);
-                const submitter = await txService.userRepo.findOneBy({ id: userId });
-                if (submitter) {
-                  await txService.approvalInstanceService.withdraw('timesheet', existingRec.id, userId, submitter.realName);
-                  await txService.recordRepo.save(txService.recordRepo.create({
-                    targetType: 'timesheet',
-                    targetId: existingRec.id,
-                    instanceId: existingRec.approvalInstanceId ?? null,
-                    approverId: userId,
-                    approverName: submitter.realName,
-                    action: 'withdraw',
-                    comment: '申请人修改工时，重新提交审批',
-                    stepOrder: existingRec.currentStep || 1,
-                    stepType: 'withdraw',
-                    stepLabel: '撤回',
-                  }));
+                // 审批实例可能尚在队列未创建：无 instanceId 则跳过 withdraw
+                if (existingRec.approvalInstanceId && submitter) {
+                  try {
+                    await txService.approvalInstanceService.withdraw('timesheet', existingRec.id, userId, submitter.realName);
+                    await txService.recordRepo.save(txService.recordRepo.create({
+                      targetType: 'timesheet',
+                      targetId: existingRec.id,
+                      instanceId: existingRec.approvalInstanceId ?? null,
+                      approverId: userId,
+                      approverName: submitter.realName,
+                      action: 'withdraw',
+                      comment: '申请人修改工时，重新提交审批',
+                      stepOrder: existingRec.currentStep || 1,
+                      stepType: 'withdraw',
+                      stepLabel: '撤回',
+                    }));
+                  } catch (err) {
+                    // 队列竞态：实例刚结束或不存在时仍允许 deprecate 并重提
+                    if (!(err instanceof BusinessError) || !String(err.message).includes('无法撤回')) {
+                      throw err;
+                    }
+                  }
                 }
               }
             }
-            existingRec.status = 'deprecated';
-            await txService.repo.save(existingRec);
+            deprecateInLoop.push(existingRec.id);
             removedIds.add(existingRec.id);
             records.push(txService.createRecord({
               userId,
@@ -492,69 +625,61 @@ export class TimesheetService {
         }
 
         if (records.length === 0) continue;
+        builtRows.push({
+          projectId: row.projectId,
+          description: row.description,
+          records,
+          totalDays: round2(row.entries.reduce((s, e) => s + e.days, 0)),
+        });
+      }
 
+      if (deprecateInLoop.length) {
+        await txService.repo.update({ id: In(deprecateInLoop) }, { status: 'deprecated' });
+      }
+
+      // 一次分配全部 submissionGroupId
+      const groupIds = await txService.nextSubmissionGroupIds(builtRows.length);
+      const allToSave: Timesheet[] = [];
+
+      for (let i = 0; i < builtRows.length; i++) {
+        const built = builtRows[i];
+        const nextGroupId = groupIds[i];
         const rowPrevGroup = existingRecords
-          .filter(r => r.projectId === row.projectId && r.submissionGroupId
+          .filter(r => r.projectId === built.projectId && r.submissionGroupId
             && (r.status !== 'draft' || removedIds.has(r.id)))
           .sort((a, b) => b.id - a.id)[0];
-
-        const nextGroupId = await txService.nextSubmissionGroupId();
-        // rootGroupId：若有前驱版本，继承其所在链的根；否则本组即为新链的根（= 自身 submissionGroupId）。
         const inheritedRoot = rowPrevGroup?.rootGroupId || null;
-        for (const r of records) {
+
+        for (const r of built.records) {
           r.submissionGroupId = nextGroupId;
           r.previousGroupId = rowPrevGroup?.submissionGroupId || previousGroupId;
           r.rootGroupId = inheritedRoot || nextGroupId;
+          r.status = 'submitted';
+          r.currentStep = 0;
+          r.totalSteps = 0;
+          r.approvalFlowId = null;
+          r.approvalInstanceId = null;
         }
-        await txService.repo.save(records);
+        allToSave.push(...built.records);
+      }
 
-        const targetId = records[0].id;
-        const resolved = await txService.approvalInstanceService.start({
-          targetType: 'timesheet',
-          targetId,
-          applicantId: userId,
-          projectId: row.projectId,
+      if (allToSave.length) {
+        await txService.repo.save(allToSave);
+      }
+
+      for (const built of builtRows) {
+        approvalJobs.push({
+          targetId: built.records[0].id,
+          recordIds: built.records.map(r => r.id),
+          projectId: built.projectId,
+          userId,
+          title: `工时审批 ${built.totalDays}天`,
         });
-        if (resolved.status === 'submitted' && resolved.instance) {
-          await txService.repo.update(
-            { id: In(records.map(r => r.id)) },
-            {
-              status: 'submitted',
-              currentStep: resolved.instance.currentStepOrder || 1,
-              approvalFlowId: resolved.instance.flowId,
-              approvalInstanceId: resolved.instance.id,
-              totalSteps: resolved.instance.totalSteps,
-            },
-          );
-          if (resolved.firstApproverIds.length) {
-            const totalDays = round2(row.entries.reduce((s, e) => s + e.days, 0));
-            const submitter = await txService.userRepo.findOneBy({ id: userId });
-            if (submitter) {
-              notifications.push({
-                kind: 'pending',
-                approverIds: resolved.firstApproverIds,
-                targetType: 'timesheet',
-                targetId,
-                applicantName: submitter.realName,
-                title: `工时审批 ${totalDays}天`,
-              });
-            }
-          }
-        } else {
-          await txService.repo.update(
-            { id: In(records.map(r => r.id)) },
-            {
-              status: 'approved',
-              currentStep: 0,
-              totalSteps: 0,
-              approvalInstanceId: resolved.instance?.id ?? null,
-            },
-          );
-        }
       }
     });
 
-    await this.flushNotifications(notifications);
+    const maybeWait = this.scheduleTimesheetApprovals(approvalJobs);
+    if (maybeWait) await maybeWait;
     return true;
   }
 

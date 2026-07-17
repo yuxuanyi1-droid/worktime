@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import { MigrationInterface, QueryRunner, TableColumn } from 'typeorm';
 
 /**
  * 会签支持：给 approval_flow_steps 加 requireAllApprovers 列。
@@ -12,19 +12,23 @@ export class CountersignSupport1700000000002 implements MigrationInterface {
   name = 'CountersignSupport1700000000002';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // SQLite 不支持 ADD COLUMN IF NOT EXISTS，用 catch 兜底（列已存在则跳过）
-    try {
-      await queryRunner.query(`ALTER TABLE "approval_flow_steps" ADD COLUMN "requireAllApprovers" boolean NOT NULL DEFAULT false`);
-    } catch {
-      // 列已存在，跳过
-    }
+    const table = await queryRunner.getTable('approval_flow_steps');
+    if (!table) return;
+    if (table.findColumnByName('requireAllApprovers')) return;
+    await queryRunner.addColumn(
+      'approval_flow_steps',
+      new TableColumn({
+        name: 'requireAllApprovers',
+        type: 'boolean',
+        default: false,
+        isNullable: false,
+      }),
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    try {
-      await queryRunner.query(`ALTER TABLE "approval_flow_steps" DROP COLUMN "requireAllApprovers"`);
-    } catch {
-      // 列不存在，跳过
-    }
+    const table = await queryRunner.getTable('approval_flow_steps');
+    if (!table?.findColumnByName('requireAllApprovers')) return;
+    await queryRunner.dropColumn('approval_flow_steps', 'requireAllApprovers');
   }
 }

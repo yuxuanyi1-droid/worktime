@@ -4,9 +4,12 @@ import cors from 'cors';
 import path from 'path';
 import './config/env'; // 加载根 .env（端口）+ server/.env（业务配置）
 import pinoHttp from 'pino-http';
-import { AppDataSource, ensureSchema } from './config/database';
+import { AppDataSource, ensureSchema, databaseType } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
-import { globalLimiter, loginLimiter, oidcCallbackLimiter, agentLimiter } from './middleware/security';
+import { globalLimiter, loginLimiter, oidcCallbackLimiter, agentLimiter, activateRateLimiters } from './middleware/security';
+import { initRedis, syncSubmissionGroupIdFromDb } from './config/redis';
+import { startApprovalQueueWorker } from './services/approvalQueue';
+import { TimesheetService } from './services/timesheetService';
 import { metricsMiddleware, metricsHandler } from './middleware/metrics';
 import { logger } from './utils/logger';
 import { authRoutes } from './routes/auth';
@@ -162,6 +165,25 @@ app.use(errorHandler);
 AppDataSource.initialize()
   .then(async () => {
     await ensureSchema();
+    const redisOk = await initRedis();
+    activateRateLimiters();
+    if (redisOk) {
+      const maxRow = await AppDataSource.query(
+        `SELECT COALESCE(MAX("submissionGroupId"), 0) AS "maxId" FROM timesheets`,
+      ).catch(() => [{ maxId: 0 }]);
+      const maxId = Number(maxRow?.[0]?.maxId ?? 0);
+      await syncSubmissionGroupIdFromDb(maxId);
+      // 默认内嵌审批 worker（同机提交吞吐更好）；设 APPROVAL_WORKER=0 则仅入队，由独立进程消费
+      if (process.env.APPROVAL_WORKER !== '0') {
+        await startApprovalQueueWorker(async (jobs) => {
+          await new TimesheetService().processApprovalJobs(jobs);
+        });
+        logger.info({ batchSize: process.env.APPROVAL_BATCH_SIZE || '20' }, '[approval-queue] API 内嵌 worker');
+      } else {
+        logger.info('[approval-queue] API 仅入队（APPROVAL_WORKER=0），请启动 npm run worker:approval');
+      }
+    }
+    logger.info({ dbType: databaseType, redis: redisOk }, '存储后端就绪');
     // 生成 pi agent 的 models.json（AI 未配置则跳过，不影响启动）
     ensurePiModelsJson();
     // 预启动 pi worker：pi 是大型 ESM 包，在已加载 CJS 模块的主线程里动态 import 会死锁事件循环，
@@ -175,8 +197,9 @@ AppDataSource.initialize()
     });
   })
   .catch((error) => {
-    logger.error({ err: error }, '数据库连接失败，请检查 server/.env 中的数据库配置');
+    logger.error({ err: error }, '数据库连接失败，请检查根 .env 中的数据库配置');
     // 即使数据库连接失败也启动服务，方便调试
+    initRedis().finally(() => activateRateLimiters());
     app.listen(PORT, () => {
       logger.warn(`服务端运行在 http://localhost:${PORT} (数据库未连接)`);
     });

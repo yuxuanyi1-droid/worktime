@@ -43,10 +43,10 @@ export class UserPermissionGrant {
   @Column({ type: 'varchar', length: 20, default: 'active' })
   status!: UserPermissionGrantStatus;
 
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ type: 'timestamp', nullable: true })
   startsAt!: Date | null;
 
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ type: 'timestamp', nullable: true })
   expiresAt!: Date | null;
 
   @Column({ type: 'integer', nullable: true })
@@ -61,7 +61,7 @@ export class UserPermissionGrant {
   @Column({ type: 'varchar', length: 50, nullable: true })
   grantedByName!: string | null;
 
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ type: 'timestamp', nullable: true })
   revokedAt!: Date | null;
 
   @Column({ type: 'integer', nullable: true })

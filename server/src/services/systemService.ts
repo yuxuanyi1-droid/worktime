@@ -15,6 +15,7 @@ import bcrypt from 'bcryptjs';
 import { In } from 'typeorm';
 import { permissionDefinitions } from '../config/permissionDefinitions';
 import { BusinessError } from '../utils/errors';
+import { invalidateOrgSnapshot, invalidateProjectApproval } from '../config/cache';
 
 export class SystemService {
   constructor(private manager?: EntityManager) {}
@@ -296,7 +297,7 @@ export class SystemService {
   }
 
   async updateUser(id: number, data: { realName?: string; email?: string; phone?: string; status?: number; departmentId?: number; groupId?: number; roleIds?: number[] }) {
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       const updateData: any = { ...data };
       if (data.departmentId !== undefined) updateData.department = data.departmentId ? { id: data.departmentId } : null;
@@ -309,6 +310,10 @@ export class SystemService {
       await txService.userRepo.save({ id, ...updateData });
       return txService.userRepo.findOne({ where: { id }, relations: ['department', 'group', 'roles'] });
     });
+    if (data.departmentId !== undefined || data.groupId !== undefined || data.realName !== undefined) {
+      await invalidateOrgSnapshot(id);
+    }
+    return result;
   }
 
   async deleteUser(id: number) {
@@ -394,7 +399,7 @@ export class SystemService {
   }
 
   async updateProject(id: number, data: { name?: string; description?: string; status?: string; managerIds?: number[] }) {
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       const updateData: any = {};
       if (data.name !== undefined) updateData.name = data.name;
@@ -408,6 +413,10 @@ export class SystemService {
       await txService.projectRepo.save({ id, ...updateData });
       return txService.projectRepo.findOne({ where: { id }, relations: ['managers'] });
     });
+    if (data.managerIds !== undefined) {
+      await invalidateProjectApproval(id);
+    }
+    return result;
   }
 
   async deleteProject(id: number) {
@@ -419,12 +428,14 @@ export class SystemService {
     if (timesheetCount + overtimeCount > 0) {
       throw new BusinessError('该项目存在关联工时/加班记录，无法删除（建议改为停用）');
     }
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       await txService.projectSERepo.delete({ projectId: id });
       await txService.allocationRepo.delete({ projectId: id });
       return txService.projectRepo.delete(id);
     });
+    await invalidateProjectApproval(id);
+    return result;
   }
 
   // ==================== 项目SE管理 ====================
@@ -436,7 +447,7 @@ export class SystemService {
   }
 
   async addProjectSE(data: { projectId: number; userId: number; groupId: number }) {
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       const existing = await txService.projectSERepo.findOne({
         where: { projectId: data.projectId, groupId: data.groupId },
@@ -457,10 +468,15 @@ export class SystemService {
       });
       return txService.projectSERepo.save(se);
     });
+    await invalidateProjectApproval(data.projectId);
+    return result;
   }
 
   async removeProjectSE(id: number) {
-    return this.projectSERepo.delete(id);
+    const existing = await this.projectSERepo.findOne({ where: { id } });
+    const result = await this.projectSERepo.delete(id);
+    if (existing?.projectId) await invalidateProjectApproval(existing.projectId);
+    return result;
   }
 
   // ==================== 项目工时配额管理 ====================

@@ -490,16 +490,23 @@ export class AccessPolicyService {
   }
 
   async getOrgSnapshot(userId: number): Promise<OrgSnapshot> {
+    const { CacheKeys, cacheGet, cacheSet } = await import('../config/cache');
+    const cacheKey = CacheKeys.org(userId);
+    const cached = await cacheGet<OrgSnapshot>(cacheKey);
+    if (cached) return cached;
+
     const user = await this.userRepo.findOne({
       where: { id: userId },
       relations: ['department', 'group'],
     });
 
-    return {
+    const snapshot: OrgSnapshot = {
       departmentSnapshotId: user?.department?.id ?? null,
       departmentSnapshotName: user?.department?.name ?? null,
       groupSnapshotId: user?.group?.id ?? null,
       groupSnapshotName: user?.group?.name ?? null,
     };
+    await cacheSet(cacheKey, snapshot);
+    return snapshot;
   }
 }
