@@ -15,6 +15,7 @@ import {
 } from '../entities/ApprovalFlowVersion';
 import {
   CacheKeys,
+  CacheTtl,
   cacheGet,
   cacheSet,
   invalidateAllDefaultFlows,
@@ -98,7 +99,7 @@ export class ApprovalFlowEngine {
         .filter((se) => se.user)
         .map((se) => ({ groupId: se.groupId, userId: se.user.id, userName: se.user.realName })),
     };
-    await cacheSet(cacheKey, data);
+    await cacheSet(cacheKey, data, CacheTtl.project);
     return data;
   }
 
@@ -327,7 +328,7 @@ export class ApprovalFlowEngine {
       enabled: version.enabled,
       steps: version.steps,
     };
-    await cacheSet(cacheKey, snap);
+    await cacheSet(cacheKey, snap, CacheTtl.approvalFlow);
     return version;
   }
 

@@ -716,12 +716,16 @@ export const systemRoutes = router;
 // 所有登录用户可读设置
 router.get('/settings', async (_req, res, next) => {
   try {
-    const settingRepo = getSettingRepo();
-    const list = await settingRepo.find({ order: { id: 'ASC' } });
-    // 转成 key-value 对象方便前端使用
-    const settings: Record<string, string> = {};
-    list.forEach(s => { settings[s.key] = s.value; });
-    res.json({ code: 0, data: { list, settings } });
+    const { CacheKeys, CacheTtl, cacheGetOrLoad } = await import('../config/cache');
+    const cacheKey = CacheKeys.allSettings();
+    const data = await cacheGetOrLoad(cacheKey, CacheTtl.setting, async () => {
+      const settingRepo = getSettingRepo();
+      const list = await settingRepo.find({ order: { id: 'ASC' } });
+      const settings: Record<string, string> = {};
+      list.forEach(s => { settings[s.key] = s.value; });
+      return { list, settings };
+    });
+    res.json({ code: 0, data });
   } catch (error) {
     next(error);
   }

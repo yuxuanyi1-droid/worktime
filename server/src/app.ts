@@ -55,8 +55,43 @@ let dbConnected = false;
 // 中间件（顺序重要）
 // 反向代理后取真实 IP（限流依赖此设置）
 app.set('trust proxy', 1);
-// HTTP 请求日志（pino-http，结构化）
-app.use(pinoHttp({ logger, autoLogging: process.env.NODE_ENV !== 'test' }));
+// HTTP 请求日志（pino-http，结构化）。错误请求全部保留；成功请求可按比例采样，
+// 避免高峰期同步生成大量无诊断价值的日志。开发环境默认全量，生产默认采样 1%。
+const successLogSampleRate = (() => {
+  const fallback = process.env.NODE_ENV === 'production' ? 0.01 : 1;
+  const parsed = Number(process.env.HTTP_SUCCESS_LOG_SAMPLE_RATE ?? fallback);
+  return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : fallback;
+})();
+let successLogAccumulator = 0;
+app.use(pinoHttp({ logger, autoLogging: false }));
+app.use((req, res, next) => {
+  const startedAt = process.hrtime.bigint();
+  res.once('finish', () => {
+    if (process.env.NODE_ENV === 'test') return;
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+    const details = {
+      method: req.method,
+      url: req.originalUrl,
+      statusCode: res.statusCode,
+      responseTime: Number(elapsedMs.toFixed(1)),
+    };
+    if (res.statusCode >= 500) {
+      req.log.error(details, '请求失败');
+    } else if (res.statusCode >= 400) {
+      req.log.warn(details, '请求被拒绝');
+    } else if (successLogSampleRate >= 1) {
+      req.log.info(details, '请求完成（采样）');
+    } else if (successLogSampleRate > 0) {
+      // 累加器能稳定逼近任意采样比例，也避免每个请求调用随机数生成器。
+      successLogAccumulator += successLogSampleRate;
+      if (successLogAccumulator >= 1) {
+        successLogAccumulator -= 1;
+        req.log.info(details, '请求完成（采样）');
+      }
+    }
+  });
+  next();
+});
 // Prometheus 指标采集
 app.use(metricsMiddleware);
 // CORS origin 从环境变量读取（逗号分隔），生产环境应锁定为真实域名。

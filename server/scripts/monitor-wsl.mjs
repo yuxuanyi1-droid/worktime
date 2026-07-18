@@ -124,7 +124,8 @@ function sampleOnce() {
   const elapsed = (performance.now() - t0) / 1000;
   const mem = parseMem();
   const cpu = parseCpuTop();
-  const node = parseProcGroup('dist/app\\.js|lb-round-robin');
+  // 汇总完整应用拓扑：API、独立 worker，以及 Node/Caddy 两种网关。
+  const node = parseProcGroup('dist/app\\.js|dist/approvalWorker\\.js|lb-round-robin|caddy run');
   const pg = parseProcGroup('postgres:');
   const redis = parseProcGroup('redis-server');
 

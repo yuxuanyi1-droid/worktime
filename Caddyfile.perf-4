@@ -1,0 +1,19 @@
+{
+	admin off
+	auto_https off
+}
+
+http://127.0.0.1:3001 {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3011 127.0.0.1:3012 127.0.0.1:3013 127.0.0.1:3014 {
+		lb_policy least_conn
+		health_uri /worktime/api/health
+		health_interval 10s
+		health_timeout 2s
+		health_status 200
+		fail_duration 30s
+		max_fails 2
+		lb_try_duration 2s
+		lb_try_interval 100ms
+	}
+}

@@ -33,12 +33,12 @@ import { PrecisionAndIndexes1700000000001 } from '../migrations/1700000000001-Pr
 import { CountersignSupport1700000000002 } from '../migrations/1700000000002-CountersignSupport';
 import { RootGroupId1700000000003 } from '../migrations/1700000000003-RootGroupId';
 import { PersonalAccessTokens1700000000004 } from '../migrations/1700000000004-PersonalAccessTokens';
+import { ApprovalInstanceIdempotency1700000000005 } from '../migrations/1700000000005-ApprovalInstanceIdempotency';
 
 /**
- * 数据库类型：'sqlite'（默认，零配置单文件）或 'postgres'（生产，高并发）。
- * 通过 .env 的 DB_TYPE 切换。
+ * PostgreSQL 是当前唯一生产数据库；保留旧分支仅用于历史代码读取，不再保证 SQLite 兼容。
  */
-const dbType = (process.env.DB_TYPE || 'sqlite').toLowerCase() as 'sqlite' | 'postgres';
+const dbType = (process.env.DB_TYPE || 'postgres').toLowerCase() as 'sqlite' | 'postgres';
 
 const shouldSynchronize = process.env.TYPEORM_SYNCHRONIZE === 'true';
 
@@ -58,6 +58,7 @@ const migrations = [
   InitSchema1700000000000, PrecisionAndIndexes1700000000001,
   CountersignSupport1700000000002, RootGroupId1700000000003,
   PersonalAccessTokens1700000000004,
+  ApprovalInstanceIdempotency1700000000005,
 ];
 
 /**
@@ -69,7 +70,8 @@ function buildDataSourceOptions(): DataSourceOptions {
   const common = { entities, migrations, synchronize: shouldSynchronize, logging: false };
 
   if (dbType === 'postgres') {
-    const poolMax = parseInt(process.env.DB_POOL_MAX || '20', 10);
+    // 多实例总连接预算要小于 PostgreSQL max_connections；4 实例默认 4×12=48。
+    const poolMax = parseInt(process.env.DB_POOL_MAX || '12', 10);
     return {
       ...common,
       type: 'postgres',
@@ -81,7 +83,9 @@ function buildDataSourceOptions(): DataSourceOptions {
       // 生产建议开启 ssl（按云服务商配置调整）
       ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
       extra: {
-        max: Number.isFinite(poolMax) && poolMax > 0 ? poolMax : 20,
+        max: Number.isFinite(poolMax) && poolMax > 0 ? poolMax : 12,
+        idleTimeoutMillis: 10_000,
+        connectionTimeoutMillis: 3_000,
       },
     };
   }

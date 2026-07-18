@@ -15,7 +15,17 @@ import bcrypt from 'bcryptjs';
 import { In } from 'typeorm';
 import { permissionDefinitions } from '../config/permissionDefinitions';
 import { BusinessError } from '../utils/errors';
-import { invalidateOrgSnapshot, invalidateProjectApproval } from '../config/cache';
+import {
+  CacheKeys,
+  CacheTtl,
+  cacheGetOrLoad,
+  invalidateAuthUser,
+  invalidateAuthUsers,
+  invalidateOrgCatalog,
+  invalidateOrgSnapshot,
+  invalidateProjectApproval,
+  invalidateProjectCatalog,
+} from '../config/cache';
 
 export class SystemService {
   constructor(private manager?: EntityManager) {}
@@ -35,14 +45,19 @@ export class SystemService {
   // ==================== 部门管理 ====================
 
   async getDepartments() {
-    return this.deptRepo.find({ relations: ['leader'], order: { sortOrder: 'ASC', createdAt: 'ASC' } });
+    const cacheKey = CacheKeys.departments();
+    return cacheGetOrLoad(cacheKey, CacheTtl.org, () => (
+      this.deptRepo.find({ relations: ['leader'], order: { sortOrder: 'ASC', createdAt: 'ASC' } })
+    ));
   }
 
   async createDepartment(data: { name: string; description?: string; leaderId?: number }) {
     const deptData: any = { name: data.name, description: data.description };
     if (data.leaderId) deptData.leader = { id: data.leaderId };
     const dept = this.deptRepo.create(deptData);
-    return this.deptRepo.save(dept);
+    const result = await this.deptRepo.save(dept);
+    await invalidateOrgCatalog();
+    return result;
   }
 
   async updateDepartment(id: number, data: { name?: string; description?: string; leaderId?: number }) {
@@ -52,38 +67,48 @@ export class SystemService {
     }
     delete updateData.leaderId;
     await this.deptRepo.save({ id, ...updateData });
-    return this.deptRepo.findOne({ where: { id }, relations: ['leader'] });
+    const result = await this.deptRepo.findOne({ where: { id }, relations: ['leader'] });
+    await invalidateOrgCatalog();
+    return result;
   }
 
   async deleteDepartment(id: number) {
     const userCount = await this.userRepo.count({ where: { department: { id } } });
     if (userCount > 0) throw new BusinessError('该部门下还有用户，无法删除');
-    return this.deptRepo.delete(id);
+    const result = await this.deptRepo.delete(id);
+    await invalidateOrgCatalog();
+    return result;
   }
 
   // ==================== 分组管理（多层级树形） ====================
 
   /** 获取分组树 */
   async getGroupTree(departmentId?: number) {
-    const where: any = {};
-    if (departmentId) where.departmentId = departmentId;
-    const allGroups = await this.groupRepo.find({
-      where,
-      relations: ['leader', 'parent', 'users', 'users.roles'],
-      order: { sortOrder: 'ASC', createdAt: 'ASC' },
+    const cacheKey = CacheKeys.groupTree(departmentId);
+    return cacheGetOrLoad(cacheKey, CacheTtl.org, async () => {
+      const where: any = {};
+      if (departmentId) where.departmentId = departmentId;
+      const allGroups = await this.groupRepo.find({
+        where,
+        relations: ['leader', 'parent', 'users', 'users.roles'],
+        order: { sortOrder: 'ASC', createdAt: 'ASC' },
+      });
+      return this.buildGroupTree(allGroups);
     });
-    return this.buildGroupTree(allGroups);
   }
 
   /** 获取平铺列表 */
   async getGroups(departmentId?: number, parentId?: number) {
-    const where: any = {};
-    if (departmentId) where.departmentId = departmentId;
-    if (parentId !== undefined) where.parentId = parentId || null;
-    return this.groupRepo.find({
-      where,
-      relations: ['leader', 'parent', 'department'],
-      order: { level: 'ASC', sortOrder: 'ASC' },
+    const cacheKey = CacheKeys.groups(departmentId, parentId);
+    return cacheGetOrLoad(cacheKey, CacheTtl.org, () => {
+      const where: any = {};
+      if (departmentId) where.departmentId = departmentId;
+      if (parentId !== undefined) where.parentId = parentId || null;
+      return this.groupRepo.find({
+        where,
+        relations: ['leader', 'parent', 'department'],
+        order: { level: 'ASC', sortOrder: 'ASC' },
+      });
     });
   }
 
@@ -147,11 +172,13 @@ export class SystemService {
 
     // path = 父级 path + 自身 id（语义：从根到自身的完整 id 路径，如 "1/3/7"）
     saved.path = pathInfo.parentPath ? `${pathInfo.parentPath}/${saved.id}` : `${saved.id}`;
-    return this.groupRepo.save(saved);
+    const result = await this.groupRepo.save(saved);
+    await invalidateOrgCatalog();
+    return result;
   }
 
   async updateGroup(id: number, data: { name?: string; description?: string; departmentId?: number; parentId?: number; leaderId?: number }) {
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       const group = await txService.groupRepo.findOne({ where: { id } });
       if (!group) throw new BusinessError('分组不存在');
@@ -186,6 +213,8 @@ export class SystemService {
       await txService.groupRepo.save({ id, ...updateData });
       return txService.groupRepo.findOne({ where: { id }, relations: ['leader', 'parent', 'department'] });
     });
+    await invalidateOrgCatalog();
+    return result;
   }
 
   /**
@@ -228,7 +257,9 @@ export class SystemService {
     if (childCount > 0) throw new BusinessError('该分组下还有子分组，无法删除');
     const userCount = await this.userRepo.count({ where: { group: { id } } });
     if (userCount > 0) throw new BusinessError('该分组下还有用户，无法删除');
-    return this.groupRepo.delete(id);
+    const result = await this.groupRepo.delete(id);
+    await invalidateOrgCatalog();
+    return result;
   }
 
   // ==================== 用户管理 ====================
@@ -276,7 +307,7 @@ export class SystemService {
     const existing = await this.userRepo.findOne({ where: { username: data.username } });
     if (existing) throw new BusinessError('用户名已存在');
 
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       const userData: any = {
         username: data.username,
@@ -294,6 +325,8 @@ export class SystemService {
       const user = txService.userRepo.create(userData);
       return txService.userRepo.save(user);
     });
+    await invalidateOrgCatalog();
+    return result;
   }
 
   async updateUser(id: number, data: { realName?: string; email?: string; phone?: string; status?: number; departmentId?: number; groupId?: number; roleIds?: number[] }) {
@@ -313,6 +346,7 @@ export class SystemService {
     if (data.departmentId !== undefined || data.groupId !== undefined || data.realName !== undefined) {
       await invalidateOrgSnapshot(id);
     }
+    await Promise.all([invalidateAuthUser(id), invalidateOrgCatalog()]);
     return result;
   }
 
@@ -326,14 +360,19 @@ export class SystemService {
     if (timesheetCount + overtimeCount + weeklyCount > 0) {
       throw new BusinessError('该用户存在工时/加班/周报记录，无法删除（建议改为禁用）');
     }
-    return this.userRepo.delete(id);
+    const result = await this.userRepo.delete(id);
+    await Promise.all([invalidateAuthUser(id), invalidateOrgSnapshot(id), invalidateOrgCatalog()]);
+    return result;
   }
 
   async resetPassword(id: number, newPassword: string) {
     const user = await this.userRepo.findOne({ where: { id } });
     if (!user) throw new BusinessError('用户不存在');
     user.password = await bcrypt.hash(newPassword, 10);
-    return this.userRepo.save(user);
+    user.tokenVersion += 1;
+    const result = await this.userRepo.save(user);
+    await invalidateAuthUser(id);
+    return result;
   }
 
   // ==================== 角色权限 ====================
@@ -342,13 +381,19 @@ export class SystemService {
   }
 
   async updateRolePermissions(roleId: number, permissionIds: number[]) {
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       const role = await txService.roleRepo.findOne({ where: { id: roleId }, relations: ['permissions'] });
       if (!role) throw new BusinessError('角色不存在');
       role.permissions = await txService.permRepo.findBy({ id: In(permissionIds) });
       return txService.roleRepo.save(role);
     });
+    const roleWithUsers = await this.roleRepo.findOne({ where: { id: roleId }, relations: ['users'] });
+    await Promise.all([
+      invalidateAuthUsers((roleWithUsers?.users || []).map((user) => user.id)),
+      invalidateOrgCatalog(),
+    ]);
+    return result;
   }
 
   async getPermissions() {
@@ -385,7 +430,7 @@ export class SystemService {
   async createProject(data: { name: string; code: string; description?: string; managerIds?: number[] }) {
     const existing = await this.projectRepo.findOne({ where: { code: data.code } });
     if (existing) throw new BusinessError('项目编码已存在');
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const txService = new SystemService(manager);
       const projectData: any = { name: data.name, code: data.code, description: data.description };
       if (data.managerIds?.length) {
@@ -396,6 +441,8 @@ export class SystemService {
       const project = txService.projectRepo.create(projectData);
       return txService.projectRepo.save(project);
     });
+    await invalidateProjectCatalog();
+    return result;
   }
 
   async updateProject(id: number, data: { name?: string; description?: string; status?: string; managerIds?: number[] }) {
@@ -416,6 +463,7 @@ export class SystemService {
     if (data.managerIds !== undefined) {
       await invalidateProjectApproval(id);
     }
+    await invalidateProjectCatalog();
     return result;
   }
 
@@ -434,7 +482,7 @@ export class SystemService {
       await txService.allocationRepo.delete({ projectId: id });
       return txService.projectRepo.delete(id);
     });
-    await invalidateProjectApproval(id);
+    await Promise.all([invalidateProjectApproval(id), invalidateProjectCatalog()]);
     return result;
   }
 
@@ -588,10 +636,11 @@ export class SystemService {
 
   /** 获取进行中的项目列表（供工时/加班选择） */
   async getActiveProjects() {
-    return this.projectRepo.find({
+    const cacheKey = CacheKeys.activeProjects();
+    return cacheGetOrLoad(cacheKey, CacheTtl.project, () => this.projectRepo.find({
       where: { status: 'active' },
       order: { name: 'ASC' },
-    });
+    }));
   }
 
   /** 检查用户是否是指定项目的管理员 */

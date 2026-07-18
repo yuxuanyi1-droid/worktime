@@ -6,8 +6,18 @@ import { AppDataSource } from '../config/database';
 import { User } from '../entities/User';
 import { PersonalAccessToken } from '../entities/PersonalAccessToken';
 import { AccessPolicyService } from '../services/accessPolicyService';
+import { CacheKeys, CacheTtl, cacheGet, cacheSet } from '../config/cache';
 
 const accessPolicy = new AccessPolicyService();
+
+type CachedAuthUser = {
+  id: number;
+  username: string;
+  realName: string;
+  roles: string[];
+  permissions: string[];
+  tokenVersion: number;
+};
 
 /** PAT 明文前缀，auth 中间件据此区分 JWT 与 PAT */
 export const PAT_PREFIX = 'wpat_';
@@ -59,6 +69,23 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
     // JWT 分支：原有逻辑
     const decoded = jwt.verify(token, authConfig.jwtSecret) as any;
 
+    const cacheKey = CacheKeys.authUser(decoded.id);
+    const cached = await cacheGet<CachedAuthUser>(cacheKey);
+    if (cached) {
+      if (decoded.v !== cached.tokenVersion) {
+        return res.status(401).json({ code: 401, message: '登录已失效，请重新登录' });
+      }
+      req.user = {
+        id: cached.id,
+        username: cached.username,
+        realName: cached.realName,
+        roles: cached.roles,
+      };
+      req.userPermissions = new Set(cached.permissions);
+      req.authMethod = 'jwt';
+      return next();
+    }
+
     const userRepo = AppDataSource.getRepository(User);
     const user = await userRepo.findOne({
       where: { id: decoded.id, status: 1 },
@@ -83,6 +110,12 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
     // 一次性算出权限集合挂到请求对象，permissionMiddleware 直接复用，避免每个权限校验重复查库
     req.userPermissions = await accessPolicy.getPermissionCodesForLoadedUser(user);
     req.authMethod = 'jwt';
+
+    await cacheSet(cacheKey, {
+      ...req.user,
+      permissions: Array.from(req.userPermissions),
+      tokenVersion: user.tokenVersion,
+    } satisfies CachedAuthUser, CacheTtl.auth);
 
     return next();
   } catch (error) {

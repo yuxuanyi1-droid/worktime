@@ -12,6 +12,7 @@ import { PatService } from './patService';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import type { ProviderUserInfo } from './oidc/provider';
+import { CacheKeys, CacheTtl, cacheSet, invalidateAuthUser, invalidateOrgSnapshot } from '../config/cache';
 
 export class AuthService {
   private userRepo = AppDataSource.getRepository(User);
@@ -40,6 +41,14 @@ export class AuthService {
   private async buildLoginResponse(user: User) {
     const token = this.signLocalJwt(user);
     const permissions = Array.from(await this.accessPolicy.getPermissionCodes(user.id));
+    await cacheSet(CacheKeys.authUser(user.id), {
+      id: user.id,
+      username: user.username,
+      realName: user.realName,
+      roles: user.roles.map((role) => role.name),
+      permissions,
+      tokenVersion: user.tokenVersion,
+    }, CacheTtl.auth);
     const idpManaged = await this.isIdpManaged(user.id);
     // 首登/无 PAT 时自动建默认 PAT（best-effort，失败不影响登录）
     try {
@@ -356,6 +365,7 @@ export class AuthService {
     // tokenVersion+1：使改密前签发的所有 token 失效，强制重新登录
     user.tokenVersion += 1;
     await this.userRepo.save(user);
+    await invalidateAuthUser(userId);
     return true;
   }
 
@@ -365,6 +375,7 @@ export class AuthService {
     if (!user) throw new BusinessError('用户不存在');
     user.tokenVersion += 1;
     await this.userRepo.save(user);
+    await invalidateAuthUser(userId);
   }
 
   async updateProfile(userId: number, data: { realName?: string; email?: string; phone?: string }) {
@@ -379,6 +390,7 @@ export class AuthService {
     if (data.phone !== undefined) user.phone = data.phone;
 
     await this.userRepo.save(user);
+    await Promise.all([invalidateAuthUser(userId), invalidateOrgSnapshot(userId)]);
     return this.getProfile(userId);
   }
 }

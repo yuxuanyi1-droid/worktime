@@ -1,6 +1,7 @@
-import rateLimit, { type Options, type RateLimitRequestHandler } from 'express-rate-limit';
+import crypto from 'node:crypto';
+import rateLimit, { ipKeyGenerator, type Options, type RateLimitRequestHandler } from 'express-rate-limit';
 import { RedisStore, type RedisReply } from 'rate-limit-redis';
-import { RequestHandler } from 'express';
+import { Request, RequestHandler } from 'express';
 import { getRedis, isRedisReady } from '../config/redis';
 
 type LimiterOpts = Partial<Options> & { windowMs: number; max: number; message: object; prefix: string };
@@ -25,6 +26,15 @@ function createLimiter(opts: LimiterOpts): RateLimitRequestHandler {
   });
 }
 
+/** 登录后的请求按令牌隔离额度，避免公司 NAT 出口下所有员工共享同一个 IP 桶。 */
+function authenticatedRateKey(req: Request): string {
+  const authorization = req.headers.authorization || '';
+  if (authorization.startsWith('Bearer ')) {
+    return `token:${crypto.createHash('sha256').update(authorization.slice(7)).digest('hex').slice(0, 32)}`;
+  }
+  return `ip:${ipKeyGenerator(req.ip || 'unknown')}`;
+}
+
 /** 可在 Redis 就绪后替换实现的占位中间件 */
 function deferredLimiter(): RequestHandler & { replace: (h: RequestHandler) => void } {
   let impl: RequestHandler = (_req, _res, next) => next();
@@ -34,7 +44,7 @@ function deferredLimiter(): RequestHandler & { replace: (h: RequestHandler) => v
 }
 
 /**
- * 全局限流：每个 IP 每 15 分钟最多 1000 次请求。
+ * 全局限流：登录后按令牌、未登录按 IP，避免办公网 NAT 误伤。
  * 启动时先放行，initRedis 成功后由 activateRateLimiters() 挂上真实限流（含 Redis store）。
  */
 export const globalLimiter = deferredLimiter();
@@ -48,12 +58,15 @@ export function activateRateLimiters(): void {
     windowMs: 15 * 60 * 1000,
     max: Number(process.env.GLOBAL_RATE_MAX || 1000),
     prefix: 'rl:global:',
+    keyGenerator: authenticatedRateKey,
+    skip: (req) => req.path.endsWith('/auth/login'),
     message: { code: 429, message: '请求过于频繁，请稍后再试' },
   }));
   loginLimiter.replace(createLimiter({
     windowMs: 10 * 60 * 1000,
-    max: Number(process.env.LOGIN_RATE_MAX || 20),
+    max: Number(process.env.LOGIN_RATE_MAX || 100),
     prefix: 'rl:login:',
+    skipSuccessfulRequests: true,
     message: { code: 429, message: '登录尝试过于频繁，请稍后再试' },
   }));
   oidcCallbackLimiter.replace(createLimiter({

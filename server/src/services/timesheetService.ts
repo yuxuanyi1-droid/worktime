@@ -4,6 +4,7 @@ import { Timesheet } from '../entities/Timesheet';
 import { SystemSetting } from '../entities/SystemSetting';
 import { SubmissionSequence } from '../entities/SubmissionSequence';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
+import { ApprovalInstance } from '../entities/ApprovalInstance';
 import { Between, In, Not, Brackets } from 'typeorm';
 import { NotificationService } from './notificationService';
 import { User } from '../entities/User';
@@ -12,7 +13,7 @@ import { AccessPolicyService, OrgSnapshot } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
 import { round2 } from '../utils/validation';
 import { logger } from '../utils/logger';
-import { CacheKeys, cacheGet, cacheSet } from '../config/cache';
+import { CacheKeys, CacheTtl, cacheGet, cacheSet } from '../config/cache';
 import {
   enqueueTimesheetApprovals,
   type TimesheetApprovalJob,
@@ -61,6 +62,7 @@ export class TimesheetService {
 
   private get repo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
   private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
+  private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
   private get accessPolicy() { return new AccessPolicyService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
@@ -79,7 +81,7 @@ export class TimesheetService {
 
     const row = await this.settingRepo.findOne({ where: { key: settingKey } });
     const value = row?.value ?? null;
-    await cacheSet(cacheKey, { value });
+    await cacheSet(cacheKey, { value }, CacheTtl.setting);
     return value;
   }
 
@@ -320,19 +322,43 @@ export class TimesheetService {
     }
     if (!activeJobs.length) return;
 
-    const resolvedList = await svc.approvalInstanceService.startMany(
-      activeJobs.map((job) => ({
+    // Streams 是至少一次投递：先复用已经创建的实例，避免 worker 在实例落库后、ACK 前
+    // 崩溃时重复创建。数据库唯一索引负责兜住多实例同时首次处理的竞态。
+    const existingInstances = await svc.instanceRepo.find({
+      where: {
+        targetType: 'timesheet',
+        targetId: In(activeJobs.map((job) => job.targetId)),
+      },
+    });
+    const existingByTarget = new Map(existingInstances.map((instance) => [instance.targetId, instance]));
+    const newJobs = activeJobs.filter((job) => !existingByTarget.has(job.targetId));
+    const createdList = await svc.approvalInstanceService.startMany(
+      newJobs.map((job) => ({
         targetType: 'timesheet' as const,
         targetId: job.targetId,
         applicantId: job.userId,
         projectId: job.projectId,
       })),
     );
+    const resolvedByTarget = new Map<number, {
+      status: 'approved' | 'submitted';
+      instance: ApprovalInstance;
+      firstApproverIds: number[];
+    }>();
+    newJobs.forEach((job, index) => resolvedByTarget.set(job.targetId, createdList[index]));
+    for (const instance of existingInstances) {
+      const firstStep = instance.stepsSnapshot?.find((step) => step.stepOrder === 1);
+      resolvedByTarget.set(instance.targetId, {
+        status: instance.status === 'approved' ? 'approved' : 'submitted',
+        instance,
+        firstApproverIds: firstStep?.approvers.map((approver) => approver.id) ?? [],
+      });
+    }
 
     // 按结果分组批量回写工时（同一批内 instance 字段不同，仍逐条 update；减少 find）
     for (let i = 0; i < activeJobs.length; i++) {
       const job = activeJobs[i];
-      const resolved = resolvedList[i];
+      const resolved = resolvedByTarget.get(job.targetId)!;
       if (resolved.status === 'submitted' && resolved.instance) {
         await svc.repo.update(
           { id: In(job.recordIds), status: 'submitted' },
