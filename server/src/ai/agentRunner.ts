@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { logger } from '../utils/logger';
 import { aiConfig, aiReady, piModelsJsonPath } from '../config/ai';
-import { PatService } from '../services/patService';
+import { AuthService } from '../services/authService';
 
 const WORKER_FILE = ((): string => {
   const base = path.resolve(__dirname, 'agentWorker');
@@ -125,7 +125,7 @@ async function requestWorker(type: string, payload: Record<string, unknown> = {}
 }
 
 async function openSession(userId: number, sessionId?: string): Promise<string> {
-  const pat = await new PatService().getPlainForAgent(userId);
+  const pat = await new AuthService().issueAgentAccessToken(userId);
   const response = await requestWorker('create', {
     userId,
     sessionId,

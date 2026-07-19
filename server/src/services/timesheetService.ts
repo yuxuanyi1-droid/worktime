@@ -305,8 +305,9 @@ export class TimesheetService {
   async processApprovalJobs(jobs: TimesheetApprovalJob[]) {
     if (!jobs.length) return;
     const notifications: PendingNotification[] = [];
-    const svc = new TimesheetService();
-    const submitterCache = new Map<number, User | null>();
+    await AppDataSource.transaction(async (manager) => {
+      const svc = new TimesheetService(manager);
+      const submitterCache = new Map<number, User | null>();
 
     const heads = await svc.repo.findBy({ id: In(jobs.map((j) => j.targetId)) });
     const headById = new Map(heads.map((h) => [h.id, h]));
@@ -399,7 +400,9 @@ export class TimesheetService {
         );
       }
     }
-    await svc.flushNotifications(notifications);
+    });
+    // 通知保持在事务提交之后发送，失败不回滚已经完成的业务写入。
+    await this.flushNotifications(notifications);
   }
 
   /** 提交审批 */

@@ -13,7 +13,6 @@ import { ApprovalFlow } from './entities/ApprovalFlow';
 import { ApprovalFlowStep } from './entities/ApprovalFlowStep';
 import { ApprovalFlowVersion } from './entities/ApprovalFlowVersion';
 import { permissionDefinitions } from './config/permissionDefinitions';
-import { PatService } from './services/patService';
 
 async function seed() {
   if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PROD_SEED !== 'true') {
@@ -117,13 +116,6 @@ async function seed() {
 
   // 生产模式到此为止——不创建部门/分组/示例用户/项目/审批流程
   if (isProduction) {
-    // 为 admin 补建默认 PAT（best-effort）
-    try {
-      const pat = await new PatService().ensureDefaultPat(adminUser.id);
-      console.log(`🔑 admin 默认 PAT: ${pat.tokenPlain}`);
-    } catch (e) {
-      console.warn('⚠️ admin 默认 PAT 创建失败:', (e as Error).message);
-    }
     console.log('\n🎉 生产环境种子数据初始化完成（仅权限/角色/admin 用户）');
     console.log('📝 默认账号：admin / 123456（请尽快修改密码）');
     console.log('📝 组织架构和用户将通过 Authentik OIDC 自动同步');
@@ -256,27 +248,6 @@ async function seed() {
   await userRepo.save(subLeader1!);
 
   console.log('✅ 用户初始化完成');
-
-  // 为所有开发模式示例用户补建默认 PAT，并打印明文方便测试
-  const patService = new PatService();
-  const seedUsers = [
-    { user: adminUser, label: 'admin' },
-    { user: managerUser, label: 'manager1' },
-    { user: leader1!, label: 'leader1' },
-    { user: leader2!, label: 'leader2' },
-    { user: subLeader1!, label: 'subleader1' },
-    { user: emp1!, label: 'employee1' },
-    { user: emp2!, label: 'employee2' },
-  ];
-  console.log('\n🔑 默认 PAT（用于 pi skill / curl 调用后端 API）:');
-  for (const { user, label } of seedUsers) {
-    try {
-      const pat = await patService.ensureDefaultPat(user.id);
-      console.log(`   ${label}: ${pat.tokenPlain}`);
-    } catch (e) {
-      console.warn(`   ⚠️ ${label} PAT 创建失败: ${(e as Error).message}`);
-    }
-  }
 
   // 5. 创建项目（含管理员）
   const projectRepo = AppDataSource.getRepository(Project);

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import { SystemService } from '../services/systemService';
 import { ApprovalFlowEngine } from '../services/approvalFlowService';
 import { AuditService } from '../services/auditService';
@@ -127,7 +128,7 @@ function parseUserPayload(body: Record<string, unknown>, partial = false): UserC
   const statusValue = body.status === undefined ? undefined : Number(parseEnum(String(body.status), 'status', ['0', '1']));
   const parsed = {
     username: partial && body.username === undefined ? undefined : parseString(body.username, 'username', { required: !partial, max: 50 }),
-    password: partial || body.password === undefined ? undefined : parseString(body.password, 'password', { required: true, max: 128 }),
+    password: partial || body.password === undefined ? undefined : parseString(body.password, 'password', { required: true, min: 8, max: 128, trim: false }),
     realName: partial && body.realName === undefined ? undefined : parseString(body.realName, 'realName', { required: !partial, max: 50 }),
     email: parseString(body.email, 'email', { max: 100 }),
     phone: parseString(body.phone, 'phone', { max: 20 }),
@@ -404,10 +405,10 @@ router.put('/users/:id/reset-password', requirePermission('system:user:manage'),
     const id = parsePositiveInt(req.params.id, 'id');
     const body = req.body as Record<string, unknown>;
     // 未指定密码时生成随机密码（不再默认弱密码 123456）
-    let password = parseString(body.password, 'password', { max: 128 });
+    let password = parseString(body.password, 'password', { min: 8, max: 128, trim: false });
     let generated = false;
     if (!password) {
-      password = Math.random().toString(36).slice(2, 10) + Math.floor(Math.random() * 90 + 10);
+      password = crypto.randomBytes(24).toString('base64url');
       generated = true;
     }
     await systemService.resetPassword(id, password);

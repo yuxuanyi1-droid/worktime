@@ -1,14 +1,16 @@
 import 'reflect-metadata';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import path from 'path';
+import type { Server } from 'node:http';
 import './config/env'; // 加载根 .env（端口）+ server/.env（业务配置）
 import pinoHttp from 'pino-http';
 import { AppDataSource, ensureSchema, databaseType } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 import { globalLimiter, loginLimiter, oidcCallbackLimiter, agentLimiter, activateRateLimiters } from './middleware/security';
-import { initRedis, syncSubmissionGroupIdFromDb } from './config/redis';
-import { startApprovalQueueWorker } from './services/approvalQueue';
+import { closeRedis, initRedis, syncSubmissionGroupIdFromDb } from './config/redis';
+import { startApprovalQueueWorker, stopApprovalQueueWorker } from './services/approvalQueue';
 import { TimesheetService } from './services/timesheetService';
 import { metricsMiddleware, metricsHandler } from './middleware/metrics';
 import { logger } from './utils/logger';
@@ -30,8 +32,11 @@ import { ensurePiModelsJson } from './config/ai';
 import { preloadPi } from './ai/agentRunner';
 
 const app = express();
+const isProduction = process.env.NODE_ENV === 'production';
 // PORT 统一在根 .env 配置；Number 化避免字符串端口传入 listen
 const PORT = Number(process.env.PORT) || 3000;
+// 生产多实例默认仅监听本机，由 Caddy/Nginx 统一对外；容器内可显式设为 0.0.0.0。
+const API_HOST = (process.env.API_HOST || (isProduction ? '127.0.0.1' : '0.0.0.0')).trim();
 // 前端端口联动：未配置 ALLOWED_ORIGINS 时按 CLIENT_PORT 自动生成默认白名单
 const clientPort = process.env.CLIENT_PORT || '5173';
 
@@ -51,10 +56,32 @@ const v1Base = `${BASE_PATH}/api/v1`;
 
 // 数据库连接状态
 let dbConnected = false;
+let httpServer: Server | null = null;
+let shuttingDown = false;
 
 // 中间件（顺序重要）
 // 反向代理后取真实 IP（限流依赖此设置）
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(helmet({
+  // 开发期需要 Vite 的动态脚本；生产静态站点使用严格同源策略。
+  contentSecurityPolicy: isProduction ? {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      frameAncestors: ["'none'"],
+      upgradeInsecureRequests: null,
+    },
+  } : false,
+  crossOriginEmbedderPolicy: false,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+}));
 // HTTP 请求日志（pino-http，结构化）。错误请求全部保留；成功请求可按比例采样，
 // 避免高峰期同步生成大量无诊断价值的日志。开发环境默认全量，生产默认采样 1%。
 const successLogSampleRate = (() => {
@@ -104,8 +131,9 @@ app.use(cors({
   origin: allowedOrigins,
   credentials: true,
 }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+const bodyLimit = process.env.HTTP_BODY_LIMIT || '1mb';
+app.use(express.json({ limit: bodyLimit }));
+app.use(express.urlencoded({ extended: true, limit: bodyLimit }));
 
 // 全局限流（所有路由）
 app.use(`${apiBase}/`, globalLimiter);
@@ -123,8 +151,6 @@ app.use(v1Base, (req, res, next) => {
 
 // 登录接口额外限流
 app.use(`${v1Base}/auth/login`, loginLimiter);
-// OIDC 回调限流（换 token 的敏感端点，比通用接口更严格）
-app.use(`${v1Base}/auth/oidc/callback`, oidcCallbackLimiter);
 // AI 聊天限流（每次对话触发 LLM 调用，成本与延时较高）
 app.use(`${v1Base}/agent/chat`, agentLimiter);
 
@@ -148,6 +174,9 @@ app.use(`${v1Base}/agent`, agentRoutes);
 // Prometheus 指标端点（生产应通过 METRICS_TOKEN 环境变量加 Bearer 校验）
 app.get(`${apiBase}/metrics`, async (req, res) => {
   const metricsToken = process.env.METRICS_TOKEN;
+  if (isProduction && !metricsToken) {
+    return res.status(404).json({ code: 404, message: 'Not Found' });
+  }
   if (metricsToken) {
     const auth = req.headers.authorization;
     if (auth !== `Bearer ${metricsToken}`) {
@@ -170,7 +199,6 @@ app.get(`${apiBase}/health`, (req, res) => {
 // 支持根路径（BASE_PATH 为空）和子路径（BASE_PATH 非空）两种部署方式。
 // dist 由 `npm run build` 产出（可选 BASE_PATH=xxx 控制子路径）。
 // 注意：开发期（NODE_ENV != production）不挂载静态文件，仍用 vite dev server。
-const isProduction = process.env.NODE_ENV === 'production';
 if (isProduction) {
   const distDir = path.resolve(__dirname, '../../client/dist');
   const mountPath = `${BASE_PATH}/`;
@@ -227,17 +255,46 @@ AppDataSource.initialize()
     dbConnected = true;
     logger.info('数据库连接成功');
     logger.info({ entities: AppDataSource.entityMetadatas.map(e => e.name) }, '已注册实体');
-    app.listen(PORT, () => {
-      logger.info(`服务端运行在 http://localhost:${PORT}`);
+    httpServer = app.listen(PORT, API_HOST, () => {
+      logger.info({ host: API_HOST, port: PORT }, '服务端已启动');
     });
   })
   .catch((error) => {
     logger.error({ err: error }, '数据库连接失败，请检查根 .env 中的数据库配置');
     // 即使数据库连接失败也启动服务，方便调试
     initRedis().finally(() => activateRateLimiters());
-    app.listen(PORT, () => {
-      logger.warn(`服务端运行在 http://localhost:${PORT} (数据库未连接)`);
+    httpServer = app.listen(PORT, API_HOST, () => {
+      logger.warn({ host: API_HOST, port: PORT }, '服务端已启动（数据库未连接）');
     });
   });
+
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  dbConnected = false;
+  logger.info({ signal }, '服务端开始优雅退出');
+
+  httpServer?.closeIdleConnections?.();
+  const drained = new Promise<void>((resolve) => {
+    if (!httpServer) return resolve();
+    httpServer.close(() => resolve());
+  });
+  const timeout = new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 30_000);
+    timer.unref();
+  });
+  await Promise.race([drained, timeout]);
+
+  await stopApprovalQueueWorker().catch(() => undefined);
+  await closeRedis().catch(() => undefined);
+  if (AppDataSource.isInitialized) {
+    await AppDataSource.destroy().catch(() => undefined);
+  }
+  logger.info({ signal }, '服务端已安全退出');
+  process.exit(0);
+}
+
+process.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+process.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
 
 export default app;

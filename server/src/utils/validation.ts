@@ -57,16 +57,21 @@ export function parseBooleanQuery(value: unknown) {
   return value === true || value === 'true';
 }
 
-export function parseString(value: unknown, field: string, options: { required?: boolean; max?: number } = {}) {
+export function parseString(
+  value: unknown,
+  field: string,
+  options: { required?: boolean; min?: number; max?: number; trim?: boolean } = {},
+) {
   if (value === undefined || value === null) {
     if (options.required) throw new BusinessError(`${field}不能为空`);
     return undefined;
   }
   if (typeof value !== 'string') throw new BusinessError(`${field}必须是字符串`);
-  const trimmed = value.trim();
-  if (options.required && !trimmed) throw new BusinessError(`${field}不能为空`);
-  if (options.max !== undefined && trimmed.length > options.max) throw new BusinessError(`${field}不能超过${options.max}个字符`);
-  return trimmed;
+  const parsed = options.trim === false ? value : value.trim();
+  if (options.required && !parsed) throw new BusinessError(`${field}不能为空`);
+  if (options.min !== undefined && parsed.length < options.min) throw new BusinessError(`${field}不能少于${options.min}个字符`);
+  if (options.max !== undefined && parsed.length > options.max) throw new BusinessError(`${field}不能超过${options.max}个字符`);
+  return parsed;
 }
 
 export function parseDays(value: unknown, field = 'days') {

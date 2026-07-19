@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'node:crypto';
 import { AppDataSource } from '../config/database';
 import { authConfig, oidcConfig } from '../config/auth';
 import { User } from '../entities/User';
@@ -8,9 +9,11 @@ import { Department } from '../entities/Department';
 import { Group } from '../entities/Group';
 import { UserExternalIdentity } from '../entities/UserExternalIdentity';
 import { AccessPolicyService } from './accessPolicyService';
-import { PatService } from './patService';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
+
+// 用户不存在时仍执行同成本的 bcrypt，避免通过响应耗时枚举有效用户名。
+const DUMMY_PASSWORD_HASH = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
 import type { ProviderUserInfo } from './oidc/provider';
 import { CacheKeys, CacheTtl, cacheSet, invalidateAuthUser, invalidateOrgSnapshot } from '../config/cache';
 
@@ -50,12 +53,6 @@ export class AuthService {
       tokenVersion: user.tokenVersion,
     }, CacheTtl.auth);
     const idpManaged = await this.isIdpManaged(user.id);
-    // 首登/无 PAT 时自动建默认 PAT（best-effort，失败不影响登录）
-    try {
-      await new PatService().ensureDefaultPat(user.id);
-    } catch {
-      /* ignore */
-    }
     return {
       token,
       user: {
@@ -72,6 +69,17 @@ export class AuthService {
         idpManaged,
       },
     };
+  }
+
+  /** 为内置 AI worker 签发短期 JWT，避免为了内部调用长期保存 PAT 明文。 */
+  async issueAgentAccessToken(userId: number): Promise<string> {
+    const user = await this.userRepo.findOne({ where: { id: userId, status: 1 } });
+    if (!user) throw new BusinessError('用户不存在或已禁用', 401);
+    return jwt.sign(
+      { id: user.id, username: user.username, realName: user.realName, v: user.tokenVersion, purpose: 'agent' },
+      authConfig.jwtSecret,
+      { expiresIn: '2h' } as jwt.SignOptions,
+    );
   }
 
   /**
@@ -97,6 +105,7 @@ export class AuthService {
     });
 
     if (!user) {
+      await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
       throw new BusinessError('用户名或密码错误');
     }
 
@@ -194,7 +203,7 @@ export class AuthService {
     // 创建用户（密码设为随机串——JIT 用户用密码登录无意义，但 password 非空约束需要值）
     const user = this.userRepo.create({
       username,
-      password: await bcrypt.hash(Math.random().toString(36).slice(2) + Date.now().toString(36), 10),
+      password: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10),
       realName: info.displayName || info.username || info.subject.slice(0, 8),
       email: info.email,
       phone: info.phone,

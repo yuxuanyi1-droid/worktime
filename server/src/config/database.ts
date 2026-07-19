@@ -34,6 +34,8 @@ import { CountersignSupport1700000000002 } from '../migrations/1700000000002-Cou
 import { RootGroupId1700000000003 } from '../migrations/1700000000003-RootGroupId';
 import { PersonalAccessTokens1700000000004 } from '../migrations/1700000000004-PersonalAccessTokens';
 import { ApprovalInstanceIdempotency1700000000005 } from '../migrations/1700000000005-ApprovalInstanceIdempotency';
+import { SecurePersonalAccessTokens1700000000006 } from '../migrations/1700000000006-SecurePersonalAccessTokens';
+import { ApprovalPendingPaginationIndex1700000000007 } from '../migrations/1700000000007-ApprovalPendingPaginationIndex';
 
 /**
  * PostgreSQL 是当前唯一生产数据库；保留旧分支仅用于历史代码读取，不再保证 SQLite 兼容。
@@ -59,6 +61,8 @@ const migrations = [
   CountersignSupport1700000000002, RootGroupId1700000000003,
   PersonalAccessTokens1700000000004,
   ApprovalInstanceIdempotency1700000000005,
+  SecurePersonalAccessTokens1700000000006,
+  ApprovalPendingPaginationIndex1700000000007,
 ];
 
 /**
@@ -118,23 +122,41 @@ export const databaseType = dbType;
  */
 export async function ensureSchema(): Promise<void> {
   const queryRunner = AppDataSource.createQueryRunner();
+  // 固定 advisory lock id：仅用于本系统 schema/migration 启动阶段的跨实例互斥。
+  const migrationLockId = 782_041_903;
   try {
+    await queryRunner.connect();
+    if (dbType === 'postgres') {
+      await queryRunner.query('SELECT pg_advisory_lock($1)', [migrationLockId]);
+    }
     // 只看业务 schema：Postgres 的 getTables() 会带出 pg_catalog 等系统表，
     // 若用「任意非系统表」判断会导致永远跳过 synchronize。
-    const tables = await queryRunner.getTables();
     const SYSTEM_TABLES = new Set(['migrations', 'typeorm_metadata', 'sqlite_sequence']);
-    const businessTables = tables.filter((t) => {
-      const schema = (t as { schema?: string }).schema;
-      // sqlite 无 schema；postgres 业务表在 public
-      if (schema && schema !== 'public') return false;
-      return !SYSTEM_TABLES.has(t.name) && !t.name.startsWith('pg_');
-    });
-    if (businessTables.length === 0) {
+    let businessTableCount: number;
+    if (dbType === 'postgres') {
+      const rows = await queryRunner.query(`
+        SELECT COUNT(*)::int AS count
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_type = 'BASE TABLE'
+          AND table_name NOT IN ('migrations', 'typeorm_metadata')
+          AND table_name NOT LIKE 'pg_%'
+      `);
+      businessTableCount = Number(rows?.[0]?.count ?? 0);
+    } else {
+      const tables = await queryRunner.getTables();
+      businessTableCount = tables.filter((table) =>
+        !SYSTEM_TABLES.has(table.name) && !table.name.startsWith('pg_')).length;
+    }
+    if (businessTableCount === 0) {
       await AppDataSource.synchronize(false);
     }
+    // advisory lock 持有期间运行 migration，避免多个 API 同时启动时重复执行同一版本。
+    await AppDataSource.runMigrations();
   } finally {
+    if (dbType === 'postgres' && queryRunner.isReleased === false) {
+      await queryRunner.query('SELECT pg_advisory_unlock($1)', [migrationLockId]).catch(() => undefined);
+    }
     await queryRunner.release();
   }
-  // 运行 migration：补齐新增实体表（IF NOT EXISTS 幂等），由 migrations 表跟踪版本
-  await AppDataSource.runMigrations();
 }

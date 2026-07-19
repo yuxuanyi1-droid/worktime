@@ -5,10 +5,8 @@ export interface PersonalAccessToken {
   id: number;
   userId: number;
   name: string;
-  /** sha256，前端一般不展示 */
-  tokenHash: string;
-  /** 明文令牌，完整 wpat_<32hex>，可复制 */
-  tokenPlain: string;
+  /** 仅创建响应包含完整明文；列表永不返回 */
+  tokenPlain?: string;
   /** 明文前缀预览 */
   prefix: string;
   scopes: string | null;

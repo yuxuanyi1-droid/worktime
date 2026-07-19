@@ -390,7 +390,12 @@ cleanupTimer.unref();
 async function bootstrap() {
   fs.mkdirSync(SAFE_CWD, { recursive: true });
   fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
-  pi = await import('@earendil-works/pi-coding-agent');
+  // 本项目输出 CommonJS，TypeScript 会把普通 import() 降级为 require()；而 pi 包只导出
+  // ESM 的 import 条件。通过原生动态 import 保留 ESM 加载语义，避免启动时报
+  // “No exports main defined”。模块名是服务端固定常量，不接收用户输入。
+  const nativeImport = new Function('specifier', 'return import(specifier)') as
+    (specifier: string) => Promise<any>;
+  pi = await nativeImport('@earendil-works/pi-coding-agent');
   post({ type: 'ready' });
 }
 

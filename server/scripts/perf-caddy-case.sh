@@ -80,12 +80,14 @@ start_stack() {
     )
   done
 
+  if [[ "${PERF_DISABLE_WORKER:-0}" != "1" ]]; then
     (
       cd "$SERVER_DIR"
-    nohup env NODE_ENV=production DB_POOL_MAX=6 APPROVAL_BATCH_SIZE="$batch_size" \
-      node dist/approvalWorker.js >"$RUNTIME_DIR/logs/worker.log" 2>&1 </dev/null &
-    echo $! >"$RUNTIME_DIR/worker.pid"
-  )
+      nohup env NODE_ENV=production DB_POOL_MAX=6 APPROVAL_BATCH_SIZE="$batch_size" \
+        node dist/approvalWorker.js >"$RUNTIME_DIR/logs/worker.log" 2>&1 </dev/null &
+      echo $! >"$RUNTIME_DIR/worker.pid"
+    )
+  fi
 
   # 主动健康检查不能早于应用启动，否则 Caddy 会在首轮测试开始时临时摘除全部上游。
   for ((i = 0; i < api_count; i++)); do
@@ -135,6 +137,10 @@ queue_length() {
 }
 
 wait_queue_drain() {
+  if [[ "${PERF_DISABLE_WORKER:-0}" == "1" ]]; then
+    echo 0
+    return 0
+  fi
   local start=$SECONDS
   local remaining
   while (( SECONDS - start < 180 )); do

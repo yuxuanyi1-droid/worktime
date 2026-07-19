@@ -95,7 +95,7 @@ describe('parseBooleanQuery', () => {
   });
 });
 
-describe('parseString', () => {
+  describe('parseString', () => {
   it('非必填空值返回 undefined', () => {
     expect(parseString(undefined, 'name')).toBeUndefined();
   });
@@ -108,6 +108,11 @@ describe('parseString', () => {
   it('trim 并校验 max', () => {
     expect(parseString('  hello  ', 'name')).toBe('hello');
     expect(() => parseString('toolong', 'name', { max: 3 })).toThrow();
+  });
+
+  it('校验 min', () => {
+    expect(parseString('12345678', 'password', { min: 8 })).toBe('12345678');
+    expect(() => parseString('1234567', 'password', { min: 8 })).toThrow();
   });
 });
 
@@ -169,3 +174,6 @@ describe('firstQueryValue', () => {
     expect(firstQueryValue(undefined)).toBeUndefined();
   });
 });
+    it('可为密码保留首尾空格', () => {
+      expect(parseString('  pass word  ', 'password', { trim: false })).toBe('  pass word  ');
+    });

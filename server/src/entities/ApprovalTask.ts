@@ -16,6 +16,7 @@ export type ApprovalTaskAction = 'approve' | 'reject' | 'skip' | 'withdraw';
 
 @Entity('approval_tasks')
 @Index(['approverId', 'status'])
+@Index(['status', 'updatedAt'])
 @Index(['targetType', 'targetId'])
 @Index(['instanceId', 'stepOrder'])
 export class ApprovalTask {

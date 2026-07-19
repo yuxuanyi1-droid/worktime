@@ -5,14 +5,11 @@ import { User } from './User';
  * 个人访问令牌（Personal Access Token）。
  *
  * 用于：
- * - pi agent skill 在后端进程内通过 curl 调本系统 HTTP API（把令牌注入会话环境变量 WORKTIME_PAT）
  * - 外部工具（Cursor / ZCode 里跑 pi）直接用同一套 SKILL.md 调本系统 HTTP API
  *
  * 与 JWT 的区别：
  * - JWT 走 tokenVersion 校验，改密/登出即失效；PAT 独立持久，不走 tokenVersion
- * - 明文以 `wpat_<32位hex>` 形式返回给用户；库里同时存明文（tokenPlain，方便用户回来复制）与 sha256（tokenHash，查表用）
- *
- * 注意：明文存储是产品需求（用户希望忘记后可回页复制），DB 泄露即令牌泄露，需注意 DB 访问控制。
+ * - 明文以 `wpat_<32位hex>` 形式仅在创建响应中返回一次；库里只保留 sha256 和脱敏前缀
  */
 @Entity('personal_access_tokens')
 @Index(['userId', 'createdAt'])
@@ -34,9 +31,9 @@ export class PersonalAccessToken {
   @Column({ type: 'varchar', length: 255 })
   tokenHash!: string;
 
-  /** 明文令牌，完整存储以便用户随时复制（产品需求）。格式 `wpat_<32位hex>` */
-  @Column({ type: 'text' })
-  tokenPlain!: string;
+  /** 兼容旧 schema 的遗留列；安全迁移后清空，新令牌不再保存明文。 */
+  @Column({ type: 'text', nullable: true, select: false })
+  tokenPlain!: string | null;
 
   /** 明文前 12 位，用于列表展示脱敏预览，如 `wpat_abc12...` */
   @Column({ type: 'varchar', length: 20 })

@@ -15,7 +15,7 @@ const WEAK_SECRETS = new Set([
   'changeme',
 ]);
 if (WEAK_SECRETS.has(jwtSecret)) {
-  throw new Error(`JWT_SECRET 是已知的弱密钥/占位符（${jwtSecret}），请生成一个至少 32 字符的随机密钥`);
+  throw new Error('JWT_SECRET 是已知的弱密钥或占位符，请生成一个至少 32 字符的随机密钥');
 }
 if (jwtSecret.length < 16) {
   throw new Error(`JWT_SECRET 长度不足（${jwtSecret.length} 字符），请使用至少 32 字符的随机密钥`);
@@ -86,4 +86,3 @@ export const oidcConfig = {
   /** state 有效期（毫秒），默认 10 分钟 */
   stateTtlMs: 10 * 60 * 1000,
 };
-

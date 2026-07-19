@@ -295,27 +295,27 @@ export class ApprovalInstanceService {
     return null;
   }
 
-  async getPendingTasks(approverId: number, params: { targetType?: string; isAdmin?: boolean }) {
-    const where: any = { status: 'pending' };
-    if (!params.isAdmin) where.approverId = approverId;
-    if (params.targetType) where.targetType = params.targetType;
+  async getPendingTasks(approverId: number, params: {
+    targetType?: string;
+    isAdmin?: boolean;
+    page: number;
+    pageSize: number;
+  }) {
+    const qb = this.taskRepo.createQueryBuilder('task')
+      .innerJoinAndSelect('task.instance', 'instance')
+      .where('task.status = :taskStatus', { taskStatus: 'pending' })
+      .andWhere('instance.status = :instanceStatus', { instanceStatus: 'pending' })
+      .andWhere('task.stepOrder = instance.currentStepOrder')
+      .andWhere('instance.applicantId <> :approverId', { approverId });
+    if (!params.isAdmin) qb.andWhere('task.approverId = :approverId', { approverId });
+    if (params.targetType) qb.andWhere('task.targetType = :targetType', { targetType: params.targetType });
 
-    const tasks = await this.taskRepo.find({
-      where,
-      relations: ['instance'],
-      order: { updatedAt: 'DESC' },
-    });
-
-    const byInstance = new Map<number, ApprovalTask>();
-    for (const task of tasks) {
-      if (task.instance?.status !== 'pending') continue;
-      // 只取当前步骤的 task（A7：避免跨步骤同审批人返回历史步骤的 task）
-      if (task.instance.currentStepOrder !== null && task.stepOrder !== task.instance.currentStepOrder) continue;
-      const existing = byInstance.get(task.instanceId);
-      // 优先保留当前步骤的；若已有当前步骤 task 则不覆盖
-      if (!existing) byInstance.set(task.instanceId, task);
-    }
-    return Array.from(byInstance.values());
+    const [items, total] = await qb
+      .orderBy('task.updatedAt', 'DESC')
+      .skip((params.page - 1) * params.pageSize)
+      .take(params.pageSize)
+      .getManyAndCount();
+    return { items, total };
   }
 
   async getTasksForInstance(instanceId: number) {

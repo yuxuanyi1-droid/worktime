@@ -10,7 +10,7 @@ const auditService = new AuditService();
 // PAT 管理本身只走 JWT 会话鉴权（不能用 PAT 管 PAT，避免令牌自管带来的循环依赖）
 router.use(authMiddleware);
 
-/** 列出当前用户所有 PAT（含明文，方便用户复制） */
+/** 列出当前用户所有 PAT（仅元数据和脱敏前缀，不返回 hash/明文） */
 router.get('/', async (req: AuthRequest, res, next) => {
   try {
     const list = await patService.listMine(req.user!.id);

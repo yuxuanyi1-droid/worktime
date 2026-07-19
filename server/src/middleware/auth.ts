@@ -37,7 +37,7 @@ export interface AuthRequest extends Request {
 
 /**
  * 计算 PAT 明文的 sha256（hex），用于按令牌查表。
- * 库里同时存明文（tokenPlain）与 sha256（tokenHash）。
+ * 库里只存 sha256，不保存可恢复的 PAT 明文。
  */
 export function hashPat(plain: string): string {
   return crypto.createHash('sha256').update(plain).digest('hex');
@@ -129,11 +129,10 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
  */
 async function authenticatePat(token: string, req: AuthRequest, res: Response, next: NextFunction) {
   const patRepo = AppDataSource.getRepository(PersonalAccessToken);
-  const userRepo = AppDataSource.getRepository(User);
 
   const pat = await patRepo.findOne({
     where: { tokenHash: hashPat(token) },
-    relations: ['user'],
+    relations: ['user', 'user.roles', 'user.roles.permissions'],
   });
 
   if (!pat) {
@@ -150,26 +149,19 @@ async function authenticatePat(token: string, req: AuthRequest, res: Response, n
     return res.status(401).json({ code: 401, message: '令牌所属用户不存在或已禁用' });
   }
 
-  // 加载角色关系用于权限计算
-  const fullUser = await userRepo.findOne({
-    where: { id: user.id },
-    relations: ['roles', 'roles.permissions'],
-  });
-  if (!fullUser) {
-    return res.status(401).json({ code: 401, message: '用户不存在或已禁用' });
+  // 最多每 5 分钟记录一次使用时间，避免 PAT 高频调用把鉴权变成数据库写热点。
+  const now = Date.now();
+  if (!pat.lastUsedAt || now - pat.lastUsedAt.getTime() >= 5 * 60 * 1000) {
+    patRepo.update(pat.id, { lastUsedAt: new Date(now) }).catch(() => { /* best-effort，不影响主流程 */ });
   }
 
-  // 异步更新 lastUsedAt（不阻塞请求，失败也忽略）
-  pat.lastUsedAt = new Date();
-  patRepo.save(pat).catch(() => { /* best-effort，不影响主流程 */ });
-
   req.user = {
-    id: fullUser.id,
-    username: fullUser.username,
-    realName: fullUser.realName,
-    roles: fullUser.roles.map(r => r.name),
+    id: user.id,
+    username: user.username,
+    realName: user.realName,
+    roles: user.roles.map(r => r.name),
   };
-  req.userPermissions = await accessPolicy.getPermissionCodesForLoadedUser(fullUser);
+  req.userPermissions = await accessPolicy.getPermissionCodesForLoadedUser(user);
   req.authMethod = 'pat';
 
   return next();

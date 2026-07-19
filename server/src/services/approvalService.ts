@@ -217,13 +217,11 @@ export class ApprovalService {
   async getPendingList(approverId: number, params: { targetType?: string; page?: number; pageSize?: number }) {
     const { targetType, page = 1, pageSize = 20 } = params;
     const isAdmin = await this.isAdminUser(approverId);
-    // 拿到全部待办任务（已按 instance 去重），过滤掉自己提交的
-    const allTasks = (await this.approvalInstanceService.getPendingTasks(approverId, { targetType, isAdmin }))
-      .filter(task => task.instance?.applicantId !== approverId);
-
-    const total = allTasks.length;
-    // 先取当前页的任务再组装，避免组装全部记录
-    const pageTasks = allTasks.slice((page - 1) * pageSize, page * pageSize);
+    // 在数据库完成范围过滤和分页，避免管理员请求加载公司全部待办。
+    const { items: pageTasks, total } = await this.approvalInstanceService.getPendingTasks(
+      approverId,
+      { targetType, isAdmin, page, pageSize },
+    );
 
     // 批量加载 target：按 targetType 分组，用 In(...) 一次性取，避免 N+1
     const tasksByType = new Map<string, typeof pageTasks>();

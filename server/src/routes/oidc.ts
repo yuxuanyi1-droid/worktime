@@ -5,6 +5,8 @@ import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
+import { oidcCallbackLimiter } from '../middleware/security';
+import { buildTrustedRedirectUri } from '../services/oidc/redirectUri';
 import {
   getProvider,
   listVisibleProviders,
@@ -32,7 +34,13 @@ function deriveRedirectUri(req: AuthRequest): string {
     (req.body && req.body.redirectUriBase) ||
     '';
   if (base) {
-    return `${base.replace(/\/+$/, '')}/oidc/callback`;
+    const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol || 'http';
+    const host = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.get('host') || '';
+    const requestOrigin = `${proto}://${host}`;
+    const clientPort = process.env.CLIENT_PORT || '5173';
+    const configuredOrigins = (process.env.OIDC_REDIRECT_ORIGINS || process.env.ALLOWED_ORIGINS ||
+      `http://localhost:${clientPort},http://127.0.0.1:${clientPort}`).split(',');
+    return buildTrustedRedirectUri(base, requestOrigin, configuredOrigins);
   }
   const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
   const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
@@ -133,7 +141,7 @@ router.get('/:provider/login', async (req: AuthRequest, res: Response, next) => 
  * - state.mode === 'login': 查绑定 → 签发本地 JWT → 返回 { token, user }
  * - state.mode === 'bind':  需带 Authorization，且 state.userId === 当前用户 → 写绑定表
  */
-router.post('/:provider/callback', async (req: AuthRequest, res, next) => {
+router.post('/:provider/callback', oidcCallbackLimiter, async (req: AuthRequest, res, next) => {
   try {
     const provider = req.params.provider;
     const { code, state } = req.body ?? {};

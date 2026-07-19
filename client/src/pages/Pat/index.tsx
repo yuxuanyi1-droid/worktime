@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, Button, message, Typography, Table, Modal, Input, Form, Space, Tag, Tooltip, Popconfirm } from 'antd';
+import { Card, Button, message, Typography, Table, Modal, Input, Form, Space, Tag, Popconfirm } from 'antd';
 import { PlusOutlined, CopyOutlined, DeleteOutlined, KeyOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { patApi, type PersonalAccessToken } from '../../api/pat';
@@ -10,6 +10,7 @@ export default function PatPage() {
   const [list, setList] = useState<PersonalAccessToken[]>([]);
   const [loading, setLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [createdToken, setCreatedToken] = useState('');
   const [form] = Form.useForm();
 
   const load = async () => {
@@ -45,9 +46,8 @@ export default function PatPage() {
       message.success('令牌已创建');
       setCreateOpen(false);
       form.resetFields();
-      // 直接复制新建令牌
       if (res.data?.tokenPlain) {
-        handleCopy(res.data.tokenPlain);
+        setCreatedToken(res.data.tokenPlain);
       }
       load();
     } catch (e: any) {
@@ -81,18 +81,9 @@ export default function PatPage() {
     },
     {
       title: '令牌',
-      dataIndex: 'tokenPlain',
-      key: 'tokenPlain',
-      render: (plain: string) => (
-        <Space>
-          <Text code style={{ fontSize: 12, maxWidth: 320, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>
-            {plain}
-          </Text>
-          <Tooltip title="复制完整令牌">
-            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => handleCopy(plain)} />
-          </Tooltip>
-        </Space>
-      ),
+      dataIndex: 'prefix',
+      key: 'prefix',
+      render: (prefix: string) => <Text code>{prefix}...</Text>,
     },
     {
       title: '创建时间',
@@ -180,9 +171,26 @@ export default function PatPage() {
             <Input type="datetime-local" style={{ width: '100%' }} />
           </Form.Item>
           <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
-            创建后令牌会立即复制到剪贴板，列表中也会保留明文方便随时复制。
+            令牌只会在创建后显示一次，关闭后无法再次查看，请立即复制并妥善保存。
           </Paragraph>
         </Form>
+      </Modal>
+
+      <Modal
+        title="访问令牌已创建"
+        open={!!createdToken}
+        onCancel={() => setCreatedToken('')}
+        footer={[
+          <Button key="copy" type="primary" icon={<CopyOutlined />} onClick={() => handleCopy(createdToken)}>
+            复制令牌
+          </Button>,
+          <Button key="close" onClick={() => setCreatedToken('')}>我已保存</Button>,
+        ]}
+        closable={false}
+        maskClosable={false}
+      >
+        <Paragraph type="warning">该令牌只显示一次，关闭后无法恢复。若丢失，请删除并重新创建。</Paragraph>
+        <Input.TextArea value={createdToken} readOnly autoSize={{ minRows: 2, maxRows: 4 }} />
       </Modal>
     </div>
   );
