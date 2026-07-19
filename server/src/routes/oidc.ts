@@ -6,7 +6,7 @@ import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { oidcCallbackLimiter } from '../middleware/security';
-import { buildTrustedRedirectUri } from '../services/oidc/redirectUri';
+import { buildFixedRedirectUri, buildTrustedRedirectUri } from '../services/oidc/redirectUri';
 import {
   getProvider,
   listVisibleProviders,
@@ -29,6 +29,11 @@ const auditService = new AuditService();
  * 生产前后端同域时，兜底 host 即正确值。
  */
 function deriveRedirectUri(req: AuthRequest): string {
+  const fixedOrigin = process.env.OIDC_REDIRECT_ORIGIN?.trim();
+  if (fixedOrigin) {
+    return buildFixedRedirectUri(fixedOrigin, process.env.BASE_PATH || '');
+  }
+
   const base =
     (req.query.redirectUriBase as string) ||
     (req.body && req.body.redirectUriBase) ||

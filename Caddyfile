@@ -3,8 +3,10 @@
 	auto_https off
 }
 
-# 工时系统统一入口。API 实例仍保留完整 /worktime 路径，无需改应用路由。
-http://127.0.0.1:3001 {
+# 工时系统统一入口。接受 Tunnel 保留的公网 Host，但仅在本机回环地址监听。
+http://:3000 {
+	bind 127.0.0.1 ::1
+
 	encode zstd gzip
 
 	reverse_proxy 127.0.0.1:3011 127.0.0.1:3012 127.0.0.1:3013 {
