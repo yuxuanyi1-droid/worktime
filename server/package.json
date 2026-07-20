@@ -12,8 +12,8 @@
     "perf:inspect": "node scripts/inspect-perf-state.cjs",
     "perf:drill-approval-recovery": "node scripts/drill-approval-recovery.cjs",
     "perf:stress-reference-reads": "node scripts/stress-reference-reads.mjs",
-    "migration:run": "tsx -e \"import('./src/config/env').then(() => import('./src/config/database')).then(async m => { await m.AppDataSource.initialize(); await m.AppDataSource.runMigrations(); await m.AppDataSource.destroy(); })\"",
-    "migration:revert": "tsx -e \"import('./src/config/env').then(() => import('./src/config/database')).then(async m => { await m.AppDataSource.initialize(); await m.AppDataSource.undoLastMigration(); await m.AppDataSource.destroy(); })\"",
+    "migration:run": "tsx -e \"import './src/config/env'; import { AppDataSource } from './src/config/database'; void (async () => { await AppDataSource.initialize(); await AppDataSource.runMigrations(); await AppDataSource.destroy(); })();\"",
+    "migration:revert": "tsx -e \"import './src/config/env'; import { AppDataSource } from './src/config/database'; void (async () => { await AppDataSource.initialize(); await AppDataSource.undoLastMigration(); await AppDataSource.destroy(); })();\"",
     "test": "vitest run",
     "test:watch": "vitest"
   },

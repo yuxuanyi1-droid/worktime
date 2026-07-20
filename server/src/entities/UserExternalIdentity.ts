@@ -28,6 +28,10 @@ export class UserExternalIdentity {
   @Column({ type: 'varchar', length: 255, nullable: true })
   externalUsername!: string | null;
 
+  /** IdP 返回的员工工号；TT 等企业内部通道使用，不能用本地 username 替代。 */
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  employeeId!: string | null;
+
   @ManyToOne(() => User, user => user.externalIdentities, { onDelete: 'CASCADE' })
   user!: User;
 

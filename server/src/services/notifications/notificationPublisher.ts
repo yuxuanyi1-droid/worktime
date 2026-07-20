@@ -1,6 +1,7 @@
 import { In } from 'typeorm';
+import { oidcConfig } from '../../config/auth';
 import { AppDataSource } from '../../config/database';
-import { User } from '../../entities/User';
+import { UserExternalIdentity } from '../../entities/UserExternalIdentity';
 import { logger } from '../../utils/logger';
 import { NotificationService } from '../notificationService';
 import { TtMessage, TtRobotClient } from './ttRobotClient';
@@ -25,12 +26,43 @@ export interface PublishNotificationOptions {
 export type TtPublishStatus = 'disabled' | 'skipped' | 'sent' | 'failed';
 export type TtRecipientResolver = (userIds: number[]) => Promise<string[]>;
 
-async function resolveRecipientsByUsername(userIds: number[]): Promise<string[]> {
-  const users = await AppDataSource.getRepository(User).find({
-    select: { id: true, username: true },
-    where: { id: In(userIds), status: 1 },
+export async function resolveTtRecipientsFromSiam(userIds: number[]): Promise<string[]> {
+  const siamProviders = Object.entries(oidcConfig.providers)
+    .filter(([, config]) => config.type === 'siam')
+    .map(([name]) => name);
+  if (!siamProviders.length) {
+    logger.warn('未配置 OPPO SIAM 提供商，无法解析 TT 通知接收人工号');
+    return [];
+  }
+
+  const identities = await AppDataSource.getRepository(UserExternalIdentity).find({
+    select: {
+      provider: true,
+      employeeId: true,
+      externalUsername: true,
+      user: { id: true },
+    },
+    where: {
+      provider: In(siamProviders),
+      user: { id: In(userIds), status: 1 },
+    },
+    relations: { user: true },
   });
-  return users.map(user => user.username.trim()).filter(Boolean);
+
+  const employeeIdByUser = new Map<number, string>();
+  for (const provider of siamProviders) {
+    for (const identity of identities) {
+      if (identity.provider !== provider || employeeIdByUser.has(identity.user.id)) continue;
+      // 兼容升级前的 SIAM 绑定：externalUsername 由 SiamAdapter 的 uid 生成，即 SIAM 工号。
+      const employeeId = identity.employeeId?.trim() || identity.externalUsername?.trim();
+      if (employeeId) employeeIdByUser.set(identity.user.id, employeeId);
+    }
+  }
+  const missingUserIds = userIds.filter(userId => !employeeIdByUser.has(userId));
+  if (missingUserIds.length) {
+    logger.warn({ missingUserIds }, '部分用户未绑定 OPPO SIAM 或 SIAM 未返回工号，已跳过 TT 通知');
+  }
+  return userIds.map(userId => employeeIdByUser.get(userId)).filter((value): value is string => !!value);
 }
 
 /**
@@ -43,7 +75,7 @@ export class NotificationPublisher {
   constructor(
     private readonly inApp = new NotificationService(),
     private readonly tt = new TtRobotClient(),
-    private readonly resolveTtRecipients: TtRecipientResolver = resolveRecipientsByUsername,
+    private readonly resolveTtRecipients: TtRecipientResolver = resolveTtRecipientsFromSiam,
   ) {}
 
   async publishToUser(

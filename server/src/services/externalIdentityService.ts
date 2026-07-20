@@ -21,6 +21,7 @@ export class ExternalIdentityService {
       provider: b.provider,
       providerLabel: getProviderLabel(b.provider),
       externalUsername: b.externalUsername,
+      employeeId: b.employeeId,
       boundAt: b.boundAt,
     }));
   }
@@ -37,9 +38,17 @@ export class ExternalIdentityService {
     });
     if (existing) {
       if (existing.user?.id === userId) {
-        // 已绑定到当前用户：仅更新展示昵称后返回（幂等）
+        // 已绑定到当前用户：同步展示昵称和 IdP 工号后返回（幂等）
+        let changed = false;
         if (info.username && existing.externalUsername !== info.username) {
           existing.externalUsername = info.username;
+          changed = true;
+        }
+        if (info.employeeId && existing.employeeId !== info.employeeId) {
+          existing.employeeId = info.employeeId;
+          changed = true;
+        }
+        if (changed) {
           await this.repo.save(existing);
         }
         return existing;
@@ -59,6 +68,7 @@ export class ExternalIdentityService {
       provider,
       subject: info.subject,
       externalUsername: info.username ?? null,
+      employeeId: info.employeeId ?? null,
       user: { id: userId } as any,
     });
     return this.repo.save(identity);

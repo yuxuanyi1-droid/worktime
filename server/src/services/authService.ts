@@ -168,9 +168,18 @@ export class AuthService {
     // 角色不同步——由本地管理员手动维护。
     if (providerConfig?.jit) {
       await this.syncUserProfile(user, info);
-    } else if (info.username && identity.externalUsername !== info.username) {
-      // 非 JIT：仅更新展示用昵称（绑定后 IdP 侧改名也能同步展示）
+    }
+    // 所有 IdP 绑定都同步展示用户名和工号；TT 依赖 SIAM 返回的 employeeId。
+    let identityChanged = false;
+    if (info.username && identity.externalUsername !== info.username) {
       identity.externalUsername = info.username;
+      identityChanged = true;
+    }
+    if (info.employeeId && identity.employeeId !== info.employeeId) {
+      identity.employeeId = info.employeeId;
+      identityChanged = true;
+    }
+    if (identityChanged) {
       await this.identityRepo.save(identity);
     }
 
@@ -219,6 +228,7 @@ export class AuthService {
       provider,
       subject: info.subject,
       externalUsername: info.username || null,
+      employeeId: info.employeeId || null,
       user: saved,
     } as UserExternalIdentity);
 

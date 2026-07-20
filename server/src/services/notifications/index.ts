@@ -1,4 +1,4 @@
-export { NotificationPublisher } from './notificationPublisher';
+export { NotificationPublisher, resolveTtRecipientsFromSiam } from './notificationPublisher';
 export type {
   PublishNotificationInput,
   PublishNotificationOptions,
