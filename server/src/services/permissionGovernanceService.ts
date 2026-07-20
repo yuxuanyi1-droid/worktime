@@ -11,7 +11,7 @@ import { Project } from '../entities/Project';
 import { User } from '../entities/User';
 import { PermissionScopeType, UserPermissionGrant } from '../entities/UserPermissionGrant';
 import { ApprovalInstanceService } from './approvalInstanceService';
-import { NotificationService } from './notificationService';
+import { NotificationPublisher } from './notifications';
 
 export type PermissionRequestPayload = {
   permissionCode: string;
@@ -33,7 +33,6 @@ export class PermissionGovernanceService {
   private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
   private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
-  private get notificationService() { return new NotificationService(this.manager); }
 
   async getGrantableDefinitions() {
     const definitions = permissionDefinitions.filter((definition) => definition.grantable);
@@ -160,7 +159,7 @@ export class PermissionGovernanceService {
       }
     });
 
-    const notifier = new NotificationService();
+    const notifier = new NotificationPublisher();
     for (const n of notifications) {
       try { await notifier.notifyApprovalPending(n.approverIds, n.targetType, n.targetId, n.applicantName, n.title); } catch {}
     }

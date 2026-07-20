@@ -6,7 +6,7 @@ import { SubmissionSequence } from '../entities/SubmissionSequence';
 import { ApprovalRecord } from '../entities/ApprovalRecord';
 import { ApprovalInstance } from '../entities/ApprovalInstance';
 import { Between, In, Not, Brackets } from 'typeorm';
-import { NotificationService } from './notificationService';
+import { NotificationPublisher } from './notifications';
 import { User } from '../entities/User';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { AccessPolicyService, OrgSnapshot } from './accessPolicyService';
@@ -729,7 +729,7 @@ export class TimesheetService {
 
   /** 事务提交后统一发送通知（失败不影响业务） */
   private async flushNotifications(notifications: PendingNotification[]) {
-    const notifier = new NotificationService();
+    const notifier = new NotificationPublisher();
     for (const n of notifications) {
       try {
         if (n.kind === 'pending') {

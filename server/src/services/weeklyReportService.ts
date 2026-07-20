@@ -3,7 +3,7 @@ import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { WeeklyReport } from '../entities/WeeklyReport';
 import { ApprovalInstanceService } from './approvalInstanceService';
-import { NotificationService } from './notificationService';
+import { NotificationPublisher } from './notifications';
 import { User } from '../entities/User';
 
 export class WeeklyReportService {
@@ -11,7 +11,6 @@ export class WeeklyReportService {
 
   private get repo() { return (this.manager ?? AppDataSource).getRepository(WeeklyReport); }
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
-  private get notificationService() { return new NotificationService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
 
   async createOrUpdate(data: { userId: number; weekStart: string; weekEnd: string; content?: string; summary?: string; totalDays?: number }) {
@@ -109,7 +108,7 @@ export class WeeklyReportService {
       await txService.repo.save(record);
     });
 
-    const notifier = new NotificationService();
+    const notifier = new NotificationPublisher();
     for (const n of notifications) {
       try { await notifier.notifyApprovalPending(n.approverIds, n.targetType, n.targetId, n.applicantName, n.title); } catch {}
     }

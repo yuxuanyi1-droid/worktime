@@ -9,7 +9,7 @@ import { Group } from '../entities/Group';
 import { ApprovalTask } from '../entities/ApprovalTask';
 import { ApprovalInstance } from '../entities/ApprovalInstance';
 import { ApprovalInstanceService } from './approvalInstanceService';
-import { NotificationService } from './notificationService';
+import { NotificationPublisher } from './notifications';
 import { PermissionRequest } from '../entities/PermissionRequest';
 import { PermissionGovernanceService } from './permissionGovernanceService';
 import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
@@ -73,7 +73,6 @@ export class ApprovalService {
   private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
   private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
-  private get notificationService() { return new NotificationService(this.manager); }
   private get permissionGovernanceService() { return new PermissionGovernanceService(this.manager); }
 
   private async isAdminUser(userId: number): Promise<boolean> {
@@ -395,7 +394,7 @@ export class ApprovalService {
 
   /** 事务提交后统一发送通知（失败不影响业务） */
   private async flushNotifications(notifications: PendingNotification[]) {
-    const notifier = new NotificationService();
+    const notifier = new NotificationPublisher();
     for (const n of notifications) {
       try {
         if (n.kind === 'pending') {

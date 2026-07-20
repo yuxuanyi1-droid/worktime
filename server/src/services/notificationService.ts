@@ -1,25 +1,12 @@
-import { EntityManager } from 'typeorm';
+import { EntityManager, In } from 'typeorm';
 import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { Notification } from '../entities/Notification';
-import { User } from '../entities/User';
-import { Between, In } from 'typeorm';
 
 export class NotificationService {
   constructor(private manager?: EntityManager) {}
 
   private get repo() { return (this.manager ?? AppDataSource).getRepository(Notification); }
-  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
-
-  private getApprovalTypeLabel(targetType: string) {
-    const labels: Record<string, string> = {
-      timesheet: '工时',
-      overtime: '加班',
-      weekly_report: '周报',
-      permission_request: '权限',
-    };
-    return labels[targetType] || '审批';
-  }
 
   /** 创建通知 */
   async create(data: {
@@ -88,29 +75,4 @@ export class NotificationService {
     await this.repo.delete(id);
   }
 
-  /** 发送审批相关通知 */
-  async notifyApprovalPending(approverIds: number[], targetType: string, targetId: number, applicantName: string, title: string) {
-    const typeLabel = this.getApprovalTypeLabel(targetType);
-    return this.createBatch(approverIds, {
-      type: 'approval_pending',
-      title: `待审批：${title}`,
-      content: `${applicantName} 提交了一份${typeLabel}申请，请及时审批`,
-      targetType,
-      targetId,
-    });
-  }
-
-  /** 通知申请人审批结果 */
-  async notifyApprovalResult(applicantId: number, targetType: string, targetId: number, approved: boolean, comment?: string) {
-    const actionLabel = approved ? '已通过' : '已驳回';
-    const typeLabel = this.getApprovalTypeLabel(targetType);
-    return this.create({
-      userId: applicantId,
-      type: approved ? 'approval_approved' : 'approval_rejected',
-      title: `${typeLabel}申请${actionLabel}`,
-      content: comment || `您的${typeLabel}申请已${actionLabel}`,
-      targetType,
-      targetId,
-    });
-  }
 }

@@ -4,7 +4,7 @@ import { AppDataSource } from '../config/database';
 import { OvertimeApplication, OvertimeType } from '../entities/OvertimeApplication';
 import { Between, In } from 'typeorm';
 import { ApprovalInstanceService } from './approvalInstanceService';
-import { NotificationService } from './notificationService';
+import { NotificationPublisher } from './notifications';
 import { User } from '../entities/User';
 import { AccessPolicyService } from './accessPolicyService';
 
@@ -13,7 +13,6 @@ export class OvertimeService {
 
   private get repo() { return (this.manager ?? AppDataSource).getRepository(OvertimeApplication); }
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
-  private get notificationService() { return new NotificationService(this.manager); }
   private get accessPolicy() { return new AccessPolicyService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
 
@@ -89,7 +88,7 @@ export class OvertimeService {
     });
 
     // 事务提交后发通知（失败不影响业务）
-    const notifier = new NotificationService();
+    const notifier = new NotificationPublisher();
     for (const n of notifications) {
       try { await notifier.notifyApprovalPending(n.approverIds, n.targetType, n.targetId, n.applicantName, n.title); } catch {}
     }
@@ -197,7 +196,7 @@ export class OvertimeService {
       }
     });
 
-    const notifier = new NotificationService();
+    const notifier = new NotificationPublisher();
     for (const n of notifications) {
       try { await notifier.notifyApprovalPending(n.approverIds, n.targetType, n.targetId, n.applicantName, n.title); } catch {}
     }
