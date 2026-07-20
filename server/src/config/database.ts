@@ -37,6 +37,7 @@ import { ApprovalInstanceIdempotency1700000000005 } from '../migrations/17000000
 import { SecurePersonalAccessTokens1700000000006 } from '../migrations/1700000000006-SecurePersonalAccessTokens';
 import { ApprovalPendingPaginationIndex1700000000007 } from '../migrations/1700000000007-ApprovalPendingPaginationIndex';
 import { ExternalIdentityEmployeeId1700000000008 } from '../migrations/1700000000008-ExternalIdentityEmployeeId';
+import { AnnouncementGroupScope1700000000009 } from '../migrations/1700000000009-AnnouncementGroupScope';
 
 /**
  * PostgreSQL 是当前唯一生产数据库；保留旧分支仅用于历史代码读取，不再保证 SQLite 兼容。
@@ -65,6 +66,7 @@ const migrations = [
   SecurePersonalAccessTokens1700000000006,
   ApprovalPendingPaginationIndex1700000000007,
   ExternalIdentityEmployeeId1700000000008,
+  AnnouncementGroupScope1700000000009,
 ];
 
 /**

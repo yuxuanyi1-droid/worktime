@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import {
   Card, Tabs, Table, Button, Space, Modal, Form, Input, Select, Tag, message,
   Typography, Row, Col, Popconfirm, Switch, InputNumber, Tree, Tooltip, Empty, Radio,
-  Progress, Descriptions, Statistic, Badge, List, TreeSelect,
+  Progress, Descriptions, Statistic, Badge, List, TreeSelect, Alert,
 } from 'antd';
 import {
   PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined,
@@ -10,7 +10,7 @@ import {
   NotificationOutlined, EyeOutlined, WarningOutlined, InfoCircleOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons';
-import { systemApi, UserListItem, SimpleUser } from '../../api/system';
+import { systemApi, UserListItem, SimpleUser, TimesheetReminderConfig } from '../../api/system';
 import { Department, Group, Role, Permission, Project, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep, stepTypeMap } from '../../types';
 import { announcementApi, AnnouncementItem, AnnouncementStats } from '../../api/notification';
 import { useAppStore } from '../../stores/appStore';
@@ -972,6 +972,7 @@ function AnnouncementTab() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
   const [users, setUsers] = useState<SimpleUser[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editItem, setEditItem] = useState<AnnouncementItem | null>(null);
@@ -982,38 +983,57 @@ function AnnouncementTab() {
   const [form] = Form.useForm();
 
   const load = async () => {
-    const [res, deptRes, userRes] = await Promise.all([
+    const [res, deptRes, groupRes, userRes] = await Promise.all([
       announcementApi.getAdminList({ page, pageSize: 20 }),
       systemApi.getDepartments(),
+      systemApi.getGroups(),
       systemApi.getAllUsers(),
     ]);
     if (res.data) { setData(res.data.list); setTotal(res.data.total); }
     if (deptRes.data) setDepartments(deptRes.data);
+    if (groupRes.data) setGroups(groupRes.data);
     if (userRes.data) setUsers(userRes.data);
   };
 
   useEffect(() => { load(); }, [page]);
 
   const handleSave = async (values: any) => {
+    setSaving(true);
     const payload = {
       title: values.title,
       content: values.content || null,
       type: values.type || 'info',
       targetScope: values.targetScope || 'all',
       targetDeptId: values.targetScope === 'department' ? values.targetDeptId : null,
+      targetGroupId: values.targetScope === 'group' ? values.targetGroupId : null,
       targetUserIds: values.targetScope === 'user' ? values.targetUserIds : null,
     };
 
-    if (editItem) {
-      await announcementApi.update(editItem.id, payload);
-    } else {
-      await announcementApi.create(payload);
+    try {
+      let result;
+      if (editItem) {
+        result = await announcementApi.update(editItem.id, payload);
+      } else {
+        result = await announcementApi.create(payload);
+      }
+      if (editItem) {
+        message.success('更新成功（编辑不会重复发送 TT）');
+      } else if (result?.data?.ttStatus === 'sent') {
+        message.success('公告已发布，并已发送 TT 通知');
+      } else if (result?.data?.ttStatus === 'failed') {
+        message.warning('公告已发布，但 TT 通知发送失败');
+      } else if (result?.data?.ttStatus === 'disabled') {
+        message.info('公告已发布；TT 通知通道尚未启用');
+      } else {
+        message.success('公告已发布；没有可用 SIAM 工号的接收人');
+      }
+      setModalOpen(false);
+      setEditItem(null);
+      form.resetFields();
+      load();
+    } finally {
+      setSaving(false);
     }
-    message.success(editItem ? '更新成功' : '发布成功');
-    setModalOpen(false);
-    setEditItem(null);
-    form.resetFields();
-    load();
   };
 
   const handleViewStats = async (item: AnnouncementItem) => {
@@ -1031,7 +1051,7 @@ function AnnouncementTab() {
 
   const typeColor: Record<string, string> = { info: 'blue', important: 'orange', urgent: 'red' };
   const typeLabel: Record<string, string> = { info: '普通', important: '重要', urgent: '紧急' };
-  const scopeLabel: Record<string, string> = { all: '全部用户', department: '指定部门', user: '指定用户' };
+  const scopeLabel: Record<string, string> = { all: '全部用户', department: '指定部门', group: '指定分组', user: '指定用户' };
 
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 50 },
@@ -1051,6 +1071,10 @@ function AnnouncementTab() {
         if (s === 'department' && r.targetDeptId) {
           const dept = departments.find(d => d.id === r.targetDeptId);
           detail = dept ? dept.name : `部门ID:${r.targetDeptId}`;
+        }
+        if (s === 'group' && r.targetGroupId) {
+          const group = groups.find(g => g.id === r.targetGroupId);
+          detail = group ? group.name : `分组ID:${r.targetGroupId}`;
         }
         return <Tag>{detail}</Tag>;
       },
@@ -1076,6 +1100,7 @@ function AnnouncementTab() {
                 type: record.type,
                 targetScope: record.targetScope,
                 targetDeptId: record.targetDeptId,
+                targetGroupId: record.targetGroupId,
                 targetUserIds: record.targetUserIds,
               });
               setModalOpen(true);
@@ -1140,6 +1165,7 @@ function AnnouncementTab() {
                 <Select options={[
                   { label: '全部用户', value: 'all' },
                   { label: '指定部门', value: 'department' },
+                  { label: '指定分组（含子分组）', value: 'group' },
                   { label: '指定用户', value: 'user' },
                 ]} />
               </Form.Item>
@@ -1156,6 +1182,14 @@ function AnnouncementTab() {
                   </Form.Item>
                 );
               }
+              if (scope === 'group') {
+                return (
+                  <Form.Item name="targetGroupId" label="选择分组" rules={[{ required: true, message: '请选择分组' }]}>
+                    <Select showSearch optionFilterProp="label" placeholder="请选择分组，范围包含其子分组"
+                      options={groups.map(g => ({ label: g.name, value: g.id }))} />
+                  </Form.Item>
+                );
+              }
               if (scope === 'user') {
                 return (
                   <Form.Item name="targetUserIds" label="选择用户" rules={[{ required: true, message: '请选择用户' }]}>
@@ -1167,6 +1201,14 @@ function AnnouncementTab() {
               return null;
             }}
           </Form.Item>
+          {!editItem && (
+            <Alert
+              type="info"
+              showIcon
+              message="发布后将同步发送 TT"
+              description="系统按公告范围解析启用用户，并使用其 OPPO SIAM 工号批量发送；未绑定 SIAM 工号的用户会跳过，站内公告不受影响。"
+            />
+          )}
         </Form>
       </Modal>
 
@@ -1216,6 +1258,16 @@ function SettingsTab() {
   const [timesheetUnit, setTimesheetUnit] = useState<string>('0.5');
   const [lockDay, setLockDay] = useState<number>(0);
   const [localSystemName, setLocalSystemName] = useState<string>('WorkTime');
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [users, setUsers] = useState<SimpleUser[]>([]);
+  const [reminderConfig, setReminderConfig] = useState<TimesheetReminderConfig>({
+    enabled: false,
+    weekdays: [5],
+    time: '17:30',
+    targetScope: 'all',
+    message: '请及时填写并提交本周工时，谢谢。',
+  });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const { setSystemName } = useAppStore();
@@ -1227,7 +1279,15 @@ function SettingsTab() {
   const loadSettings = async () => {
     setLoading(true);
     try {
-      const res = await systemApi.getSettings();
+      const [res, deptRes, groupRes, userRes] = await Promise.all([
+        systemApi.getSettings(),
+        systemApi.getDepartments(),
+        systemApi.getGroups(),
+        systemApi.getAllUsers(),
+      ]);
+      if (deptRes.data) setDepartments(deptRes.data);
+      if (groupRes.data) setGroups(groupRes.data);
+      if (userRes.data) setUsers(userRes.data);
       if (res.data?.settings?.timesheet_unit) {
         // 兼容老值 days/hours，统一归一为 0.5 天
         const raw = res.data.settings.timesheet_unit;
@@ -1240,6 +1300,13 @@ function SettingsTab() {
       if (res.data?.settings?.system_name) {
         setLocalSystemName(res.data.settings.system_name);
       }
+      if (res.data?.settings?.timesheet_reminder_config) {
+        try {
+          setReminderConfig(JSON.parse(res.data.settings.timesheet_reminder_config));
+        } catch {
+          message.warning('已保存的工时提醒配置格式异常，请重新保存');
+        }
+      }
     } catch {}
     setLoading(false);
   };
@@ -1249,6 +1316,29 @@ function SettingsTab() {
     try {
       await systemApi.updateSetting('timesheet_unit', timesheetUnit);
       message.success('设置已保存');
+    } catch {
+      message.error('保存失败');
+    }
+    setSaving(false);
+  };
+
+  const saveReminderConfig = async () => {
+    if (!reminderConfig.weekdays.length) {
+      message.warning('请至少选择一个提醒日');
+      return;
+    }
+    if (!reminderConfig.time) {
+      message.warning('请选择提醒时间');
+      return;
+    }
+    if (!reminderConfig.message.trim()) {
+      message.warning('请输入提醒内容');
+      return;
+    }
+    setSaving(true);
+    try {
+      await systemApi.updateSetting('timesheet_reminder_config', JSON.stringify(reminderConfig));
+      message.success(reminderConfig.enabled ? '定时提醒已保存并启用' : '定时提醒已保存并停用');
     } catch {
       message.error('保存失败');
     }
@@ -1352,6 +1442,149 @@ function SettingsTab() {
         <div style={{ marginTop: 12, color: '#888', fontSize: 13 }}>
           {lockDay ? `每月${lockDay}号之后，用户将无法提交上月的工时记录` : '未设置工时锁定，用户可以随时提交历史工时'}
         </div>
+      </Card>
+
+      <Card
+        title="TT 工时填写提醒"
+        style={{ marginBottom: 16 }}
+        loading={loading}
+        extra={(
+          <Space>
+            <Text type="secondary">{reminderConfig.enabled ? '已启用' : '已停用'}</Text>
+            <Switch
+              checked={reminderConfig.enabled}
+              onChange={(enabled) => setReminderConfig(current => ({ ...current, enabled }))}
+            />
+          </Space>
+        )}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 20 }}
+          message="提醒仅通过 TT 发送，不新增站内消息"
+          description="到点后按所选范围解析启用用户的 OPPO SIAM 工号并批量发送；没有 SIAM 工号的用户会自动跳过。执行时区固定为 Asia/Shanghai。"
+        />
+        <Row gutter={[16, 16]}>
+          <Col xs={24} lg={12}>
+            <Text strong>提醒日</Text>
+            <Select
+              mode="multiple"
+              style={{ width: '100%', marginTop: 8 }}
+              value={reminderConfig.weekdays}
+              onChange={(weekdays) => setReminderConfig(current => ({ ...current, weekdays }))}
+              options={[
+                { label: '周一', value: 1 },
+                { label: '周二', value: 2 },
+                { label: '周三', value: 3 },
+                { label: '周四', value: 4 },
+                { label: '周五', value: 5 },
+                { label: '周六', value: 6 },
+                { label: '周日', value: 7 },
+              ]}
+              placeholder="请选择提醒日"
+            />
+          </Col>
+          <Col xs={24} lg={12}>
+            <Text strong>提醒时间</Text>
+            <Input
+              type="time"
+              style={{ marginTop: 8 }}
+              value={reminderConfig.time}
+              onChange={(event) => setReminderConfig(current => ({ ...current, time: event.target.value }))}
+            />
+          </Col>
+          <Col xs={24} lg={12}>
+            <Text strong>提醒范围</Text>
+            <Select
+              style={{ width: '100%', marginTop: 8 }}
+              value={reminderConfig.targetScope}
+              onChange={(targetScope) => setReminderConfig(current => ({
+                ...current,
+                targetScope,
+                targetDeptId: undefined,
+                targetGroupId: undefined,
+                targetUserIds: undefined,
+              }))}
+              options={[
+                { label: '全部启用用户', value: 'all' },
+                { label: '指定部门', value: 'department' },
+                { label: '指定分组（含子分组）', value: 'group' },
+                { label: '指定用户', value: 'user' },
+              ]}
+            />
+          </Col>
+          <Col xs={24} lg={12}>
+            {reminderConfig.targetScope === 'department' && (
+              <>
+                <Text strong>部门</Text>
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={reminderConfig.targetDeptId}
+                  onChange={(targetDeptId) => setReminderConfig(current => ({ ...current, targetDeptId }))}
+                  options={departments.map(item => ({ label: item.name, value: item.id }))}
+                  placeholder="请选择部门"
+                />
+              </>
+            )}
+            {reminderConfig.targetScope === 'group' && (
+              <>
+                <Text strong>分组</Text>
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={reminderConfig.targetGroupId}
+                  onChange={(targetGroupId) => setReminderConfig(current => ({ ...current, targetGroupId }))}
+                  options={groups.map(item => ({ label: item.name, value: item.id }))}
+                  placeholder="请选择分组"
+                />
+              </>
+            )}
+            {reminderConfig.targetScope === 'user' && (
+              <>
+                <Text strong>用户</Text>
+                <Select
+                  mode="multiple"
+                  showSearch
+                  optionFilterProp="label"
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={reminderConfig.targetUserIds}
+                  onChange={(targetUserIds) => setReminderConfig(current => ({ ...current, targetUserIds }))}
+                  options={users.map(item => ({ label: item.realName || item.username, value: item.id }))}
+                  placeholder="请选择用户"
+                />
+              </>
+            )}
+            {reminderConfig.targetScope === 'all' && (
+              <div style={{ marginTop: 28, color: '#6F675C' }}>将覆盖系统内全部启用用户</div>
+            )}
+          </Col>
+          <Col span={24}>
+            <Text strong>提醒内容</Text>
+            <Input.TextArea
+              rows={3}
+              maxLength={1000}
+              showCount
+              style={{ marginTop: 8 }}
+              value={reminderConfig.message}
+              onChange={(event) => setReminderConfig(current => ({ ...current, message: event.target.value }))}
+              placeholder="请输入 TT 提醒内容"
+            />
+          </Col>
+        </Row>
+        <div style={{ marginTop: 18, padding: '12px 14px', background: '#F8F4ED', borderRadius: 10, color: '#554B3E' }}>
+          当前计划：{reminderConfig.enabled ? '启用' : '停用'}，每周
+          {reminderConfig.weekdays.map(day => `周${'一二三四五六日'[day - 1]}`).join('、') || '未选择日期'}
+          {' '}{reminderConfig.time || '--:--'} 执行。
+        </div>
+        <PermissionGuard permission="system:settings:manage">
+          <Button type="primary" onClick={saveReminderConfig} loading={saving} style={{ marginTop: 16 }}>
+            保存提醒设置
+          </Button>
+        </PermissionGuard>
       </Card>
 
       {/* OIDC 提供商由环境变量配置，无需在此开关；如需增减请编辑 server/.env 的 OIDC_PROVIDERS */}

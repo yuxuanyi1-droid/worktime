@@ -71,4 +71,28 @@ describe('NotificationPublisher', () => {
     expect(body.to).toEqual([{ user: ['8001', '8002'] }]);
     expect(body.msg).toEqual({ text: '待审批：工时\n张三提交了一份工时申请' });
   });
+
+  it('仅发 TT 时不会创建重复的站内通知', async () => {
+    const inApp = inAppService();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ code: 0 }),
+    }));
+    const publisher = new NotificationPublisher(
+      inApp,
+      new TtRobotClient(config(true), { fetch: fetchMock }),
+      async () => ['8001'],
+    );
+
+    const status = await publisher.publishTtOnly([1], {
+      type: 'announcement',
+      title: '公告标题',
+      content: '公告内容',
+    });
+
+    expect(status).toBe('sent');
+    expect(inApp.createBatch).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
 });

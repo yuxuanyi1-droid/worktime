@@ -2,24 +2,29 @@ import { EntityManager } from 'typeorm';
 import { AppDataSource } from '../config/database';
 import { Announcement, AnnouncementType, TargetScope } from '../entities/Announcement';
 import { AnnouncementRead } from '../entities/AnnouncementRead';
-import { User } from '../entities/User';
-import { In, Not, IsNull } from 'typeorm';
+import { Group } from '../entities/Group';
+import { In } from 'typeorm';
 import { BusinessError } from '../utils/errors';
+import { logger } from '../utils/logger';
+import { NotificationPublisher, TtPublishStatus } from './notifications/notificationPublisher';
+import { UserAudienceService } from './notifications/userAudienceService';
 
 export class AnnouncementService {
   constructor(private manager?: EntityManager) {}
 
   private get announceRepo() { return (this.manager ?? AppDataSource).getRepository(Announcement); }
   private get readRepo() { return (this.manager ?? AppDataSource).getRepository(AnnouncementRead); }
-  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
+  private get audienceService() { return new UserAudienceService(this.manager); }
 
   /**
    * 构造「公告对用户可见」的 SQL where 条件（下推可见性判断，避免全表扫+内存过滤）。
    * - all：所有人可见
    * - department：targetDeptId = 用户部门
+   * - group：用户当前分组或任一上级分组
    * - user：targetUserIds（simple-json 字符串）包含 userId
    */
-  private buildVisibleWhere(userId: number, userDeptId: number | null) {
+  private buildVisibleWhere(userId: number, userDeptId: number | null, userGroupIds: number[]) {
     const conditions: string[] = [
       'a.targetScope = :scopeAll',
     ];
@@ -30,27 +35,76 @@ export class AnnouncementService {
       params.scopeDept = 'department';
       params.deptId = userDeptId;
     }
-    // targetUserIds 存储为 simple-json（如 "[1,2,3]"），用 LIKE 匹配（SQLite 无原生 JSON 数组查询）
-    conditions.push("(a.targetScope = :scopeUser AND a.targetUserIds LIKE :userLike)");
+    if (userGroupIds.length) {
+      conditions.push('(a.targetScope = :scopeGroup AND a.targetGroupId IN (:...userGroupIds))');
+      params.scopeGroup = 'group';
+      params.userGroupIds = userGroupIds;
+    }
+    // targetUserIds 存储为 simple-json（如 "[1,2,3]"），兼容 SQLite/PostgreSQL 文本查询。
+    conditions.push(`(a.targetScope = :scopeUser AND (
+      a.targetUserIds = :userOnly OR a.targetUserIds LIKE :userFirst
+      OR a.targetUserIds LIKE :userMiddle OR a.targetUserIds LIKE :userLast
+    ))`);
     params.scopeUser = 'user';
-    // 用逗号包裹避免 11 误匹配 1：匹配 ",1," / "[1," / ",1]"
-    params.userLike = `%"${userId}"%`;
+    params.userOnly = `[${userId}]`;
+    params.userFirst = `[${userId},%`;
+    params.userMiddle = `%,${userId},%`;
+    params.userLast = `%,${userId}]`;
 
     return { where: conditions.join(' OR '), params };
+  }
+
+  private async getUserGroupAncestorIds(userGroupId: number | null): Promise<number[]> {
+    if (!userGroupId) return [];
+    const group = await this.groupRepo.findOne({ where: { id: userGroupId } });
+    if (!group) return [];
+    return Array.from(new Set((group.path || String(group.id))
+      .split('/')
+      .map(id => Number(id))
+      .filter(id => Number.isInteger(id) && id > 0)));
   }
 
   /** 创建公告 */
   async create(data: {
     title: string;
-    content?: string;
+    content?: string | null;
     type?: AnnouncementType;
     targetScope: TargetScope;
     targetDeptId?: number;
+    targetGroupId?: number;
     targetUserIds?: number[];
     createdById: number;
   }) {
-    const announcement = this.announceRepo.create(data);
-    return this.announceRepo.save(announcement);
+    const userIds = await this.audienceService.resolveUserIds(data);
+    const announcement = this.announceRepo.create({
+      ...data,
+      targetDeptId: data.targetScope === 'department' ? data.targetDeptId : null,
+      targetGroupId: data.targetScope === 'group' ? data.targetGroupId : null,
+      targetUserIds: data.targetScope === 'user' ? data.targetUserIds : null,
+    });
+    const saved = await this.announceRepo.save(announcement);
+
+    // 公告本身就是站内载体，这里仅补发 TT；失败不会回滚已发布的公告。
+    let ttStatus: TtPublishStatus = 'skipped';
+    if (!this.manager) {
+      try {
+        ttStatus = await new NotificationPublisher().publishTtOnly(userIds, {
+          type: 'announcement',
+          title: `【${this.getTypeLabel(saved.type)}公告】${saved.title}`,
+          content: saved.content || undefined,
+          targetType: 'announcement',
+          targetId: saved.id,
+        });
+      } catch (error) {
+        ttStatus = 'failed';
+        logger.warn({ err: error, announcementId: saved.id }, '公告已发布，但 TT 通知初始化失败');
+      }
+    }
+    return { ...saved, ttStatus };
+  }
+
+  private getTypeLabel(type: AnnouncementType): string {
+    return ({ info: '普通', important: '重要', urgent: '紧急' } as const)[type] || '普通';
   }
 
   /** 获取所有公告（管理端） */
@@ -72,7 +126,14 @@ export class AnnouncementService {
 
   /** 更新公告 */
   async update(id: number, data: Partial<Announcement>) {
-    await this.announceRepo.update(id, data);
+    const existing = await this.announceRepo.findOne({ where: { id } });
+    if (!existing) throw new BusinessError('公告不存在');
+    await this.announceRepo.update(id, {
+      ...data,
+      targetDeptId: data.targetScope === 'department' ? data.targetDeptId : null,
+      targetGroupId: data.targetScope === 'group' ? data.targetGroupId : null,
+      targetUserIds: data.targetScope === 'user' ? data.targetUserIds : null,
+    });
     return this.announceRepo.findOne({ where: { id } });
   }
 
@@ -83,9 +144,10 @@ export class AnnouncementService {
   }
 
   /** 获取用户可见的公告列表（含已读状态）。可见性下推 SQL，避免全表扫。 */
-  async getForUser(userId: number, userDeptId: number | null, params: { page?: number; pageSize?: number; isRead?: boolean }) {
+  async getForUser(userId: number, userDeptId: number | null, userGroupId: number | null, params: { page?: number; pageSize?: number; isRead?: boolean }) {
     const { page = 1, pageSize = 20, isRead } = params;
-    const { where, params: whereParams } = this.buildVisibleWhere(userId, userDeptId);
+    const userGroupIds = await this.getUserGroupAncestorIds(userGroupId);
+    const { where, params: whereParams } = this.buildVisibleWhere(userId, userDeptId, userGroupIds);
 
     // 先拿可见公告 id（带分页前先算 total）
     const visibleQb = this.announceRepo.createQueryBuilder('a')
@@ -126,8 +188,9 @@ export class AnnouncementService {
   }
 
   /** 获取用户未读公告数量（SQL 下推可见性 + LEFT JOIN 已读，单次查询） */
-  async getUnreadCount(userId: number, userDeptId: number | null) {
-    const { where, params } = this.buildVisibleWhere(userId, userDeptId);
+  async getUnreadCount(userId: number, userDeptId: number | null, userGroupId: number | null) {
+    const userGroupIds = await this.getUserGroupAncestorIds(userGroupId);
+    const { where, params } = this.buildVisibleWhere(userId, userDeptId, userGroupIds);
     const visible = await this.announceRepo.createQueryBuilder('a')
       .leftJoin(AnnouncementRead, 'r', 'r.announcementId = a.id AND r.userId = :readUserId', { readUserId: userId })
       .select(['a.id'])
@@ -146,8 +209,9 @@ export class AnnouncementService {
   }
 
   /** 批量标记可见公告已读（SQL 下推可见性） */
-  async markAllAsRead(userId: number, userDeptId: number | null) {
-    const { where, params } = this.buildVisibleWhere(userId, userDeptId);
+  async markAllAsRead(userId: number, userDeptId: number | null, userGroupId: number | null) {
+    const userGroupIds = await this.getUserGroupAncestorIds(userGroupId);
+    const { where, params } = this.buildVisibleWhere(userId, userDeptId, userGroupIds);
     const visible = await this.announceRepo.createQueryBuilder('a')
       .select(['a.id'])
       .where(where, params)
@@ -169,19 +233,7 @@ export class AnnouncementService {
     const announcement = await this.announceRepo.findOne({ where: { id: announcementId } });
     if (!announcement) throw new BusinessError('公告不存在');
 
-    // 计算目标用户数
-    let targetCount = 0;
-    if (announcement.targetScope === 'all') {
-      targetCount = await this.userRepo.count({ where: { status: 1 } });
-    } else if (announcement.targetScope === 'department' && announcement.targetDeptId) {
-      targetCount = await this.userRepo.count({
-        where: { department: { id: announcement.targetDeptId }, status: 1 },
-        relations: ['department'],
-      });
-
-    } else if (announcement.targetScope === 'user' && announcement.targetUserIds?.length) {
-      targetCount = await this.userRepo.count({ where: { id: In(announcement.targetUserIds), status: 1 } });
-    }
+    const targetCount = (await this.audienceService.resolveUserIds(announcement)).length;
 
     const readCount = await this.readRepo.count({ where: { announcementId } });
     const readUsers = await this.readRepo.find({

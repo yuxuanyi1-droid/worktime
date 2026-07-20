@@ -22,6 +22,17 @@ export interface SimpleUser {
   groupId?: number | null;
 }
 
+export interface TimesheetReminderConfig {
+  enabled: boolean;
+  weekdays: number[];
+  time: string;
+  targetScope: 'all' | 'department' | 'group' | 'user';
+  targetDeptId?: number;
+  targetGroupId?: number;
+  targetUserIds?: number[];
+  message: string;
+}
+
 export const systemApi = {
   // 部门
   getDepartments: () => request.get<any, { code: number; data: Department[] }>('/system/departments'),

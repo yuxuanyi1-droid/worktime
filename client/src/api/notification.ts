@@ -26,13 +26,15 @@ export interface AnnouncementItem {
   title: string;
   content: string | null;
   type: 'info' | 'important' | 'urgent';
-  targetScope: 'all' | 'department' | 'user';
+  targetScope: 'all' | 'department' | 'group' | 'user';
   targetDeptId: number | null;
+  targetGroupId: number | null;
   targetUserIds: number[] | null;
   createdById: number;
   createdByName: string;
   isRead: boolean;
   createdAt: string;
+  ttStatus?: 'disabled' | 'skipped' | 'sent' | 'failed';
 }
 
 export interface AnnouncementStats {

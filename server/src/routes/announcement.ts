@@ -2,10 +2,39 @@ import { Router } from 'express';
 import { AnnouncementService } from '../services/announcementService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requirePermission, getUserOrgInfo } from '../middleware/permission';
-import { parsePagination } from '../utils/validation';
+import {
+  parseArray,
+  parseEnum,
+  parsePagination,
+  parsePositiveInt,
+  parseString,
+} from '../utils/validation';
 
 const router = Router();
 const announcementService = new AnnouncementService();
+const announcementTypes = ['info', 'important', 'urgent'] as const;
+const targetScopes = ['all', 'department', 'group', 'user'] as const;
+
+function parseAnnouncementPayload(body: Record<string, unknown>) {
+  const targetScope = parseEnum(body.targetScope ?? 'all', 'targetScope', targetScopes);
+  return {
+    title: parseString(body.title, 'title', { required: true, max: 200 })!,
+    content: parseString(body.content, 'content', { max: 2000, trim: false }) ?? null,
+    type: parseEnum(body.type ?? 'info', 'type', announcementTypes),
+    targetScope,
+    targetDeptId: targetScope === 'department'
+      ? parsePositiveInt(body.targetDeptId, 'targetDeptId')
+      : undefined,
+    targetGroupId: targetScope === 'group'
+      ? parsePositiveInt(body.targetGroupId, 'targetGroupId')
+      : undefined,
+    targetUserIds: targetScope === 'user'
+      ? parseArray(body.targetUserIds, 'targetUserIds', (id, index) => (
+        parsePositiveInt(id, `targetUserIds[${index}]`)
+      ), { min: 1, max: 2000 })
+      : undefined,
+  };
+}
 
 router.use(authMiddleware);
 
@@ -26,7 +55,7 @@ router.get('/admin/list', requirePermission('system:announcement:view'), async (
 router.post('/admin', requirePermission('system:announcement:create'), async (req: AuthRequest, res, next) => {
   try {
     const data = await announcementService.create({
-      ...req.body,
+      ...parseAnnouncementPayload(req.body as Record<string, unknown>),
       createdById: req.user!.id,
     });
     res.json({ code: 0, data });
@@ -38,7 +67,10 @@ router.post('/admin', requirePermission('system:announcement:create'), async (re
 // 更新公告
 router.put('/admin/:id', requirePermission('system:announcement:update'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await announcementService.update(Number(req.params.id), req.body);
+    const data = await announcementService.update(
+      parsePositiveInt(req.params.id, 'id'),
+      parseAnnouncementPayload(req.body as Record<string, unknown>),
+    );
     res.json({ code: 0, data });
   } catch (error) {
     next(error);
@@ -48,7 +80,7 @@ router.put('/admin/:id', requirePermission('system:announcement:update'), async 
 // 删除公告
 router.delete('/admin/:id', requirePermission('system:announcement:delete'), async (req: AuthRequest, res, next) => {
   try {
-    await announcementService.delete(Number(req.params.id));
+    await announcementService.delete(parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -58,7 +90,7 @@ router.delete('/admin/:id', requirePermission('system:announcement:delete'), asy
 // 获取公告已读统计
 router.get('/admin/:id/stats', requirePermission('system:announcement:view'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await announcementService.getReadStats(Number(req.params.id));
+    const data = await announcementService.getReadStats(parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, data });
   } catch (error) {
     next(error);
@@ -72,7 +104,7 @@ router.get('/my', async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const orgInfo = await getUserOrgInfo(req.user!.id);
-    const data = await announcementService.getForUser(req.user!.id, orgInfo.departmentId, {
+    const data = await announcementService.getForUser(req.user!.id, orgInfo.departmentId, orgInfo.groupId, {
       page,
       pageSize,
       isRead: req.query.isRead !== undefined ? req.query.isRead === 'true' : undefined,
@@ -87,7 +119,7 @@ router.get('/my', async (req: AuthRequest, res, next) => {
 router.get('/my/unread-count', async (req: AuthRequest, res, next) => {
   try {
     const orgInfo = await getUserOrgInfo(req.user!.id);
-    const count = await announcementService.getUnreadCount(req.user!.id, orgInfo.departmentId);
+    const count = await announcementService.getUnreadCount(req.user!.id, orgInfo.departmentId, orgInfo.groupId);
     res.json({ code: 0, data: { count } });
   } catch (error) {
     next(error);
@@ -97,7 +129,7 @@ router.get('/my/unread-count', async (req: AuthRequest, res, next) => {
 // 标记公告已读
 router.put('/my/read/:id', async (req: AuthRequest, res, next) => {
   try {
-    await announcementService.markAsRead(req.user!.id, Number(req.params.id));
+    await announcementService.markAsRead(req.user!.id, parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, message: '已标记已读' });
   } catch (error) {
     next(error);
@@ -108,7 +140,7 @@ router.put('/my/read/:id', async (req: AuthRequest, res, next) => {
 router.put('/my/read-all', async (req: AuthRequest, res, next) => {
   try {
     const orgInfo = await getUserOrgInfo(req.user!.id);
-    await announcementService.markAllAsRead(req.user!.id, orgInfo.departmentId);
+    await announcementService.markAllAsRead(req.user!.id, orgInfo.departmentId, orgInfo.groupId);
     res.json({ code: 0, message: '已全部标记已读' });
   } catch (error) {
     next(error);

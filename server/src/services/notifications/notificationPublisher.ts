@@ -98,6 +98,16 @@ export class NotificationPublisher {
     return { notifications, ttStatus };
   }
 
+  /** 仅发送 TT，不创建站内通知，适用于公告和定时提醒等已有独立站内载体的功能。 */
+  async publishTtOnly(
+    userIds: number[],
+    notification: PublishNotificationInput,
+    options: PublishNotificationOptions = {},
+  ): Promise<TtPublishStatus> {
+    const uniqueUserIds = Array.from(new Set(userIds.filter(id => Number.isInteger(id) && id > 0)));
+    return this.publishToTt(uniqueUserIds, notification, options);
+  }
+
   /** 发送审批待办通知（站内 + 可选 TT）。 */
   async notifyApprovalPending(
     approverIds: number[],

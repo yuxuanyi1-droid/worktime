@@ -10,6 +10,10 @@ import { SystemSetting } from '../entities/SystemSetting';
 import { AccessPolicyService } from '../services/accessPolicyService';
 import { BusinessError } from '../utils/errors';
 import {
+  normalizeTimesheetReminderConfig,
+  TIMESHEET_REMINDER_SETTING_KEY,
+} from '../services/timesheetReminderService';
+import {
   firstQueryValue,
   parseArray,
   parseBooleanQuery,
@@ -31,7 +35,7 @@ const getSettingRepo = () => AppDataSource.getRepository(SystemSetting);
 const projectStatuses = ['active', 'completed', 'suspended', 'cancelled'] as const;
 const flowTypes = ['timesheet', 'overtime', 'weekly_report', 'permission_request'] as const;
 const stepTypes = ['group_leader', 'parent_leader', 'dept_leader', 'module_se', 'project_manager', 'custom'] as const;
-const settingKeys = ['system_name', 'timesheet_unit', 'timesheet_lock_day'] as const;
+const settingKeys = ['system_name', 'timesheet_unit', 'timesheet_lock_day', TIMESHEET_REMINDER_SETTING_KEY] as const;
 type DepartmentCreatePayload = { name: string; description?: string; leaderId?: number };
 type DepartmentUpdatePayload = { name?: string; description?: string; leaderId?: number };
 type GroupCreatePayload = { name: string; description?: string; departmentId?: number; parentId?: number; leaderId?: number };
@@ -349,6 +353,7 @@ router.get('/users/all', async (req: AuthRequest, res, next) => {
       'project:assign_se',
       'system:announcement:create',
       'system:announcement:update',
+      'system:settings:manage',
       'permission_grant:manage',
     )) {
       return res.status(403).json({ code: 403, message: 'Forbidden' });
@@ -737,7 +742,9 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
     const settingRepo = getSettingRepo();
     const key = parseEnum(req.params.key, 'key', settingKeys);
     const rawValue = (req.body as Record<string, unknown>).value;
-    let value = parseString(rawValue, 'value', { max: 200 }) ?? '';
+    let value = parseString(rawValue, 'value', {
+      max: key === TIMESHEET_REMINDER_SETTING_KEY ? 5000 : 200,
+    }) ?? '';
     if (key === 'timesheet_unit') {
       // 工时填报单位（天步长）：兼容老值 days(=0.5) / hours(=0.5)
       if (value === 'days' || value === 'hours') value = '0.5';
@@ -745,6 +752,15 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
     }
     if (key === 'timesheet_lock_day' && value) {
       value = String(parsePositiveInt(value, 'value', { max: 28 }));
+    }
+    if (key === TIMESHEET_REMINDER_SETTING_KEY) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        throw new BusinessError('工时提醒配置不是有效 JSON');
+      }
+      value = JSON.stringify(normalizeTimesheetReminderConfig(parsed));
     }
     let setting = await settingRepo.findOne({ where: { key } });
     if (setting) {

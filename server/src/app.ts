@@ -30,6 +30,7 @@ import { patRoutes } from './routes/pat';
 import { agentRoutes } from './routes/agent';
 import { ensurePiModelsJson } from './config/ai';
 import { preloadPi } from './ai/agentRunner';
+import { timesheetReminderScheduler } from './services/timesheetReminderService';
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -253,6 +254,7 @@ AppDataSource.initialize()
     // 必须放进 worker 线程。服务启动时预创建 worker 并 import pi，避免首次请求时阻塞。
     preloadPi();
     dbConnected = true;
+    timesheetReminderScheduler.start();
     logger.info('数据库连接成功');
     logger.info({ entities: AppDataSource.entityMetadatas.map(e => e.name) }, '已注册实体');
     httpServer = app.listen(PORT, API_HOST, () => {
@@ -272,6 +274,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   dbConnected = false;
+  timesheetReminderScheduler.stop();
   logger.info({ signal }, '服务端开始优雅退出');
 
   httpServer?.closeIdleConnections?.();
