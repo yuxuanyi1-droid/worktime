@@ -14,7 +14,11 @@ export class Role {
   label!: string;
 
   @Column({ type: 'varchar', length: 255, nullable: true })
-  description!: string;
+  description!: string | null;
+
+  /** 系统内置角色不可删除或重命名；自定义角色默认为 false。 */
+  @Column({ type: 'boolean', default: false })
+  isSystem!: boolean;
 
   @ManyToMany(() => User, user => user.roles)
   users!: User[];

@@ -107,6 +107,8 @@ export default function TimesheetPage() {
   const canCreate = hasPermission('timesheet:create');
   const canUpdate = hasPermission('timesheet:update');
   const canDelete = hasPermission('timesheet:delete');
+  const canSubmit = hasPermission('timesheet:submit:self');
+  const canWithdraw = hasPermission('approval:withdraw:self');
 
   // 判断当前周是否有已提交/已审批的行
   const hasSubmittedRows = rows.some(r => r.originalStatus && r.originalStatus !== 'draft');
@@ -928,9 +930,9 @@ export default function TimesheetPage() {
             </Col>
             <Col>
               <Space>
-                {canCreate && (
+                {(canCreate || canUpdate || canSubmit) && (
                   <>
-                    {hasSubmittedRows && !editing ? (
+                    {canUpdate && hasSubmittedRows && !editing && (!hasPendingRows || canWithdraw) ? (
                       <Button
                         icon={<EditOutlined />}
                         onClick={() => {
@@ -973,7 +975,7 @@ export default function TimesheetPage() {
                         {hasPendingRows ? '撤回修改' : '修改工时'}
                       </Button>
                     ) : null}
-                    {!editing && !hasSubmittedRows && (
+                    {canCreate && !editing && !hasSubmittedRows && (
                       <Button
                         icon={<SaveOutlined />}
                         onClick={handleSaveDraft}
@@ -982,9 +984,11 @@ export default function TimesheetPage() {
                         保存草稿
                       </Button>
                     )}
-                    <Button type="primary" icon={<SendOutlined />} onClick={handleSubmitApproval} loading={saving}>
-                      提交审批
-                    </Button>
+                    {canCreate && canSubmit && (
+                      <Button type="primary" icon={<SendOutlined />} onClick={handleSubmitApproval} loading={saving}>
+                        提交审批
+                      </Button>
+                    )}
                     {editing && (
                       <Button onClick={() => { setEditing(false); loadWeekDrafts(); }}>
                         取消

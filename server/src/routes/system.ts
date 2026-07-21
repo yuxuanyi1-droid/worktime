@@ -42,6 +42,8 @@ type GroupCreatePayload = { name: string; description?: string; departmentId?: n
 type GroupUpdatePayload = { name?: string; description?: string; departmentId?: number; parentId?: number; leaderId?: number };
 type UserCreatePayload = { username: string; password: string; realName: string; email?: string; phone?: string; departmentId?: number; groupId?: number; roleIds?: number[] };
 type UserUpdatePayload = { username?: string; password?: string; realName?: string; email?: string; phone?: string; status?: number; departmentId?: number; groupId?: number; roleIds?: number[] };
+type RoleCreatePayload = { name: string; label: string; description?: string; permissionIds: number[] };
+type RoleUpdatePayload = { label?: string; description?: string };
 type ProjectCreatePayload = { name: string; code: string; description?: string; managerIds?: number[] };
 type ProjectUpdatePayload = { name?: string; code?: string; description?: string; status?: typeof projectStatuses[number]; managerIds?: number[] };
 type ApprovalFlowCreatePayload = { name: string; type: string; description?: string; isDefault?: boolean; enabled?: boolean; steps: any[] };
@@ -98,6 +100,28 @@ function parseOptionalIdArray(value: unknown, field: string) {
 
 function uniqueIds(ids: number[]) {
   return Array.from(new Set(ids));
+}
+
+function parseRolePayload(body: Record<string, unknown>, partial: true): RoleUpdatePayload;
+function parseRolePayload(body: Record<string, unknown>, partial?: false): RoleCreatePayload;
+function parseRolePayload(body: Record<string, unknown>, partial = false): RoleCreatePayload | RoleUpdatePayload {
+  const label = partial && body.label === undefined
+    ? undefined
+    : parseString(body.label, 'label', { required: !partial, max: 50 });
+  const description = parseString(body.description, 'description', { max: 255 });
+  if (partial) return { label, description };
+
+  const name = parseString(body.name, 'name', { required: true, min: 2, max: 50 })!;
+  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
+    throw new BusinessError('角色标识只能使用小写字母、数字和下划线，且必须以字母开头');
+  }
+  const permissionIds = parseArray(
+    body.permissionIds ?? [],
+    'permissionIds',
+    (id, index) => parsePositiveInt(id, `permissionIds[${index}]`),
+    { max: 500 },
+  );
+  return { name, label: label!, description, permissionIds: uniqueIds(permissionIds) };
 }
 
 function parseDepartmentPayload(body: Record<string, unknown>, partial: true): DepartmentUpdatePayload;
@@ -430,6 +454,54 @@ router.get('/roles', requirePermission('system:user:manage', 'system:role:manage
   try {
     const data = await systemService.getRoles();
     res.json({ code: 0, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/roles', requirePermission('system:role:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const payload = parseRolePayload(req.body as Record<string, unknown>);
+    const data = await systemService.createRole(payload);
+    auditService.log({
+      userId: req.user!.id,
+      action: 'role.create',
+      target: 'role',
+      targetId: data.id,
+      detail: JSON.stringify({ name: payload.name, label: payload.label, permissionIds: payload.permissionIds }),
+      ip: req.ip,
+    });
+    res.json({ code: 0, data, message: '角色创建成功' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/roles/:id', requirePermission('system:role:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    const payload = parseRolePayload(req.body as Record<string, unknown>, true);
+    const data = await systemService.updateRole(id, payload);
+    auditService.log({
+      userId: req.user!.id,
+      action: 'role.update',
+      target: 'role',
+      targetId: id,
+      detail: JSON.stringify(payload),
+      ip: req.ip,
+    });
+    res.json({ code: 0, data, message: '角色信息更新成功' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/roles/:id', requirePermission('system:role:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    await systemService.deleteRole(id);
+    auditService.log({ userId: req.user!.id, action: 'role.delete', target: 'role', targetId: id, ip: req.ip });
+    res.json({ code: 0, message: '角色删除成功' });
   } catch (error) {
     next(error);
   }

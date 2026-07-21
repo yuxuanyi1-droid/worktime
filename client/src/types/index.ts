@@ -86,6 +86,8 @@ export interface Role {
   name: string;
   label: string;
   description?: string;
+  isSystem: boolean;
+  userCount?: number;
   permissions: Permission[];
 }
 
@@ -97,6 +99,8 @@ export interface Permission {
   action: string;
   grantable?: boolean;
   scopeTypes?: string[];
+  description?: string;
+  impliedPermissions?: string[];
 }
 
 // 项目

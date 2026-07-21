@@ -3,7 +3,7 @@ import { TimesheetService } from '../services/timesheetService';
 import { AppDataSource } from '../config/database';
 import { Timesheet } from '../entities/Timesheet';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { requirePermission } from '../middleware/permission';
+import { requireAllPermissions, requirePermission } from '../middleware/permission';
 import {
   firstQueryValue,
   parseArray,
@@ -162,7 +162,7 @@ router.get('/chain/:id', async (req: AuthRequest, res, next) => {
 });
 
 // 提交审批
-router.post('/submit', requirePermission('timesheet:create'), async (req: AuthRequest, res, next) => {
+router.post('/submit', requirePermission('timesheet:submit:self'), async (req: AuthRequest, res, next) => {
   try {
     const ids = parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 200 });
     await timesheetService.submit(ids, req.user!.id);
@@ -184,7 +184,7 @@ router.post('/modify', requirePermission('timesheet:update'), async (req: AuthRe
 });
 
 // 按行提交审批（每周表格，每行一个审批单）
-router.post('/submit-rows', requirePermission('timesheet:create'), async (req: AuthRequest, res, next) => {
+router.post('/submit-rows', requireAllPermissions('timesheet:create', 'timesheet:submit:self'), async (req: AuthRequest, res, next) => {
   try {
     const rows = parseArray(req.body.rows, 'rows', parseTimesheetRow, { min: 1, max: 50 });
     await timesheetService.submitByRows(req.user!.id, rows);
@@ -195,4 +195,3 @@ router.post('/submit-rows', requirePermission('timesheet:create'), async (req: A
 });
 
 export const timesheetRoutes = router;
-

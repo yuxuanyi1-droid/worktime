@@ -13,7 +13,11 @@ import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { WeeklyReport } from '../entities/WeeklyReport';
 import bcrypt from 'bcryptjs';
 import { In } from 'typeorm';
-import { permissionDefinitions } from '../config/permissionDefinitions';
+import {
+  permissionDefinitionMap,
+  permissionDefinitions,
+  permissionImplications,
+} from '../config/permissionDefinitions';
 import { BusinessError } from '../utils/errors';
 import {
   CacheKeys,
@@ -377,7 +381,56 @@ export class SystemService {
 
   // ==================== 角色权限 ====================
   async getRoles() {
-    return this.roleRepo.find({ relations: ['permissions'], order: { id: 'ASC' } });
+    const roles = await this.roleRepo.find({ relations: ['permissions', 'users'], order: { isSystem: 'DESC', id: 'ASC' } });
+    return roles.map(role => ({
+      ...role,
+      permissions: role.permissions
+        .filter(permission => permissionDefinitionMap.has(permission.code))
+        .map(permission => this.presentPermission(permission)),
+      userCount: role.users.length,
+      users: undefined,
+    }));
+  }
+
+  async createRole(data: { name: string; label: string; description?: string; permissionIds?: number[] }) {
+    const result = await AppDataSource.transaction(async manager => {
+      const txService = new SystemService(manager);
+      const existing = await txService.roleRepo.findOne({ where: { name: data.name } });
+      if (existing) throw new BusinessError('角色标识已存在');
+      const permissions = await txService.resolveAssignablePermissions(data.permissionIds || []);
+      const role = txService.roleRepo.create({
+        name: data.name,
+        label: data.label,
+        description: data.description || null,
+        isSystem: false,
+        permissions,
+      });
+      return txService.roleRepo.save(role);
+    });
+    await invalidateOrgCatalog();
+    return this.getRole(result.id);
+  }
+
+  async updateRole(id: number, data: { label?: string; description?: string }) {
+    const role = await this.roleRepo.findOne({ where: { id } });
+    if (!role) throw new BusinessError('角色不存在');
+    if (role.isSystem) throw new BusinessError('系统内置角色不可重命名');
+    if (data.label !== undefined) role.label = data.label;
+    if (data.description !== undefined) role.description = data.description;
+    await this.roleRepo.save(role);
+    await invalidateOrgCatalog();
+    return this.getRole(id);
+  }
+
+  async deleteRole(id: number) {
+    const role = await this.roleRepo.findOne({ where: { id }, relations: ['users', 'permissions'] });
+    if (!role) throw new BusinessError('角色不存在');
+    if (role.isSystem) throw new BusinessError('系统内置角色不可删除');
+    if (role.users.length) throw new BusinessError(`该角色仍分配给${role.users.length}名用户，请先解除关联`);
+    role.permissions = [];
+    await this.roleRepo.save(role);
+    await this.roleRepo.remove(role);
+    await invalidateOrgCatalog();
   }
 
   async updateRolePermissions(roleId: number, permissionIds: number[]) {
@@ -385,7 +438,8 @@ export class SystemService {
       const txService = new SystemService(manager);
       const role = await txService.roleRepo.findOne({ where: { id: roleId }, relations: ['permissions'] });
       if (!role) throw new BusinessError('角色不存在');
-      role.permissions = await txService.permRepo.findBy({ id: In(permissionIds) });
+      if (role.name === 'admin') throw new BusinessError('管理员角色始终拥有全部权限，无需修改');
+      role.permissions = await txService.resolveAssignablePermissions(permissionIds);
       return txService.roleRepo.save(role);
     });
     const roleWithUsers = await this.roleRepo.findOne({ where: { id: roleId }, relations: ['users'] });
@@ -393,11 +447,47 @@ export class SystemService {
       invalidateAuthUsers((roleWithUsers?.users || []).map((user) => user.id)),
       invalidateOrgCatalog(),
     ]);
-    return result;
+    return { ...result, permissions: result.permissions.map(permission => this.presentPermission(permission)) };
   }
 
   async getPermissions() {
-    return this.permRepo.find({ order: { module: 'ASC', action: 'ASC' } });
+    const permissions = await this.permRepo.find({ order: { module: 'ASC', action: 'ASC' } });
+    return permissions
+      .filter(permission => permissionDefinitionMap.has(permission.code))
+      .map(permission => this.presentPermission(permission));
+  }
+
+  private async getRole(id: number) {
+    const role = await this.roleRepo.findOne({ where: { id }, relations: ['permissions', 'users'] });
+    if (!role) throw new BusinessError('角色不存在');
+    return {
+      ...role,
+      permissions: role.permissions
+        .filter(permission => permissionDefinitionMap.has(permission.code))
+        .map(permission => this.presentPermission(permission)),
+      userCount: role.users.length,
+      users: undefined,
+    };
+  }
+
+  private presentPermission(permission: Permission) {
+    const definition = permissionDefinitionMap.get(permission.code);
+    return {
+      ...permission,
+      name: definition?.name || permission.name,
+      description: definition?.description,
+      impliedPermissions: permissionImplications[permission.code] || [],
+    };
+  }
+
+  private async resolveAssignablePermissions(permissionIds: number[]) {
+    const uniqueIds = Array.from(new Set(permissionIds));
+    if (!uniqueIds.length) return [];
+    const permissions = await this.permRepo.findBy({ id: In(uniqueIds) });
+    if (permissions.length !== uniqueIds.length) throw new BusinessError('包含不存在的权限');
+    const unavailable = permissions.find(permission => !permissionDefinitionMap.has(permission.code));
+    if (unavailable) throw new BusinessError(`权限“${unavailable.name}”已从权限目录移除`);
+    return permissions;
   }
 
   async initPermissions() {

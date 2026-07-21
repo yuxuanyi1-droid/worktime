@@ -28,6 +28,8 @@ export default function Overtime() {
 
   const canCreate = hasPermission('overtime:create');
   const canDelete = hasPermission('overtime:delete');
+  const canSubmit = hasPermission('overtime:submit:self');
+  const canWithdraw = hasPermission('approval:withdraw:self');
 
   const getErrorMessage = (error: unknown, fallback: string) => {
     const e = error as { response?: { data?: { message?: string } }; message?: string };
@@ -135,7 +137,7 @@ export default function Overtime() {
               详情
             </Button>
           )}
-          {record.status === 'submitted' && (
+          {record.status === 'submitted' && canWithdraw && (
             <Popconfirm title="确定撤回此加班申请？" onConfirm={() => handleWithdraw(record)}>
               <Button type="link" size="small">撤回</Button>
             </Popconfirm>
@@ -159,7 +161,7 @@ export default function Overtime() {
           <Col />
           <Col>
             <Space>
-              {canCreate && (
+              {canCreate && canSubmit && (
                 <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setModalOpen(true); }}>
                   新增加班
                 </Button>

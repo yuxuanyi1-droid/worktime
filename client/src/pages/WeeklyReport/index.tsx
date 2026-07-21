@@ -94,7 +94,8 @@ export default function WeeklyReportPage() {
   const { hasPermission } = usePermission();
 
   const canCreate = hasPermission('weekly_report:create');
-  const canUpdate = hasPermission('weekly_report:update');
+  const canUpdate = canCreate;
+  const canSubmit = hasPermission('weekly_report:submit:self');
 
   useEffect(() => {
     loadData();
@@ -233,7 +234,7 @@ export default function WeeklyReportPage() {
               {canUpdate && isEditable && (
                 <Button icon={<SaveOutlined />} onClick={handleSave} loading={saving}>保存草稿</Button>
               )}
-              {canCreate && (
+              {canSubmit && (
                 <Button type="primary" icon={<SendOutlined />} onClick={handleSubmit}
                   disabled={report?.status === 'submitted' || report?.status === 'approved'}>
                   提交审批

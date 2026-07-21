@@ -14,6 +14,7 @@ dayjs.extend(isoWeek);
 import { approvalApi, MySubmission, ApprovalDetail } from '../../api/approval';
 import { ApprovalItem, ApprovalRecord, statusMap, stepTypeMap } from '../../types';
 import { useNavigate, useParams } from 'react-router-dom';
+import { usePermission } from '../../hooks/usePermission';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -438,6 +439,9 @@ export function ApprovalDetailPage() {
   const [ccModalOpen, setCcModalOpen] = useState(false);
   const [ccUsers, setCcUsers] = useState<any[]>([]);
   const [allUsers, setAllUsers] = useState<{ id: number; realName: string; department: string | null }[]>([]);
+  const { hasPermission } = usePermission();
+  const canApprove = hasPermission('approval:approve:assigned');
+  const canWithdraw = hasPermission('approval:withdraw:self');
 
   useEffect(() => {
     if (targetType && targetId) loadDetail();
@@ -536,7 +540,7 @@ export function ApprovalDetailPage() {
       <ApprovalDetailView detail={detail} loading={loading} />
 
       {/* === 审批操作区：当前步骤审批人或系统管理员可见 === */}
-      {isSubmitted && (isCurrentApprover || isAdmin) && (
+      {isSubmitted && canApprove && (isCurrentApprover || isAdmin) && (
         <Card title={isAdmin && !isCurrentApprover ? '管理员审批操作' : '审批操作'} size="small" style={{ marginTop: 16 }}>
           <div style={{ marginBottom: 12 }}>
             <Text type="secondary">
@@ -587,9 +591,11 @@ export function ApprovalDetailPage() {
             </Text>
           </div>
           <Space>
-            <Popconfirm title="确定撤回此申请？" onConfirm={handleWithdraw}>
-              <Button icon={<RollbackOutlined />} loading={actionLoading}>撤回</Button>
-            </Popconfirm>
+            {canWithdraw && (
+              <Popconfirm title="确定撤回此申请？" onConfirm={handleWithdraw}>
+                <Button icon={<RollbackOutlined />} loading={actionLoading}>撤回</Button>
+              </Popconfirm>
+            )}
             <Button icon={<SendOutlined />} onClick={handleOpenCc}>抄送传阅</Button>
           </Space>
         </Card>
@@ -1011,12 +1017,13 @@ function MyCcTab() {
 
 export default function Approval() {
   const [tabKey, setTabKey] = useState('my');
+  const { hasPermission } = usePermission();
 
   const tabItems = [
     { key: 'my', label: '我的申请' },
-    { key: 'pending', label: '待审批' },
-    { key: 'approved', label: '已审批' },
-    { key: 'cc', label: '抄送给我的' },
+    ...(hasPermission('approval:view:todo') ? [{ key: 'pending', label: '待审批' }] : []),
+    ...(hasPermission('approval:view:done') ? [{ key: 'approved', label: '已审批' }] : []),
+    ...(hasPermission('approval:view:cc') ? [{ key: 'cc', label: '抄送给我的' }] : []),
   ];
 
   return (
@@ -1033,4 +1040,3 @@ export default function Approval() {
     </div>
   );
 }
-

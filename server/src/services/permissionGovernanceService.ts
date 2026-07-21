@@ -44,7 +44,8 @@ export class PermissionGovernanceService {
       return {
         id: permission?.id ?? 0,
         code: definition.code,
-        name: definition.name,
+        name: definition.requestName || definition.name,
+        description: definition.description,
         module: definition.module,
         action: definition.action,
         grantable: true,
@@ -115,7 +116,7 @@ export class PermissionGovernanceService {
         applicantId,
         permissionId: permission.id,
         permissionCode: payload.permissionCode,
-        permissionName: definition.name,
+        permissionName: definition.requestName || definition.name,
         scopeType: payload.scopeType,
         scopeId,
         scopeName,
@@ -144,7 +145,7 @@ export class PermissionGovernanceService {
             targetType: 'permission_request',
             targetId: request.id,
             applicantName: applicant.realName,
-            title: `权限申请 ${definition.name}`,
+            title: `权限申请 ${definition.requestName || definition.name}`,
           });
         }
       } else {

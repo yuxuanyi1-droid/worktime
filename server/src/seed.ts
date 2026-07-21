@@ -47,10 +47,10 @@ async function seed() {
   // 2. 创建角色
   const roleRepo = AppDataSource.getRepository(Role);
   const roleData = [
-    { name: 'admin', label: '管理员', description: '系统管理员，拥有所有权限' },
-    { name: 'manager', label: '部门经理', description: '部门经理，可审批部门内工时/加班/周报' },
-    { name: 'group_leader', label: '组长', description: '组长，可审批组内工时/加班/周报' },
-    { name: 'employee', label: '普通员工', description: '普通员工，可填报工时/加班/周报' },
+    { name: 'admin', label: '管理员', description: '系统管理员，拥有所有权限', isSystem: true },
+    { name: 'manager', label: '部门经理', description: '部门经理，可审批部门内工时/加班/周报', isSystem: true },
+    { name: 'group_leader', label: '组长', description: '组长，可审批组内工时/加班/周报', isSystem: true },
+    { name: 'employee', label: '普通员工', description: '普通员工，可填报工时/加班/周报', isSystem: true },
   ];
 
   const allRoles: Role[] = [];
@@ -60,30 +60,27 @@ async function seed() {
       role = roleRepo.create(rd);
       await roleRepo.save(role);
     }
+    role.isSystem = true;
     const employeePermissions = [
-      'timesheet:access', 'timesheet:create', 'timesheet:update:self', 'timesheet:delete:self', 'timesheet:submit:self', 'timesheet:withdraw:self', 'timesheet:view:self',
-      'overtime:access', 'overtime:create', 'overtime:update:self', 'overtime:delete:self', 'overtime:submit:self', 'overtime:withdraw:self', 'overtime:view:self',
-      'weekly_report:access', 'weekly_report:create', 'weekly_report:update:self', 'weekly_report:submit:self', 'weekly_report:view:self',
+      'timesheet:access', 'timesheet:create', 'timesheet:update:self', 'timesheet:delete:self', 'timesheet:submit:self', 'timesheet:view:self',
+      'overtime:access', 'overtime:create', 'overtime:update:self', 'overtime:delete:self', 'overtime:submit:self', 'overtime:view:self',
+      'weekly_report:access', 'weekly_report:create', 'weekly_report:submit:self', 'weekly_report:view:self',
       'approval:access', 'approval:view:todo', 'approval:view:done', 'approval:view:cc', 'approval:approve:assigned', 'approval:withdraw:self',
       'report:access', 'report:view:self',
-      'project:access', 'project:view:self',
+      'project:access',
       'permission_request:access', 'permission_request:create', 'permission_request:view:self',
     ];
     const leaderPermissions = [
       ...employeePermissions,
       'timesheet:view:group', 'overtime:view:group', 'weekly_report:view:group',
-      'timesheet:approve:assigned', 'overtime:approve:assigned', 'weekly_report:approve:assigned',
       'report:view:group', 'report:view:project', 'report:view:overtime',
       'project:view:managed', 'project:update', 'project:assign_se',
-      'permission_request:approve:assigned',
     ];
     const managerPermissions = [
       ...employeePermissions,
       'timesheet:view:department', 'overtime:view:department', 'weekly_report:view:department',
-      'timesheet:approve:assigned', 'overtime:approve:assigned', 'weekly_report:approve:assigned',
       'report:view:department', 'report:view:project', 'report:view:overtime', 'report:export',
       'project:view:managed', 'project:update', 'project:assign_se',
-      'permission_request:approve:assigned',
     ];
     if (rd.name === 'admin') {
       role.permissions = allPerms;

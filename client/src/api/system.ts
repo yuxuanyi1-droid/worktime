@@ -57,6 +57,11 @@ export const systemApi = {
 
   // 角色
   getRoles: () => request.get<any, { code: number; data: Role[] }>('/system/roles'),
+  createRole: (data: { name: string; label: string; description?: string; permissionIds: number[] }) =>
+    request.post<any, { code: number; data: Role }>('/system/roles', data),
+  updateRole: (roleId: number, data: { label?: string; description?: string }) =>
+    request.put<any, { code: number; data: Role }>(`/system/roles/${roleId}`, data),
+  deleteRole: (roleId: number) => request.delete<any, { code: number }>(`/system/roles/${roleId}`),
   updateRolePermissions: (roleId: number, permissionIds: number[]) => request.put<any, { code: number }>(`/system/roles/${roleId}/permissions`, { permissionIds }),
 
   // 权限

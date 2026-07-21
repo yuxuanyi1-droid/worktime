@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Button,
   Card,
   DatePicker,
@@ -530,6 +531,16 @@ function PermissionRequestPage() {
                 }}
               />
             </Form.Item>
+
+            {selectedPermission?.description && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message={selectedPermission.name}
+                description={selectedPermission.description}
+              />
+            )}
 
             <Space size={16} align="start" style={{ width: '100%' }}>
               <Form.Item

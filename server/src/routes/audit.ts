@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { requireRole } from '../middleware/permission';
+import { requirePermission } from '../middleware/permission';
 import { firstQueryValue, parseOptionalPositiveInt, parsePagination } from '../utils/validation';
 
 const router = Router();
@@ -9,8 +9,8 @@ const auditService = new AuditService();
 
 router.use(authMiddleware);
 
-// 获取审计日志 — 仅管理员
-router.get('/', requireRole('admin'), async (req: AuthRequest, res, next) => {
+// 获取审计日志 — 管理员或拥有审计查看权限的角色
+router.get('/', requirePermission('system:audit:view'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const data = await auditService.getLogs({

@@ -2,13 +2,14 @@ import { useEffect, useState, type ReactNode } from 'react';
 import {
   Card, Tabs, Table, Button, Space, Modal, Form, Input, Select, Tag, message,
   Typography, Row, Col, Popconfirm, Switch, InputNumber, Tree, Tooltip, Empty, Radio,
-  Progress, Descriptions, Statistic, Badge, List, TreeSelect, Alert,
+  Progress, Descriptions, Statistic, Badge, List, TreeSelect, Alert, Checkbox,
 } from 'antd';
 import {
   PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined,
   UserOutlined, ApartmentOutlined, TeamOutlined, SettingOutlined,
   NotificationOutlined, EyeOutlined, WarningOutlined, InfoCircleOutlined,
-  ExclamationCircleOutlined,
+  ExclamationCircleOutlined, CopyOutlined, LockOutlined, SearchOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import { systemApi, UserListItem, SimpleUser, TimesheetReminderConfig } from '../../api/system';
 import { Department, Group, Role, Permission, Project, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep, stepTypeMap } from '../../types';
@@ -447,11 +448,29 @@ function RoleTab() {
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [selectedRole, setSelectedRole] = useState<number>();
   const [checkedKeys, setCheckedKeys] = useState<number[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [keyword, setKeyword] = useState('');
+  const [roleModal, setRoleModal] = useState<{ mode: 'create' | 'copy' | 'edit'; role?: Role } | null>(null);
+  const [roleForm] = Form.useForm();
 
-  const load = async () => {
-    const [roleRes, permRes] = await Promise.all([systemApi.getRoles(), systemApi.getPermissions()]);
-    if (roleRes.data) setRoles(roleRes.data);
-    if (permRes.data) setPermissions(permRes.data);
+  const load = async (preferredRoleId?: number) => {
+    setLoading(true);
+    try {
+      const [roleRes, permRes] = await Promise.all([systemApi.getRoles(), systemApi.getPermissions()]);
+      const nextRoles = roleRes.data || [];
+      const nextPermissions = permRes.data || [];
+      setRoles(nextRoles);
+      setPermissions(nextPermissions);
+      const targetRoleId = preferredRoleId ?? selectedRole;
+      const nextSelected = nextRoles.find(role => role.id === targetRoleId) || nextRoles[0];
+      setSelectedRole(nextSelected?.id);
+      setCheckedKeys(nextSelected?.name === 'admin'
+        ? nextPermissions.map(permission => permission.id)
+        : nextSelected?.permissions.map(permission => permission.id) || []);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);
@@ -459,64 +478,309 @@ function RoleTab() {
   const handleRoleSelect = (roleId: number) => {
     setSelectedRole(roleId);
     const role = roles.find(r => r.id === roleId);
-    setCheckedKeys(role?.permissions.map(p => p.id) || []);
+    setCheckedKeys(role?.name === 'admin'
+      ? permissions.map(permission => permission.id)
+      : role?.permissions.map(permission => permission.id) || []);
   };
 
   const handleSave = async () => {
     if (!selectedRole) return message.warning('请选择角色');
-    await systemApi.updateRolePermissions(selectedRole, checkedKeys);
-    message.success('权限更新成功');
-    load();
+    setSaving(true);
+    try {
+      await systemApi.updateRolePermissions(selectedRole, checkedKeys);
+      message.success('角色权限已更新，关联用户将在下次请求时生效');
+      await load();
+    } finally {
+      setSaving(false);
+    }
   };
 
   const moduleLabels: Record<string, string> = {
-    timesheet: '工时管理', overtime: '加班管理', weekly_report: '周报管理', report: '报表中心', system: '系统管理',
+    timesheet: '工时管理',
+    overtime: '加班管理',
+    weekly_report: '周报管理',
+    approval: '审批中心',
+    report: '报表中心',
+    project: '项目管理',
+    system: '系统管理',
+    permission_request: '权限申请',
+    permission_grant: '权限授权',
+  };
+
+  const currentRole = roles.find(role => role.id === selectedRole);
+  const isAdminRole = currentRole?.name === 'admin';
+  const visiblePermissions = permissions.filter(permission => {
+    const query = keyword.trim().toLowerCase();
+    if (!query) return true;
+    return [permission.name, permission.code, permission.description]
+      .filter(Boolean)
+      .some(value => String(value).toLowerCase().includes(query));
+  });
+  const modules = Array.from(new Set(permissions.map(permission => permission.module)));
+
+  const openRoleModal = (mode: 'create' | 'copy' | 'edit', role?: Role) => {
+    setRoleModal({ mode, role });
+    roleForm.resetFields();
+    if (mode === 'edit' && role) {
+      roleForm.setFieldsValue({ label: role.label, description: role.description });
+    } else {
+      roleForm.setFieldsValue({
+        label: mode === 'copy' && role ? `${role.label}副本` : undefined,
+        templateRoleId: role?.id,
+      });
+    }
+  };
+
+  const saveRole = async (values: any) => {
+    setSaving(true);
+    try {
+      let preferredRoleId: number | undefined;
+      if (roleModal?.mode === 'edit' && roleModal.role) {
+        await systemApi.updateRole(roleModal.role.id, {
+          label: values.label,
+          description: values.description || '',
+        });
+        message.success('角色信息已更新');
+      } else {
+        const template = roles.find(role => role.id === values.templateRoleId);
+        const res = await systemApi.createRole({
+          name: values.name,
+          label: values.label,
+          description: values.description,
+          permissionIds: template?.permissions.map(permission => permission.id) || [],
+        });
+        preferredRoleId = res.data?.id;
+        message.success(template ? '角色已创建，并复制模板权限' : '角色已创建');
+      }
+      setRoleModal(null);
+      roleForm.resetFields();
+      await load(preferredRoleId);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteRole = async (role: Role) => {
+    await systemApi.deleteRole(role.id);
+    message.success('角色已删除');
+    if (selectedRole === role.id) setSelectedRole(undefined);
+    await load();
   };
 
   return (
-    <Row gutter={16}>
-      <Col span={8}>
-        <Card title="角色列表" size="small">
-          {roles.map(role => (
-            <div key={role.id} style={{
-              padding: '8px 12px', cursor: 'pointer', borderRadius: 6, marginBottom: 4,
-              background: selectedRole === role.id ? '#eef2ff' : 'transparent',
-              fontWeight: selectedRole === role.id ? 600 : 400,
-            }} onClick={() => handleRoleSelect(role.id)}>
-              {role.label}
-            </div>
-          ))}
-        </Card>
-      </Col>
-      <Col span={16}>
-        <Card title="权限配置" size="small" extra={
-          <PermissionGuard permission="system:role:manage">
-            <Button type="primary" size="small" onClick={handleSave}>保存</Button>
-          </PermissionGuard>
-        }>
-          {Object.entries(moduleLabels).map(([mod, label]) => (
-            <div key={mod} style={{ marginBottom: 16 }}>
-              <div style={{ fontWeight: 600, marginBottom: 8 }}>{label}</div>
-              <Space wrap>
-                {permissions.filter(p => p.module === mod).map(perm => (
-                  <Tag key={perm.id}
-                    color={checkedKeys.includes(perm.id) ? '#6B8F71' : 'default'}
-                    style={{ cursor: canUpdate ? 'pointer' : 'not-allowed' }}
-                    onClick={() => {
-                      if (!canUpdate) return;
-                      setCheckedKeys(prev =>
-                        prev.includes(perm.id) ? prev.filter(k => k !== perm.id) : [...prev, perm.id]
-                      );
-                    }}>
-                    {perm.name}
-                  </Tag>
-                ))}
+    <>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="角色用于长期授权，范围由用户的组织职责决定"
+        description="例如角色中的“查看所负责部门工时”只覆盖该用户担任负责人的部门；需要临时查看指定部门时，请走权限申请。系统不会允许创建没有实际控制点的权限。"
+      />
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={8}>
+          <Card
+            title={<Space><SafetyCertificateOutlined />角色</Space>}
+            size="small"
+            loading={loading}
+            extra={canUpdate && <Button type="text" size="small" icon={<PlusOutlined />} onClick={() => openRoleModal('create')}>新建</Button>}
+          >
+            {roles.length === 0 ? (
+              <Empty description="暂无角色" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : roles.map(role => (
+              <div
+                key={role.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => handleRoleSelect(role.id)}
+                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') handleRoleSelect(role.id); }}
+                style={{
+                  padding: '11px 12px',
+                  cursor: 'pointer',
+                  borderRadius: 10,
+                  marginBottom: 6,
+                  border: selectedRole === role.id ? '1px solid #A9BDAA' : '1px solid transparent',
+                  background: selectedRole === role.id ? '#F0F5EF' : 'transparent',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                  <Space size={6} style={{ minWidth: 0 }}>
+                    <Text strong={selectedRole === role.id} ellipsis>{role.label}</Text>
+                    {role.isSystem && <Tag icon={<LockOutlined />} color="default">内置</Tag>}
+                  </Space>
+                  {canUpdate && (
+                    <Space size={0} onClick={(event) => event.stopPropagation()}>
+                      <Tooltip title="复制为自定义角色">
+                        <Button aria-label={`复制角色${role.label}`} type="text" size="small" icon={<CopyOutlined />} onClick={() => openRoleModal('copy', role)} />
+                      </Tooltip>
+                      {!role.isSystem && (
+                        <>
+                          <Tooltip title="编辑角色信息">
+                            <Button aria-label={`编辑角色${role.label}`} type="text" size="small" icon={<EditOutlined />} onClick={() => openRoleModal('edit', role)} />
+                          </Tooltip>
+                          <Popconfirm
+                            title={`删除角色“${role.label}”？`}
+                            description={role.userCount ? `该角色仍分配给 ${role.userCount} 名用户，无法删除。` : '删除后不可恢复。'}
+                            okText="删除角色"
+                            cancelText="取消"
+                            okButtonProps={{ danger: true, disabled: !!role.userCount }}
+                            onConfirm={() => deleteRole(role)}
+                          >
+                            <Button aria-label={`删除角色${role.label}`} type="text" size="small" danger icon={<DeleteOutlined />} />
+                          </Popconfirm>
+                        </>
+                      )}
+                    </Space>
+                  )}
+                </div>
+                <div style={{ marginTop: 4, color: '#8A8175', fontSize: 12 }}>
+                  {role.name} · {role.userCount || 0} 名用户 · {role.permissions.length} 项权限
+                </div>
+              </div>
+            ))}
+          </Card>
+        </Col>
+        <Col xs={24} lg={16}>
+          <Card
+            title={currentRole ? `${currentRole.label}的权限` : '权限配置'}
+            size="small"
+            loading={loading}
+            extra={(
+              <Space>
+                <Text type="secondary">已选 {checkedKeys.length} 项</Text>
+                <PermissionGuard permission="system:role:manage">
+                  <Button type="primary" size="small" onClick={handleSave} loading={saving} disabled={!currentRole || isAdminRole}>
+                    保存权限
+                  </Button>
+                </PermissionGuard>
               </Space>
-            </div>
-          ))}
-        </Card>
-      </Col>
-    </Row>
+            )}
+          >
+            {isAdminRole && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="管理员角色始终拥有全部权限"
+                description="超级管理员由角色标识直接判定，修改勾选项不会改变实际权限，因此这里保持只读。"
+              />
+            )}
+            <Input
+              allowClear
+              prefix={<SearchOutlined />}
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+              placeholder="搜索权限名称、权限码或作用说明"
+              style={{ marginBottom: 18 }}
+            />
+            {!currentRole ? (
+              <Empty description="请先选择一个角色" />
+            ) : modules.map(module => {
+              const modulePermissions = visiblePermissions.filter(permission => permission.module === module);
+              if (!modulePermissions.length) return null;
+              const moduleIds = modulePermissions.map(permission => permission.id);
+              const allChecked = moduleIds.every(id => checkedKeys.includes(id));
+              return (
+                <section key={module} style={{ marginBottom: 22 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                    <Text strong>{moduleLabels[module] || module}</Text>
+                    {!isAdminRole && canUpdate && (
+                      <Button type="link" size="small" onClick={() => setCheckedKeys(current => (
+                        allChecked
+                          ? current.filter(id => !moduleIds.includes(id))
+                          : Array.from(new Set([...current, ...moduleIds]))
+                      ))}>
+                        {allChecked ? '取消本组' : '选择本组'}
+                      </Button>
+                    )}
+                  </div>
+                  <Row gutter={[10, 10]}>
+                    {modulePermissions.map(permission => (
+                      <Col xs={24} md={12} key={permission.id}>
+                        <label style={{
+                          display: 'flex',
+                          gap: 10,
+                          alignItems: 'flex-start',
+                          padding: '11px 12px',
+                          minHeight: 78,
+                          borderRadius: 10,
+                          border: checkedKeys.includes(permission.id) ? '1px solid #A9BDAA' : '1px solid #E8E1D7',
+                          background: checkedKeys.includes(permission.id) ? '#F4F7F2' : '#FDFBF7',
+                          cursor: !canUpdate || isAdminRole ? 'not-allowed' : 'pointer',
+                        }}>
+                          <Checkbox
+                            checked={checkedKeys.includes(permission.id)}
+                            disabled={!canUpdate || isAdminRole}
+                            onChange={(event) => setCheckedKeys(current => (
+                              event.target.checked
+                                ? [...current, permission.id]
+                                : current.filter(id => id !== permission.id)
+                            ))}
+                          />
+                          <span style={{ minWidth: 0 }}>
+                            <Text style={{ display: 'block' }}>{permission.name}</Text>
+                            <Text type="secondary" style={{ display: 'block', fontSize: 12, overflowWrap: 'anywhere' }}>
+                              {permission.description || permission.code}
+                            </Text>
+                            {permission.description && (
+                              <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 2, overflowWrap: 'anywhere' }}>
+                                {permission.code}
+                              </Text>
+                            )}
+                          </span>
+                        </label>
+                      </Col>
+                    ))}
+                  </Row>
+                </section>
+              );
+            })}
+          </Card>
+        </Col>
+      </Row>
+
+      <Modal
+        title={roleModal?.mode === 'edit' ? '编辑自定义角色' : roleModal?.mode === 'copy' ? '复制角色' : '新建自定义角色'}
+        open={!!roleModal}
+        onCancel={() => setRoleModal(null)}
+        onOk={() => roleForm.submit()}
+        confirmLoading={saving}
+        okText={roleModal?.mode === 'edit' ? '保存角色信息' : '创建角色'}
+        destroyOnHidden
+      >
+        <Form form={roleForm} layout="vertical" onFinish={saveRole}>
+          {roleModal?.mode !== 'edit' && (
+            <Form.Item
+              name="name"
+              label="角色标识"
+              extra="创建后不可修改；用于系统内部识别，例如 finance_reviewer。"
+              rules={[
+                { required: true, message: '请输入角色标识' },
+                { pattern: /^[a-z][a-z0-9_]*$/, message: '仅支持小写字母、数字和下划线，且必须以字母开头' },
+              ]}
+            >
+              <Input maxLength={50} placeholder="例如 finance_reviewer" />
+            </Form.Item>
+          )}
+          <Form.Item name="label" label="角色名称" rules={[{ required: true, message: '请输入角色名称' }]}>
+            <Input maxLength={50} placeholder="例如 财务复核员" />
+          </Form.Item>
+          <Form.Item name="description" label="职责说明">
+            <Input.TextArea rows={3} maxLength={255} showCount placeholder="说明该角色适用于哪些人员和职责" />
+          </Form.Item>
+          {roleModal?.mode !== 'edit' && (
+            <Form.Item name="templateRoleId" label="权限模板（可选）" extra="只复制当前可分配的权限，不会复制用户。">
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                options={roles.map(role => ({ label: `${role.label}（${role.permissions.length} 项）`, value: role.id }))}
+                placeholder="从现有角色复制权限"
+              />
+            </Form.Item>
+          )}
+        </Form>
+      </Modal>
+    </>
   );
 }
 

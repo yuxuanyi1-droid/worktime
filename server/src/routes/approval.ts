@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { ApprovalService } from '../services/approvalService';
 import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { requirePermission } from '../middleware/permission';
 import { AppDataSource } from '../config/database';
 import { User } from '../entities/User';
 import { BusinessError } from '../utils/errors';
@@ -65,8 +66,8 @@ router.get('/my-submissions', async (req: AuthRequest, res, next) => {
   }
 });
 
-// 获取待审批列表 — 所有登录用户（service层基于审批流程引擎判断可见性）
-router.get('/pending', async (req: AuthRequest, res, next) => {
+// 获取待审批列表 — 需具备待办查看权限，service层继续校验实际审批人
+router.get('/pending', requirePermission('approval:view:todo'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query, 20);
     const data = await approvalService.getPendingList(req.user!.id, {
@@ -81,7 +82,7 @@ router.get('/pending', async (req: AuthRequest, res, next) => {
 });
 
 // 执行审批 — service层校验是否为当前步骤审批人
-router.post('/approve', async (req: AuthRequest, res, next) => {
+router.post('/approve', requirePermission('approval:approve:assigned'), async (req: AuthRequest, res, next) => {
   try {
     const items = parseArray(req.body.items, 'items', (itemValue, index) => {
       const item = itemValue as Record<string, unknown>;
@@ -111,8 +112,8 @@ router.post('/approve', async (req: AuthRequest, res, next) => {
   }
 });
 
-// 审批历史 — 所有登录用户可查看
-router.get('/history', async (req: AuthRequest, res, next) => {
+// 审批历史 — 仅查看当前用户实际处理过的记录
+router.get('/history', requirePermission('approval:view:done'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query, 20);
     const data = await approvalService.getApprovalHistory({
@@ -144,7 +145,7 @@ router.get('/detail/:targetType/:targetId', async (req: AuthRequest, res, next) 
 });
 
 // 撤回申请 — 仅提交人
-router.post('/withdraw', async (req: AuthRequest, res, next) => {
+router.post('/withdraw', requirePermission('approval:withdraw:self'), async (req: AuthRequest, res, next) => {
   try {
     const targetType = parseEnum(req.body.targetType, 'targetType', targetTypes);
     const targetId = parsePositiveInt(req.body.targetId, 'targetId');
@@ -168,8 +169,8 @@ router.post('/cc', async (req: AuthRequest, res, next) => {
   }
 });
 
-// 我收到的抄送 — 所有登录用户
-router.get('/my-cc', async (req: AuthRequest, res, next) => {
+// 我收到的抄送 — 需具备抄送查看权限
+router.get('/my-cc', requirePermission('approval:view:cc'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query, 20);
     const data = await approvalService.getMyCcList(req.user!.id, {
@@ -183,4 +184,3 @@ router.get('/my-cc', async (req: AuthRequest, res, next) => {
 });
 
 export const approvalRoutes = router;
-

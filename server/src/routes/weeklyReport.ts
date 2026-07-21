@@ -73,7 +73,7 @@ router.post('/', requirePermission('weekly_report:create'), async (req: AuthRequ
 });
 
 // 提交审批
-router.post('/submit', requirePermission('weekly_report:create'), async (req: AuthRequest, res, next) => {
+router.post('/submit', requirePermission('weekly_report:submit:self'), async (req: AuthRequest, res, next) => {
   try {
     const id = parsePositiveInt(req.body.id, 'id');
     await weeklyReportService.submit(id, req.user!.id);

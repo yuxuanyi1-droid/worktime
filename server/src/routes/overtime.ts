@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { OvertimeService } from '../services/overtimeService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { requirePermission } from '../middleware/permission';
+import { requireAllPermissions, requirePermission } from '../middleware/permission';
 import {
   firstQueryValue,
   parseArray,
@@ -84,7 +84,7 @@ router.post('/', requirePermission('overtime:create'), async (req: AuthRequest, 
 });
 
 // 创建并直接提交审批
-router.post('/submit-new', requirePermission('overtime:create'), async (req: AuthRequest, res, next) => {
+router.post('/submit-new', requireAllPermissions('overtime:create', 'overtime:submit:self'), async (req: AuthRequest, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const payload = parseOvertimePayload(body);
@@ -121,7 +121,7 @@ router.delete('/:id', requirePermission('overtime:delete'), async (req: AuthRequ
 });
 
 // 提交审批
-router.post('/submit', requirePermission('overtime:create'), async (req: AuthRequest, res, next) => {
+router.post('/submit', requirePermission('overtime:submit:self'), async (req: AuthRequest, res, next) => {
   try {
     const ids = parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 100 });
     await overtimeService.submit(ids, req.user!.id);
