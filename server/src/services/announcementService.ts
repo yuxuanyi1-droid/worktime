@@ -51,7 +51,8 @@ export class AnnouncementService {
     params.userMiddle = `%,${userId},%`;
     params.userLast = `%,${userId}]`;
 
-    return { where: conditions.join(' OR '), params };
+    // 整体加括号，确保调用方继续追加 AND 条件时不会被 SQL 的 AND 优先级拆散。
+    return { where: `(${conditions.join(' OR ')})`, params };
   }
 
   private async getUserGroupAncestorIds(userGroupId: number | null): Promise<number[]> {
@@ -215,8 +216,8 @@ export class AnnouncementService {
     const visible = await this.announceRepo.createQueryBuilder('a')
       .select(['a.id'])
       .where(where, params)
-      .getRawMany<{ id: number }>();
-    const visibleIds = visible.map(v => v.id);
+      .getMany();
+    const visibleIds = visible.map(announcement => announcement.id);
     if (visibleIds.length === 0) return;
 
     const reads = await this.readRepo.find({ where: { userId, announcementId: In(visibleIds) } });

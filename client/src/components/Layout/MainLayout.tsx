@@ -25,7 +25,14 @@ import {
 import { useAuthStore } from '../../stores/authStore';
 import { usePermission } from '../../hooks/usePermission';
 import { useAppStore } from '../../stores/appStore';
-import { notificationApi, NotificationItem, announcementApi, AnnouncementItem } from '../../api/notification';
+import {
+  announcementApi,
+  AnnouncementItem,
+  emitNotificationReadStateChanged,
+  notificationApi,
+  NotificationItem,
+  NOTIFICATION_READ_STATE_EVENT,
+} from '../../api/notification';
 import { systemApi } from '../../api/system';
 import { authApi } from '../../api/auth';
 import { useEffect, useState, useRef, useCallback } from 'react';
@@ -84,8 +91,8 @@ export default function MainLayout() {
     setNotifLoading(true);
     try {
       const [nRes, aRes] = await Promise.all([
-        notificationApi.getList({ pageSize: 10 }),
-        announcementApi.getMyList({ pageSize: 10 }),
+        notificationApi.getList({ pageSize: 10, isRead: false }),
+        announcementApi.getMyList({ pageSize: 10, isRead: false }),
       ]);
       if (nRes.data) setNotifications(nRes.data.list);
       if (aRes.data) setAnnouncements(aRes.data.list);
@@ -95,7 +102,12 @@ export default function MainLayout() {
 
   const handleNotifClick = async (item: NotificationItem) => {
     if (!item.isRead) {
-      try { await notificationApi.markAsRead([item.id]); loadUnreadCounts(); } catch {}
+      try {
+        await notificationApi.markAsRead([item.id]);
+        setNotifications(current => current.filter(notification => notification.id !== item.id));
+        setNotifUnread(current => Math.max(0, current - 1));
+        emitNotificationReadStateChanged();
+      } catch {}
     }
     if (item.targetType && item.targetId) {
       navigate(`/approval/detail/${item.targetType}/${item.targetId}`);
@@ -105,7 +117,12 @@ export default function MainLayout() {
 
   const handleAnnounClick = async (item: AnnouncementItem) => {
     if (!item.isRead) {
-      try { await announcementApi.markAsRead(item.id); loadUnreadCounts(); loadNotifications(); } catch {}
+      try {
+        await announcementApi.markAsRead(item.id);
+        setAnnouncements(current => current.filter(announcement => announcement.id !== item.id));
+        setAnnounUnread(current => Math.max(0, current - 1));
+        emitNotificationReadStateChanged();
+      } catch {}
     }
   };
 
@@ -113,9 +130,20 @@ export default function MainLayout() {
     try {
       if (notifTab === 'notif') await notificationApi.markAllAsRead();
       else await announcementApi.markAllAsRead();
-      loadUnreadCounts();
-      loadNotifications();
+      if (notifTab === 'notif') {
+        setNotifications([]);
+        setNotifUnread(0);
+      } else {
+        setAnnouncements([]);
+        setAnnounUnread(0);
+      }
+      emitNotificationReadStateChanged();
     } catch {}
+  };
+
+  const handleViewAll = () => {
+    navigate(`/notifications?tab=${notifTab}`);
+    setPopoverOpen(false);
   };
 
   useEffect(() => {
@@ -138,6 +166,11 @@ export default function MainLayout() {
     loadUnreadCounts();
     pollRef.current = setInterval(loadUnreadCounts, 30000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [loadUnreadCounts]);
+
+  useEffect(() => {
+    window.addEventListener(NOTIFICATION_READ_STATE_EVENT, loadUnreadCounts);
+    return () => window.removeEventListener(NOTIFICATION_READ_STATE_EVENT, loadUnreadCounts);
   }, [loadUnreadCounts]);
 
   useEffect(() => {
@@ -195,8 +228,8 @@ export default function MainLayout() {
         ]}
         tabBarExtraContent={
           <Space>
-            <Button size="small" type="link" onClick={() => { setPopoverOpen(false); navigate('/notifications'); }}>
-              查看全部
+            <Button size="small" type="link" onClick={handleViewAll}>
+              查看全部记录
             </Button>
             {currentTabUnread > 0 && (
               <Button size="small" type="link" onClick={handleMarkAllRead}>全部已读</Button>
@@ -207,7 +240,7 @@ export default function MainLayout() {
       <Spin spinning={notifLoading}>
         {notifTab === 'notif' ? (
           notifications.length === 0 ? (
-            <Empty description="暂无通知" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <Empty description="暂无未读通知" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           ) : (
             <List
               dataSource={notifications}
@@ -239,7 +272,7 @@ export default function MainLayout() {
           )
         ) : (
           announcements.length === 0 ? (
-            <Empty description="暂无公告" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <Empty description="暂无未读公告" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           ) : (
             <List
               dataSource={announcements}

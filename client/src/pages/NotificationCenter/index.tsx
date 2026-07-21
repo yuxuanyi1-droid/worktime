@@ -7,14 +7,22 @@ import {
   BellOutlined, NotificationOutlined, CheckCircleOutlined, DeleteOutlined,
   InfoCircleOutlined, WarningOutlined, ExclamationCircleOutlined,
 } from '@ant-design/icons';
-import { notificationApi, NotificationItem, announcementApi, AnnouncementItem } from '../../api/notification';
-import { useNavigate } from 'react-router-dom';
+import {
+  announcementApi,
+  AnnouncementItem,
+  emitNotificationReadStateChanged,
+  notificationApi,
+  NotificationItem,
+} from '../../api/notification';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
 const { Title, Text, Paragraph } = Typography;
 
 export default function NotificationCenter() {
   const navigate = useNavigate();
-  const [tabKey, setTabKey] = useState('notif');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get('tab');
+  const [tabKey, setTabKey] = useState(requestedTab === 'announce' ? 'announce' : 'notif');
   const [notifLoading, setNotifLoading] = useState(false);
   const [announLoading, setAnnounLoading] = useState(false);
 
@@ -56,11 +64,20 @@ export default function NotificationCenter() {
 
   useEffect(() => { loadNotifications(); }, [notifPage]);
   useEffect(() => { loadAnnouncements(); }, [announPage]);
+  useEffect(() => {
+    setTabKey(requestedTab === 'announce' ? 'announce' : 'notif');
+  }, [requestedTab]);
+
+  const handleTabChange = (key: string) => {
+    setTabKey(key);
+    setSearchParams({ tab: key }, { replace: true });
+  };
 
   const handleNotifClick = async (item: NotificationItem) => {
     if (!item.isRead) {
       try {
         await notificationApi.markAsRead([item.id]);
+        emitNotificationReadStateChanged();
         loadNotifications();
       } catch {}
     }
@@ -72,19 +89,23 @@ export default function NotificationCenter() {
   };
 
   const handleAnnounClick = async (item: AnnouncementItem) => {
+    let detail = item;
     if (!item.isRead) {
       try {
         await announcementApi.markAsRead(item.id);
+        emitNotificationReadStateChanged();
         loadAnnouncements();
+        detail = { ...item, isRead: true };
       } catch {}
     }
-    setDetailItem(item);
+    setDetailItem(detail);
     setDetailOpen(true);
   };
 
   const handleMarkAllReadNotif = async () => {
     try {
       await notificationApi.markAllAsRead();
+      emitNotificationReadStateChanged();
       loadNotifications();
     } catch {
       // 拦截器已弹 message.error
@@ -94,6 +115,7 @@ export default function NotificationCenter() {
   const handleMarkAllReadAnnoun = async () => {
     try {
       await announcementApi.markAllAsRead();
+      emitNotificationReadStateChanged();
       loadAnnouncements();
     } catch {
       // 拦截器已弹 message.error
@@ -169,7 +191,7 @@ export default function NotificationCenter() {
     <div>
       <Title level={4} style={{ fontFamily: '"Fraunces", Georgia, serif', fontWeight: 700, letterSpacing: '-0.01em' }}>通知中心</Title>
       <Card style={{ borderRadius: 12 }}>
-        <Tabs activeKey={tabKey} onChange={(k) => { setTabKey(k); }} items={[
+        <Tabs activeKey={tabKey} onChange={handleTabChange} items={[
           {
             key: 'notif',
             label: (
@@ -277,6 +299,7 @@ export default function NotificationCenter() {
           <Button type="primary" onClick={async () => {
             if (detailItem) {
               await announcementApi.markAsRead(detailItem.id);
+              emitNotificationReadStateChanged();
               loadAnnouncements();
             }
             setDetailOpen(false);

@@ -1,6 +1,12 @@
 import request from '../utils/request';
 import { PageResult } from '../types';
 
+export const NOTIFICATION_READ_STATE_EVENT = 'notification-read-state-changed';
+
+export function emitNotificationReadStateChanged() {
+  window.dispatchEvent(new CustomEvent(NOTIFICATION_READ_STATE_EVENT));
+}
+
 export interface NotificationItem {
   id: number;
   userId: number;
