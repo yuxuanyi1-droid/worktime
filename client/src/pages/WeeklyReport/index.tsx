@@ -94,6 +94,7 @@ export default function WeeklyReportPage() {
   const { hasPermission } = usePermission();
 
   const canCreate = hasPermission('weekly_report:create');
+  const canViewSelf = hasPermission('weekly_report:view:self');
   const canUpdate = canCreate;
   const canSubmit = hasPermission('weekly_report:submit:self');
 
@@ -102,6 +103,13 @@ export default function WeeklyReportPage() {
   }, [weekStart]);
 
   const loadData = async () => {
+    if (!canViewSelf) {
+      setReport(null);
+      setContent('');
+      setSummary('');
+      setWeekHours(null);
+      return;
+    }
     const ws = weekStart.format('YYYY-MM-DD');
     const we = weekStart.add(6, 'day').format('YYYY-MM-DD');
     try {

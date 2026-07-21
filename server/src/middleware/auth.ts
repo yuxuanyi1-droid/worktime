@@ -7,6 +7,7 @@ import { User } from '../entities/User';
 import { PersonalAccessToken } from '../entities/PersonalAccessToken';
 import { AccessPolicyService } from '../services/accessPolicyService';
 import { CacheKeys, CacheTtl, cacheGet, cacheSet } from '../config/cache';
+import { PERMISSION_MODEL_VERSION } from '../config/permissionDefinitions';
 
 const accessPolicy = new AccessPolicyService();
 
@@ -17,6 +18,7 @@ type CachedAuthUser = {
   roles: string[];
   permissions: string[];
   tokenVersion: number;
+  permissionModelVersion: number;
 };
 
 /** PAT 明文前缀，auth 中间件据此区分 JWT 与 PAT */
@@ -29,7 +31,7 @@ export interface AuthRequest extends Request {
     realName: string;
     roles: string[];
   };
-  /** 当前请求用户完整权限集合（含角色权限 + 生效中的授权 + 别名/蕴含展开）。请求级缓存。 */
+  /** 当前请求用户完整权限集合（含角色权限 + 生效中的授权 + 蕴含展开）。请求级缓存。 */
   userPermissions?: Set<string>;
   /** 当前请求的认证方式：jwt（登录会话）或 pat（个人访问令牌，用于 pi skill / 外部工具） */
   authMethod?: 'jwt' | 'pat';
@@ -71,7 +73,7 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
 
     const cacheKey = CacheKeys.authUser(decoded.id);
     const cached = await cacheGet<CachedAuthUser>(cacheKey);
-    if (cached) {
+    if (cached?.permissionModelVersion === PERMISSION_MODEL_VERSION) {
       if (decoded.v !== cached.tokenVersion) {
         return res.status(401).json({ code: 401, message: '登录已失效，请重新登录' });
       }
@@ -115,6 +117,7 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       ...req.user,
       permissions: Array.from(req.userPermissions),
       tokenVersion: user.tokenVersion,
+      permissionModelVersion: PERMISSION_MODEL_VERSION,
     } satisfies CachedAuthUser, CacheTtl.auth);
 
     return next();

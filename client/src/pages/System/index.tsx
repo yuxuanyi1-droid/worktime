@@ -3,6 +3,7 @@ import {
   Card, Tabs, Table, Button, Space, Modal, Form, Input, Select, Tag, message,
   Typography, Row, Col, Popconfirm, Switch, InputNumber, Tree, Tooltip, Empty, Radio,
   Progress, Descriptions, Statistic, Badge, List, TreeSelect, Alert, Checkbox,
+  DatePicker,
 } from 'antd';
 import {
   PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined,
@@ -16,6 +17,7 @@ import { Department, Group, Role, Permission, Project, ProjectSE, ProjectWorkloa
 import { announcementApi, AnnouncementItem, AnnouncementStats } from '../../api/notification';
 import { useAppStore } from '../../stores/appStore';
 import { usePermission } from '../../hooks/usePermission';
+import { auditApi, AuditLogItem } from '../../api/audit';
 
 const { Title, Text } = Typography;
 
@@ -30,6 +32,7 @@ const systemTabOptions = [
   { key: 'role', label: '\u89d2\u8272\u6743\u9650', permission: 'system:role:manage' },
   { key: 'approval-flow', label: '\u5ba1\u6279\u6d41\u7a0b', permission: 'system:approval_flow:manage' },
   { key: 'announcement', label: '\u516c\u544a\u7ba1\u7406', permission: 'system:announcement:view' },
+  { key: 'audit', label: '审计日志', permission: 'system:audit:view' },
   { key: 'settings', label: '\u7cfb\u7edf\u8bbe\u7f6e', permission: 'system:settings:manage' },
 ];
 
@@ -37,12 +40,13 @@ export default function System() {
   const { hasPermission } = usePermission();
   const [tabKey, setTabKey] = useState('org');
   const tabItems = systemTabOptions.filter((item) => hasPermission(item.permission));
+  const activeTabKey = tabItems.some((item) => item.key === tabKey) ? tabKey : tabItems[0]?.key;
 
   useEffect(() => {
-    if (tabItems.length && !tabItems.some((item) => item.key === tabKey)) {
-      setTabKey(tabItems[0].key);
+    if (activeTabKey && activeTabKey !== tabKey) {
+      setTabKey(activeTabKey);
     }
-  }, [tabKey, tabItems.map((item) => item.key).join(',')]);
+  }, [activeTabKey, tabKey]);
 
   return (
     <div>
@@ -51,15 +55,16 @@ export default function System() {
         {tabItems.length === 0 ? (
           <Empty description={'\u6682\u65e0\u53ef\u7ba1\u7406\u6a21\u5757'} />
         ) : (
-          <Tabs activeKey={tabKey} onChange={setTabKey} items={tabItems.map(({ key, label }) => ({ key, label }))} />
+          <Tabs activeKey={activeTabKey} onChange={setTabKey} items={tabItems.map(({ key, label }) => ({ key, label }))} />
         )}
 
-        {tabKey === 'org' && <OrgTab />}
-        {tabKey === 'user' && <UserTab />}
-        {tabKey === 'role' && <RoleTab />}
-        {tabKey === 'approval-flow' && <ApprovalFlowTab />}
-        {tabKey === 'announcement' && <AnnouncementTab />}
-        {tabKey === 'settings' && <SettingsTab />}
+        {activeTabKey === 'org' && <OrgTab />}
+        {activeTabKey === 'user' && <UserTab />}
+        {activeTabKey === 'role' && <RoleTab />}
+        {activeTabKey === 'approval-flow' && <ApprovalFlowTab />}
+        {activeTabKey === 'announcement' && <AnnouncementTab />}
+        {activeTabKey === 'audit' && <AuditTab />}
+        {activeTabKey === 'settings' && <SettingsTab />}
       </Card>
     </div>
   );
@@ -1225,6 +1230,203 @@ function ApprovalFlowTab() {
             )}
           </Form.List>
         </Form>
+      </Modal>
+    </>
+  );
+}
+
+// ==================== 审计日志 ====================
+function AuditTab() {
+  const [data, setData] = useState<AuditLogItem[]>([]);
+  const [users, setUsers] = useState<SimpleUser[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [detailItem, setDetailItem] = useState<AuditLogItem | null>(null);
+  const [form] = Form.useForm();
+
+  const actionLabels: Record<string, string> = {
+    login: '登录',
+    logout: '退出登录',
+    change_password: '修改密码',
+    approve: '审批',
+    reject: '驳回',
+    'user.create': '创建用户',
+    'user.update': '更新用户',
+    'user.delete': '删除用户',
+    'user.reset_password': '重置密码',
+    'role.create': '创建角色',
+    'role.update': '更新角色',
+    'role.delete': '删除角色',
+    'role.update_permissions': '更新角色权限',
+  };
+
+  const targetLabels: Record<string, string> = {
+    system: '系统',
+    user: '用户',
+    role: '角色',
+    timesheet: '工时',
+    overtime: '加班',
+    weekly_report: '周报',
+    permission_request: '权限申请',
+    pat: '访问令牌',
+  };
+
+  const load = async (targetPage = page) => {
+    setLoading(true);
+    try {
+      const values = form.getFieldsValue();
+      const dateRange = values.dateRange;
+      const res = await auditApi.getList({
+        page: targetPage,
+        pageSize: 20,
+        userId: values.userId,
+        action: values.action?.trim() || undefined,
+        target: values.target?.trim() || undefined,
+        startDate: dateRange?.[0]?.startOf('day').toISOString(),
+        endDate: dateRange?.[1]?.endOf('day').toISOString(),
+      });
+      if (res.data) {
+        setData(res.data.list);
+        setTotal(res.data.total);
+        setPage(targetPage);
+      }
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || '审计日志加载失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load(1);
+    systemApi.getAllUsers()
+      .then((res) => setUsers(res.data || []))
+      .catch(() => setUsers([]));
+  }, []);
+
+  const formatDetail = (detail: string | null) => {
+    if (!detail) return '无附加详情';
+    try {
+      return JSON.stringify(JSON.parse(detail), null, 2);
+    } catch {
+      return detail;
+    }
+  };
+
+  const columns = [
+    {
+      title: '时间', dataIndex: 'createdAt', width: 170,
+      render: (value: string) => new Date(value).toLocaleString(),
+    },
+    {
+      title: '操作人', key: 'user', width: 140,
+      render: (_: unknown, record: AuditLogItem) => record.userName || (record.userId ? `用户 #${record.userId}` : '系统'),
+    },
+    {
+      title: '动作', dataIndex: 'action', width: 150,
+      render: (value: string) => <Tag color="blue">{actionLabels[value] || value}</Tag>,
+    },
+    {
+      title: '对象', key: 'target', width: 150,
+      render: (_: unknown, record: AuditLogItem) => (
+        <span>{targetLabels[record.target] || record.target}{record.targetId ? ` #${record.targetId}` : ''}</span>
+      ),
+    },
+    { title: 'IP 地址', dataIndex: 'ip', width: 145, render: (value: string | null) => value || '-' },
+    {
+      title: '详情', key: 'detail',
+      render: (_: unknown, record: AuditLogItem) => record.detail ? (
+        <Button type="link" size="small" onClick={() => setDetailItem(record)}>查看详情</Button>
+      ) : <Text type="secondary">-</Text>,
+    },
+  ];
+
+  return (
+    <>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="审计日志用于追踪关键管理操作"
+        description="日志仅供查询，不支持编辑或删除。筛选条件为空时按时间倒序显示全部记录。"
+      />
+      <Form form={form} layout="inline" style={{ marginBottom: 16, rowGap: 10 }} onFinish={() => load(1)}>
+        <Form.Item name="userId" label="操作人">
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder="全部人员"
+            style={{ width: 180 }}
+            options={users.map(user => ({ label: `${user.realName}（${user.username}）`, value: user.id }))}
+          />
+        </Form.Item>
+        <Form.Item name="action" label="动作">
+          <Input allowClear placeholder="如 role.update" style={{ width: 160 }} />
+        </Form.Item>
+        <Form.Item name="target" label="对象">
+          <Input allowClear placeholder="如 role" style={{ width: 140 }} />
+        </Form.Item>
+        <Form.Item name="dateRange" label="时间范围">
+          <DatePicker.RangePicker allowClear style={{ width: 250 }} />
+        </Form.Item>
+        <Form.Item>
+          <Space>
+            <Button type="primary" htmlType="submit" loading={loading}>查询</Button>
+            <Button onClick={() => { form.resetFields(); void load(1); }}>重置</Button>
+          </Space>
+        </Form.Item>
+      </Form>
+      <Table
+        rowKey="id"
+        loading={loading}
+        columns={columns}
+        dataSource={data}
+        size="middle"
+        scroll={{ x: 900 }}
+        pagination={{
+          current: page,
+          total,
+          pageSize: 20,
+          showTotal: count => `共 ${count} 条`,
+          onChange: nextPage => load(nextPage),
+        }}
+      />
+
+      <Modal
+        title={detailItem ? `审计详情 #${detailItem.id}` : '审计详情'}
+        open={!!detailItem}
+        footer={<Button onClick={() => setDetailItem(null)}>关闭</Button>}
+        onCancel={() => setDetailItem(null)}
+        width={680}
+      >
+        {detailItem && (
+          <>
+            <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="操作人">{detailItem.userName || '系统'}</Descriptions.Item>
+              <Descriptions.Item label="时间">{new Date(detailItem.createdAt).toLocaleString()}</Descriptions.Item>
+              <Descriptions.Item label="动作">{actionLabels[detailItem.action] || detailItem.action}</Descriptions.Item>
+              <Descriptions.Item label="对象">{targetLabels[detailItem.target] || detailItem.target}</Descriptions.Item>
+              <Descriptions.Item label="对象 ID">{detailItem.targetId || '-'}</Descriptions.Item>
+              <Descriptions.Item label="IP 地址">{detailItem.ip || '-'}</Descriptions.Item>
+            </Descriptions>
+            <pre style={{
+              margin: 0,
+              padding: 14,
+              maxHeight: 360,
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+              border: '1px solid #E8E0D4',
+              borderRadius: 10,
+              background: '#F8F4ED',
+              color: '#2C2418',
+              fontSize: 12,
+              lineHeight: 1.6,
+            }}>{formatDetail(detailItem.detail)}</pre>
+          </>
+        )}
       </Modal>
     </>
   );

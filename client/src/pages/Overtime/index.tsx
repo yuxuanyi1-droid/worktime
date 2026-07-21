@@ -27,7 +27,8 @@ export default function Overtime() {
   const navigate = useNavigate();
 
   const canCreate = hasPermission('overtime:create');
-  const canDelete = hasPermission('overtime:delete');
+  const canViewSelf = hasPermission('overtime:view:self');
+  const canDelete = hasPermission('overtime:delete:self');
   const canSubmit = hasPermission('overtime:submit:self');
   const canWithdraw = hasPermission('approval:withdraw:self');
 
@@ -39,6 +40,10 @@ export default function Overtime() {
   useEffect(() => { loadData(); loadProjects(); }, []);
 
   const loadData = async () => {
+    if (!canViewSelf) {
+      setData([]);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {

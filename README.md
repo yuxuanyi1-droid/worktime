@@ -15,6 +15,8 @@
 
 ## 快速启动
 
+运行环境要求 Node.js 22.19.0 及以上，推荐 Node.js 24。使用 fnm 时请先执行 `fnm use 24`。
+
 ```bash
 # 1. 安装依赖并创建统一配置
 npm run install:all

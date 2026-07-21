@@ -47,19 +47,19 @@ interface MenuItem {
 const allMenuItems: MenuItem[] = [
   { key: '/permission-request', icon: <KeyOutlined />, label: '权限申请', permission: 'permission_request:access' },
   { key: '/', icon: <DashboardOutlined />, label: '工作台' },
-  { key: '/timesheet', icon: <ClockCircleOutlined />, label: '工时', permission: 'timesheet:read' },
-  { key: '/overtime', icon: <ThunderboltOutlined />, label: '加班', permission: 'overtime:read' },
-  { key: '/weekly-report', icon: <FileTextOutlined />, label: '周报', permission: 'weekly_report:read' },
-  { key: '/approval', icon: <CheckCircleOutlined />, label: '审批' },
+  { key: '/timesheet', icon: <ClockCircleOutlined />, label: '工时', permission: 'timesheet:access' },
+  { key: '/overtime', icon: <ThunderboltOutlined />, label: '加班', permission: 'overtime:access' },
+  { key: '/weekly-report', icon: <FileTextOutlined />, label: '周报', permission: 'weekly_report:access' },
+  { key: '/approval', icon: <CheckCircleOutlined />, label: '审批', permission: 'approval:access' },
   { key: '/report', icon: <BarChartOutlined />, label: '报表', permission: 'report:access' },
   { key: '/project', icon: <ProjectOutlined />, label: '项目' },
-  { key: '/system', icon: <SettingOutlined />, label: '管理', permission: 'system:read' },
+  { key: '/system', icon: <SettingOutlined />, label: '管理', permission: 'system:access' },
 ];
 
 export default function MainLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, clearAuth } = useAuthStore();
+  const { user, clearAuth, setAuth, token } = useAuthStore();
   const { hasPermission, hasRole, isAdmin } = usePermission();
   const { systemName, loadSettings } = useAppStore();
 
@@ -149,6 +149,14 @@ export default function MainLayout() {
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
+
+  // 每次应用挂载时刷新用户档案，确保角色权限修改和权限推导规则立即反映到菜单。
+  useEffect(() => {
+    if (!token) return;
+    authApi.getProfile()
+      .then((res) => { if (res.data) setAuth(token, res.data); })
+      .catch(() => { /* 401 由请求拦截器统一处理 */ });
+  }, [setAuth, token]);
 
   // 检查用户是否可以查看项目管理（管理员或被指定为项目管理员）
   useEffect(() => {

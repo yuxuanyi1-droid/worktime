@@ -28,7 +28,7 @@ function parseWeeklyReportPayload(body: Record<string, unknown>) {
 router.use(authMiddleware);
 
 // 查看自己的周报
-router.get('/my', async (req: AuthRequest, res, next) => {
+router.get('/my', requirePermission('weekly_report:view:self'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const data = await weeklyReportService.getByUser(req.user!.id, {
@@ -42,7 +42,7 @@ router.get('/my', async (req: AuthRequest, res, next) => {
 });
 
 // 查看指定周的周报
-router.get('/week', requirePermission('weekly_report:read'), async (req: AuthRequest, res, next) => {
+router.get('/week', requirePermission('weekly_report:view:self', 'weekly_report:view:group', 'weekly_report:view:department'), async (req: AuthRequest, res, next) => {
   try {
     const weekStart = parseDateString(firstQueryValue(req.query.weekStart), 'weekStart');
     const userId = firstQueryValue(req.query.userId)

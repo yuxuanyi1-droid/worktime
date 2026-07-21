@@ -3,21 +3,21 @@ import { expandPermissionCodes, permissionImplications } from './permissionDefin
 
 describe('expandPermissionCodes', () => {
   it('返回输入码本身', () => {
-    const result = expandPermissionCodes(['timesheet:read']);
-    expect(result.has('timesheet:read')).toBe(true);
-  });
-
-  it('展开蕴含关系（不动点）', () => {
-    const result = expandPermissionCodes(['timesheet:submit:self']);
-    expect(result.has('timesheet:submit:self')).toBe(true);
+    const result = expandPermissionCodes(['timesheet:access']);
     expect(result.has('timesheet:access')).toBe(true);
   });
 
+  it('业务操作权限不会自动获得入口权限', () => {
+    const result = expandPermissionCodes(['timesheet:submit:self']);
+    expect(result.has('timesheet:submit:self')).toBe(true);
+    expect(result.has('timesheet:access')).toBe(false);
+  });
+
   it('多级蕴含传递', () => {
-    // 若 A=>B 且 B=>C，则给 A 应得 C
-    const result = expandPermissionCodes(['report:export']);
-    expect(result.has('report:export')).toBe(true);
-    expect(result.has('report:access')).toBe(true);
+    const result = expandPermissionCodes(['system:announcement:create']);
+    expect(result.has('system:announcement:create')).toBe(true);
+    expect(result.has('system:announcement:view')).toBe(true);
+    expect(result.has('system:access')).toBe(false);
   });
 
   it('空输入返回空集合', () => {
@@ -26,14 +26,14 @@ describe('expandPermissionCodes', () => {
   });
 
   it('多个权限码合并', () => {
-    const result = expandPermissionCodes(['timesheet:read', 'overtime:read']);
-    expect(result.has('timesheet:read')).toBe(true);
-    expect(result.has('overtime:read')).toBe(true);
+    const result = expandPermissionCodes(['timesheet:access', 'overtime:access']);
+    expect(result.has('timesheet:access')).toBe(true);
+    expect(result.has('overtime:access')).toBe(true);
   });
 
-  it('permissionImplications 包含已定义的动作=>访问映射', () => {
-    expect(permissionImplications['timesheet:submit:self']).toContain('timesheet:access');
-    expect(permissionImplications['report:export']).toContain('report:access');
+  it('permissionImplications 不包含业务动作到入口的隐式映射', () => {
+    expect(permissionImplications['timesheet:submit:self']).toBeUndefined();
+    expect(permissionImplications['report:export']).toBeUndefined();
   });
 
   it('权限目录不再包含没有实际控制点的旧权限', async () => {

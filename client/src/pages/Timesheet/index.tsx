@@ -105,8 +105,9 @@ export default function TimesheetPage() {
 
   const { hasPermission } = usePermission();
   const canCreate = hasPermission('timesheet:create');
-  const canUpdate = hasPermission('timesheet:update');
-  const canDelete = hasPermission('timesheet:delete');
+  const canViewSelf = hasPermission('timesheet:view:self');
+  const canUpdate = hasPermission('timesheet:update:self');
+  const canDelete = hasPermission('timesheet:delete:self');
   const canSubmit = hasPermission('timesheet:submit:self');
   const canWithdraw = hasPermission('approval:withdraw:self');
 
@@ -156,6 +157,10 @@ export default function TimesheetPage() {
   };
 
   const loadHistory = async () => {
+    if (!canViewSelf) {
+      setHistoryData([]);
+      return;
+    }
     setHistoryLoading(true);
     try {
       const res = await timesheetApi.getMy({
@@ -174,6 +179,11 @@ export default function TimesheetPage() {
 
   /** 加载当前周已有的工时数据（含已提交/已通过），填充到周表格 */
   const loadWeekDrafts = async () => {
+    if (!canViewSelf) {
+      setRows([newRow()]);
+      setDirty(false);
+      return;
+    }
     if (projects.length === 0) return;
     // 竞态守卫：快速切周时只接受最后一次请求的响应，避免旧响应覆盖新数据
     const reqId = ++weekLoadReqId.current;

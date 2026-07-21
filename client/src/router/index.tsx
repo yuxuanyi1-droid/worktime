@@ -79,15 +79,15 @@ export default function AppRouter() {
         }
       >
         <Route index element={<Dashboard />} />
-        <Route path="timesheet" element={<PermissionRoute permission="timesheet:read"><Timesheet /></PermissionRoute>} />
-        <Route path="overtime" element={<PermissionRoute permission="overtime:read"><Overtime /></PermissionRoute>} />
-        <Route path="weekly-report" element={<PermissionRoute permission="weekly_report:read"><WeeklyReportPage /></PermissionRoute>} />
+        <Route path="timesheet" element={<PermissionRoute permission="timesheet:access"><Timesheet /></PermissionRoute>} />
+        <Route path="overtime" element={<PermissionRoute permission="overtime:access"><Overtime /></PermissionRoute>} />
+        <Route path="weekly-report" element={<PermissionRoute permission="weekly_report:access"><WeeklyReportPage /></PermissionRoute>} />
         <Route path="approval" element={<PermissionRoute permission="approval:access"><Approval /></PermissionRoute>} />
         <Route path="approval/detail/:targetType/:targetId" element={<PermissionRoute permission="approval:access"><ApprovalDetailPage /></PermissionRoute>} />
         <Route path="report" element={<PermissionRoute permission="report:access"><Report /></PermissionRoute>} />
         <Route path="permission-request" element={<PermissionRoute permission="permission_request:access"><PermissionRequestPage /></PermissionRoute>} />
         <Route path="project" element={<ProjectPage />} />
-        <Route path="system" element={<PermissionRoute permission="system:read"><System /></PermissionRoute>} />
+        <Route path="system" element={<PermissionRoute permission="system:access"><System /></PermissionRoute>} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="pat" element={<PatPage />} />
         <Route path="notifications" element={<NotificationCenter />} />

@@ -378,6 +378,7 @@ router.get('/users/all', async (req: AuthRequest, res, next) => {
       'system:announcement:create',
       'system:announcement:update',
       'system:settings:manage',
+      'system:audit:view',
       'permission_grant:manage',
     )) {
       return res.status(403).json({ code: 403, message: 'Forbidden' });

@@ -55,8 +55,8 @@ function parseTimesheetRow(rowValue: unknown, index: number) {
 
 router.use(authMiddleware);
 
-// 查看自己的工时 — 所有登录用户
-router.get('/my', async (req: AuthRequest, res, next) => {
+// 查看自己的工时
+router.get('/my', requirePermission('timesheet:view:self'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query, 50);
     const data = await timesheetService.getByUser(req.user!.id, {
@@ -73,8 +73,8 @@ router.get('/my', async (req: AuthRequest, res, next) => {
   }
 });
 
-// 查看周汇总 — 所有登录用户（查看自己的）或管理员/经理查看别人的
-router.get('/weekly-summary', requirePermission('timesheet:read'), async (req: AuthRequest, res, next) => {
+// 查看周汇总 — 需拥有对应个人/分组/部门查看权限
+router.get('/weekly-summary', requirePermission('timesheet:view:self', 'timesheet:view:group', 'timesheet:view:department'), async (req: AuthRequest, res, next) => {
   try {
     const weekStart = parseDateString(firstQueryValue(req.query.weekStart), 'weekStart');
     const weekEnd = parseDateString(firstQueryValue(req.query.weekEnd), 'weekEnd');
@@ -116,7 +116,7 @@ router.post('/batch', requirePermission('timesheet:create'), async (req: AuthReq
 });
 
 // 更新工时 — service 层校验所有权和状态
-router.put('/:id', requirePermission('timesheet:update'), async (req: AuthRequest, res, next) => {
+router.put('/:id', requirePermission('timesheet:update:self'), async (req: AuthRequest, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const data = await timesheetService.update(parsePositiveInt(req.params.id, 'id'), req.user!.id, {
@@ -131,7 +131,7 @@ router.put('/:id', requirePermission('timesheet:update'), async (req: AuthReques
 });
 
 // 删除工时
-router.delete('/:id', requirePermission('timesheet:delete'), async (req: AuthRequest, res, next) => {
+router.delete('/:id', requirePermission('timesheet:delete:self'), async (req: AuthRequest, res, next) => {
   try {
     await timesheetService.delete(parsePositiveInt(req.params.id, 'id'), req.user!.id);
     res.json({ code: 0, message: '删除成功' });
@@ -173,7 +173,7 @@ router.post('/submit', requirePermission('timesheet:submit:self'), async (req: A
 });
 
 // 修改已提交/已审批的工时（删除旧记录，创建新草稿）
-router.post('/modify', requirePermission('timesheet:update'), async (req: AuthRequest, res, next) => {
+router.post('/modify', requirePermission('timesheet:update:self'), async (req: AuthRequest, res, next) => {
   try {
     const rows = parseArray(req.body.rows, 'rows', parseTimesheetRow, { min: 1, max: 50 });
     await timesheetService.modifySubmitted(req.user!.id, rows);

@@ -38,7 +38,7 @@ function parseOvertimePayload(body: Record<string, unknown>, partial = false) {
 router.use(authMiddleware);
 
 // 查看自己的加班
-router.get('/my', async (req: AuthRequest, res, next) => {
+router.get('/my', requirePermission('overtime:view:self'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const data = await overtimeService.getByUser(req.user!.id, {
@@ -58,7 +58,7 @@ router.get('/my', async (req: AuthRequest, res, next) => {
 });
 
 // 加班统计
-router.get('/stats', requirePermission('overtime:read'), async (req: AuthRequest, res, next) => {
+router.get('/stats', requirePermission('overtime:view:self'), async (req: AuthRequest, res, next) => {
   try {
     const year = firstQueryValue(req.query.year)
       ? parsePositiveInt(firstQueryValue(req.query.year), 'year', { max: 9999 })
@@ -96,7 +96,7 @@ router.post('/submit-new', requireAllPermissions('overtime:create', 'overtime:su
 });
 
 // 更新加班
-router.put('/:id', requirePermission('overtime:update'), async (req: AuthRequest, res, next) => {
+router.put('/:id', requirePermission('overtime:update:self'), async (req: AuthRequest, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const data = await overtimeService.update(
@@ -111,7 +111,7 @@ router.put('/:id', requirePermission('overtime:update'), async (req: AuthRequest
 });
 
 // 删除加班
-router.delete('/:id', requirePermission('overtime:delete'), async (req: AuthRequest, res, next) => {
+router.delete('/:id', requirePermission('overtime:delete:self'), async (req: AuthRequest, res, next) => {
   try {
     await overtimeService.delete(parsePositiveInt(req.params.id, 'id'), req.user!.id);
     res.json({ code: 0, message: '删除成功' });

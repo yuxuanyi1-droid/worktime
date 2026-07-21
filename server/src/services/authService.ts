@@ -16,6 +16,7 @@ import { logger } from '../utils/logger';
 const DUMMY_PASSWORD_HASH = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
 import type { ProviderUserInfo } from './oidc/provider';
 import { CacheKeys, CacheTtl, cacheSet, invalidateAuthUser, invalidateOrgSnapshot } from '../config/cache';
+import { PERMISSION_MODEL_VERSION } from '../config/permissionDefinitions';
 
 export class AuthService {
   private userRepo = AppDataSource.getRepository(User);
@@ -51,6 +52,7 @@ export class AuthService {
       roles: user.roles.map((role) => role.name),
       permissions,
       tokenVersion: user.tokenVersion,
+      permissionModelVersion: PERMISSION_MODEL_VERSION,
     }, CacheTtl.auth);
     const idpManaged = await this.isIdpManaged(user.id);
     return {

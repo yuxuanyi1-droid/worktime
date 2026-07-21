@@ -105,7 +105,7 @@ export default function Dashboard() {
   }
 
   const statCards = [
-    hasPermission('timesheet:read') && {
+    hasPermission('timesheet:view:self') && {
       icon: <ClockCircleOutlined />,
       value: `${data?.monthDays || 0}天`,
       label: '本月工时',
@@ -119,14 +119,14 @@ export default function Dashboard() {
       color: '#C89B50',
       bg: '#F5F0E0',
     },
-    hasPermission('overtime:read') && {
+    hasPermission('overtime:view:self') && {
       icon: <ThunderboltOutlined />,
       value: `${data?.overtimeDays || 0}天`,
       label: '本月加班',
       color: '#C0564B',
       bg: '#F5E8E6',
     },
-      hasPermission('weekly_report:read') && {
+      hasPermission('weekly_report:view:self') && {
       icon: <FileTextOutlined />,
       value: '待提交',
       label: '本周周报',
