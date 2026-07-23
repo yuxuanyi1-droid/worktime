@@ -199,6 +199,36 @@ describe('useChat', () => {
     });
   });
 
+  it('流正常结束但没有正文时给出可操作提示，不把分析步骤伪装成回答', async () => {
+    vi.mocked(agentApi.createSession).mockResolvedValue({ code: 0, data: { id: 'session-1', title: '新对话' } });
+    let handlers: any;
+    vi.mocked(startChat).mockImplementation((_body, nextHandlers) => {
+      handlers = nextHandlers;
+      return { abort: vi.fn() } as unknown as AbortController;
+    });
+    const { result } = renderHook(() => useChat());
+    await act(async () => { await result.current.send('查询本周工时'); });
+
+    act(() => {
+      handlers.onEvent({
+        type: 'message_start',
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: '' }] },
+        assistantMessageEvent: { type: 'thinking_start', contentIndex: 0 },
+      });
+      handlers.onEvent({
+        type: 'message_update',
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: '' }] },
+        assistantMessageEvent: { type: 'thinking_end', contentIndex: 0 },
+      });
+      handlers.onDone();
+    });
+
+    expect(result.current.messages.at(-1)).toMatchObject({
+      loading: false,
+      error: 'AI 未生成可展示的回答，请重新生成',
+    });
+  });
+
   it('停止生成会同时中止浏览器流和服务端会话', async () => {
     vi.mocked(agentApi.createSession).mockResolvedValue({ code: 0, data: { id: 'session-1', title: '新对话' } });
     const abort = vi.fn();

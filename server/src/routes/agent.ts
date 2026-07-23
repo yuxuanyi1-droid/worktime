@@ -71,7 +71,7 @@ export function presentAgentError(error: unknown): string {
 }
 
 const toolArgumentKeys = new Set([
-  'resource', 'startDate', 'endDate', 'status', 'weekStart', 'page', 'pageSize', 'userId', 'includeAll',
+  'resource', 'startDate', 'endDate', 'status', 'weekStart', 'weekEnd', 'page', 'pageSize', 'userId', 'includeAll',
 ]);
 
 /** 只把聊天 UI 必需字段送出进程；原始推理、堆栈和 SDK 内部元数据不得进入浏览器。 */

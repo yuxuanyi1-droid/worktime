@@ -11,6 +11,7 @@ import { Type } from 'typebox';
 import { PromptScheduler } from './promptScheduler';
 
 let pi: any = null;
+let modelRuntimePromise: Promise<{ modelRuntime: any; model: any }> | null = null;
 
 interface WorkerSession {
   session: any;
@@ -38,6 +39,31 @@ const promptScheduler = new PromptScheduler(
   envInt('AI_MAX_QUEUED_PROMPTS', 100, 0, 10_000),
   () => postWorkerStats(),
 );
+
+export function buildShanghaiCalendarContext(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+  }).formatToParts(now);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value || '';
+  const year = Number(value('year'));
+  const month = Number(value('month'));
+  const day = Number(value('day'));
+  const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(value('weekday'));
+  if (!year || !month || !day || weekday < 0) throw new Error('无法计算当前日期');
+  const currentDay = Date.UTC(year, month - 1, day);
+  const mondayOffset = (weekday + 6) % 7;
+  const isoDate = (timestamp: number) => new Date(timestamp).toISOString().slice(0, 10);
+  return {
+    today: isoDate(currentDay),
+    weekStart: isoDate(currentDay - mondayOffset * 86_400_000),
+    weekEnd: isoDate(currentDay + (6 - mondayOffset) * 86_400_000),
+  };
+}
 
 const RESOURCE_CONFIG = {
   my_timesheets: { path: '/timesheets/my', label: '查询我的工时' },
@@ -108,7 +134,7 @@ function ensureResidentCapacity() {
 
 export function buildQueryUrl(worktimeApi: string, resource: ResourceName, params: Record<string, unknown>): string {
   const url = new URL(`${worktimeApi}${RESOURCE_CONFIG[resource].path}`);
-  const allowed = ['startDate', 'endDate', 'status', 'weekStart', 'page', 'pageSize', 'userId', 'includeAll'];
+  const allowed = ['startDate', 'endDate', 'status', 'weekStart', 'weekEnd', 'page', 'pageSize', 'userId', 'includeAll'];
   for (const key of allowed) {
     const value = params[key];
     if (value !== undefined && value !== null && value !== '') {
@@ -136,6 +162,7 @@ function createWorktimeQueryTool(accessToken: { current: string }, worktimeApi: 
       '只查询用户明确要求的数据；日期不明确时采用合理的本周或本月范围并在回答中说明。',
       '工具返回权限错误时如实说明，不尝试绕过权限。',
       '工时和加班的单位为天，不要换算成小时。',
+      '查询 weekly_timesheet_summary 时必须同时传入 weekStart（周一）和 weekEnd（周日）。',
     ],
     parameters: Type.Object({
       resource: Type.Union(resources.map((name) => Type.Literal(name))),
@@ -143,6 +170,7 @@ function createWorktimeQueryTool(accessToken: { current: string }, worktimeApi: 
       endDate: Type.Optional(Type.String()),
       status: Type.Optional(Type.String()),
       weekStart: Type.Optional(Type.String()),
+      weekEnd: Type.Optional(Type.String()),
       page: Type.Optional(Type.Number({ minimum: 1 })),
       pageSize: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
       userId: Type.Optional(Type.Number({ minimum: 1 })),
@@ -175,6 +203,45 @@ function createWorktimeQueryTool(accessToken: { current: string }, worktimeApi: 
       };
     },
   });
+}
+
+/**
+ * 按当前 pi SDK 的 ModelRuntime API 初始化模型与运行时凭据。
+ *
+ * API key 只作为进程内 runtime override 注入，不写入 auth.json；显式关闭模型目录
+ * 网络刷新，避免创建会话时额外访问与业务模型无关的远端目录。
+ */
+export async function createModelRuntime(
+  sdk: any,
+  modelsPath: string,
+  config: { piProviderName: string; apiKey: string; modelId: string },
+  authPath = path.join(SAFE_CWD, 'auth.json'),
+): Promise<{ modelRuntime: any; model: any }> {
+  if (typeof sdk?.ModelRuntime?.create !== 'function') {
+    throw new Error('当前 pi SDK 不支持 ModelRuntime');
+  }
+  const modelRuntime = await sdk.ModelRuntime.create({
+    authPath,
+    modelsPath,
+    allowModelNetwork: false,
+  });
+  await modelRuntime.setRuntimeApiKey(config.piProviderName, config.apiKey, { allowNetwork: false });
+  const model = modelRuntime.getModel(config.piProviderName, config.modelId);
+  if (!model) throw new Error(`找不到模型 ${config.piProviderName}/${config.modelId}`);
+  return { modelRuntime, model };
+}
+
+async function getModelRuntime(
+  modelsPath: string,
+  config: { piProviderName: string; apiKey: string; modelId: string },
+): Promise<{ modelRuntime: any; model: any }> {
+  if (!modelRuntimePromise) {
+    modelRuntimePromise = createModelRuntime(pi, modelsPath, config).catch((error) => {
+      modelRuntimePromise = null;
+      throw error;
+    });
+  }
+  return modelRuntimePromise;
 }
 
 async function createOrOpenSession(data: {
@@ -214,12 +281,9 @@ async function createOrOpenSession(data: {
     sessionManager = pi.SessionManager.create(SAFE_CWD, sessionDir);
   }
 
-  const authStorage = pi.AuthStorage.inMemory();
-  authStorage.set(aiConfig.piProviderName, { type: 'api_key', key: aiConfig.apiKey });
-  const modelRegistry = pi.ModelRegistry.create(authStorage, piModelsJsonPath);
-  const model = modelRegistry.find(aiConfig.piProviderName, aiConfig.modelId);
-  if (!model) throw new Error(`找不到模型 ${aiConfig.piProviderName}/${aiConfig.modelId}`);
+  const { modelRuntime, model } = await getModelRuntime(piModelsJsonPath, aiConfig);
 
+  const calendar = buildShanghaiCalendarContext();
   const resourceLoader = new pi.DefaultResourceLoader({
     cwd: SAFE_CWD,
     agentDir: SAFE_CWD,
@@ -230,6 +294,8 @@ async function createOrOpenSession(data: {
     noContextFiles: true,
     appendSystemPrompt: [
       '你是「工时管理系统」的只读数据助手。使用 worktime_query 查询当前用户有权限访问的数据，并用简洁中文回答。',
+      `当前日期为 ${calendar.today}（Asia/Shanghai），本周范围为 ${calendar.weekStart} 至 ${calendar.weekEnd}。用户说“今天”“本周”或“本月”时必须以此日期为基准。`,
+      `查询本周工时汇总时，weekly_timesheet_summary 必须同时传 weekStart=${calendar.weekStart} 和 weekEnd=${calendar.weekEnd}。`,
       '不要声称已修改、提交或审批任何数据；你没有写入能力。不要暴露访问令牌、接口地址、工具参数或其他技术细节。',
       '回答优先给出结论和关键数字，明细较多时使用短列表；仅在确实适合比较时使用表格。',
     ],
@@ -240,8 +306,7 @@ async function createOrOpenSession(data: {
   const queryTool = createWorktimeQueryTool(accessToken, worktimeApi);
   const created = await pi.createAgentSession({
     cwd: SAFE_CWD,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     model,
     tools: ['worktime_query'],
     customTools: [queryTool],

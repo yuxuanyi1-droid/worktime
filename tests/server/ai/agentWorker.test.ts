@@ -1,7 +1,12 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   assertSessionQuota,
   buildQueryUrl,
+  buildShanghaiCalendarContext,
+  createModelRuntime,
   entryMessageText,
   messageText,
   serializeHistory,
@@ -17,6 +22,7 @@ describe('AI Worker 纯逻辑', () => {
     const url = new URL(buildQueryUrl('http://127.0.0.1:3000/api/v1', 'personal_report', {
       startDate: '2026-07-01',
       endDate: '2026-07-31',
+      weekEnd: '2026-07-26',
       userId: 7,
       includeAll: false,
       ignored: 'secret',
@@ -25,9 +31,21 @@ describe('AI Worker 纯逻辑', () => {
 
     expect(url.pathname).toBe('/api/v1/reports/personal');
     expect(Object.fromEntries(url.searchParams)).toEqual({
-      startDate: '2026-07-01', endDate: '2026-07-31', userId: '7', includeAll: 'false',
+      startDate: '2026-07-01',
+      endDate: '2026-07-31',
+      weekEnd: '2026-07-26',
+      userId: '7',
+      includeAll: 'false',
     });
     expect(url.searchParams.has('ignored')).toBe(false);
+  });
+
+  it('按 Asia/Shanghai 计算当前日期及周一到周日范围', () => {
+    expect(buildShanghaiCalendarContext(new Date('2026-07-19T16:30:00.000Z'))).toEqual({
+      today: '2026-07-20',
+      weekStart: '2026-07-20',
+      weekEnd: '2026-07-26',
+    });
   });
 
   it('兼容字符串和分段消息，并忽略非文本片段', () => {
@@ -65,4 +83,45 @@ describe('AI Worker 纯逻辑', () => {
     expect(entryMessageText({ type: 'message', message: { role: 'assistant', content: '回答' } })).toBe('');
     expect(entryMessageText({ type: 'tool', message: { role: 'user', content: '参数' } })).toBe('');
   });
+
+  it('使用当前 pi SDK 的 ModelRuntime 加载自定义模型并注入运行时密钥', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'worktime-pi-sdk-'));
+    const modelsPath = path.join(directory, 'models.json');
+    fs.writeFileSync(modelsPath, JSON.stringify({
+      providers: {
+        'worktime-contract': {
+          baseUrl: 'https://example.invalid/v1',
+          api: 'openai-completions',
+          models: [{
+            id: 'contract-model',
+            name: 'contract-model',
+            reasoning: false,
+            input: ['text'],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 8192,
+            maxTokens: 1024,
+          }],
+        },
+      },
+    }));
+
+    try {
+      const sdk = await import('@earendil-works/pi-coding-agent');
+
+      expect(sdk.AuthStorage).toBeUndefined();
+      const { modelRuntime, model } = await createModelRuntime(sdk, modelsPath, {
+        piProviderName: 'worktime-contract',
+        apiKey: 'runtime-only-key',
+        modelId: 'contract-model',
+      }, path.join(directory, 'auth.json'));
+
+      expect(model).toMatchObject({ provider: 'worktime-contract', id: 'contract-model' });
+      expect(modelRuntime.hasConfiguredAuth('worktime-contract')).toBe(true);
+      const authPath = path.join(directory, 'auth.json');
+      const persistedAuth = fs.existsSync(authPath) ? fs.readFileSync(authPath, 'utf8') : '';
+      expect(persistedAuth).not.toContain('runtime-only-key');
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

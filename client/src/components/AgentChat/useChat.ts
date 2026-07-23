@@ -347,15 +347,21 @@ export function useChat() {
           setMessages((previous) =>
             previous.map((message) =>
               message.id === assistantId
-                ? {
-                    ...message,
-                    loading: false,
-                    parts: message.parts.map((part) => ({
-                      ...part,
-                      done: true,
-                      status: part.type === 'tool' && part.status === 'running' ? 'success' : part.status,
-                    })),
-                  }
+                ? (() => {
+                    const hasVisibleText = message.parts.some(
+                      (part) => part.type === 'text' && part.text.trim().length > 0,
+                    );
+                    return {
+                      ...message,
+                      loading: false,
+                      error: message.error || (hasVisibleText ? undefined : 'AI 未生成可展示的回答，请重新生成'),
+                      parts: message.parts.map((part) => ({
+                        ...part,
+                        done: true,
+                        status: part.type === 'tool' && part.status === 'running' ? 'success' : part.status,
+                      })),
+                    };
+                  })()
                 : message,
             ),
           );

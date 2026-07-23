@@ -795,12 +795,21 @@ function ProcessGroup({
       defaultOpen={false}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-        {parts.map((part) => {
+        {parts.map((part, index) => {
           const label = part.type === 'tool'
             ? `${part.text}${part.status === 'error' ? '失败' : part.done ? '完成' : '中'}`
             : part.type === 'thinking'
               ? part.done ? '问题分析完成' : '正在分析问题'
               : part.done ? '整理结果完成' : '正在整理结果';
+          const previousTool = [...parts.slice(0, index)].reverse().find((item) => item.type === 'tool');
+          const nextTool = parts.slice(index + 1).find((item) => item.type === 'tool');
+          const thinkingSummary = !part.done
+            ? '正在识别问题意图和所需数据范围。'
+            : nextTool
+              ? `已确定下一步：${nextTool.text}。`
+              : previousTool
+                ? `已结合“${previousTool.text}”的返回结果整理回答。`
+                : '已完成问题分析并准备回答。';
           return (
             <CollapsibleBar
               key={part.id}
@@ -826,7 +835,7 @@ function ProcessGroup({
                 {part.type === 'tool'
                   ? part.detail || '正在等待查询结果…'
                   : part.type === 'thinking'
-                    ? 'AI 已完成内部分析，原始推理内容不会展示。'
+                    ? thinkingSummary
                     : part.text || '正在整理结果…'}
               </div>
             </CollapsibleBar>

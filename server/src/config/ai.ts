@@ -12,7 +12,7 @@ import { logger } from '../utils/logger';
  * - custom（DeepSeek / 智谱 / OneAPI / vLLM 等任意 OpenAI/Anthropic 兼容服务）
  *
  * 启动时根据配置生成 pi 用的 models.json（写到 server/data/pi-models.json），
- * 供 agentRunner 的 ModelRegistry 加载。
+ * 供 agentWorker 的 ModelRuntime 加载。
  *
  * 缺失 AI_API_KEY 时打印警告但**不阻止启动**——聊天端点会返回友好错误，其他功能不受影响。
  */
@@ -95,7 +95,7 @@ function buildModelsJson(): Record<string, unknown> | null {
   });
 
   if (provider === 'anthropic') {
-    // 覆盖内置 anthropic provider 的 baseUrl（可选）；apiKey 经 AuthStorage 注入
+    // 覆盖内置 anthropic provider 的 baseUrl（可选）；apiKey 经 ModelRuntime 运行时注入
     const providers: Record<string, any> = {
       anthropic: { ...(baseUrl ? { baseUrl } : {}) },
     };

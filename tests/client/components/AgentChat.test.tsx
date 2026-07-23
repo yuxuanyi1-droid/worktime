@@ -209,7 +209,8 @@ describe('AI 助手悬浮入口', () => {
     await user.click(screen.getByRole('button', { name: /问题分析完成/ }));
     await user.click(screen.getByRole('button', { name: /查询工时完成/ }));
     expect(screen.getByText('返回 5 天')).toBeInTheDocument();
-    expect(screen.getByText('AI 已完成内部分析，原始推理内容不会展示。')).toBeInTheDocument();
+    expect(screen.getByText('已确定下一步：查询工时。')).toBeInTheDocument();
+    expect(screen.queryByText('AI 已完成内部分析，原始推理内容不会展示。')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '复制回答' }));
     expect(clipboardWrite).toHaveBeenCalledWith(expect.stringContaining('最终 **5 天**'));

@@ -15,9 +15,32 @@ const baseUrl = (process.env.AI_SMOKE_BASE_URL || 'http://127.0.0.1:3000/worktim
 const username = process.env.AI_SMOKE_USERNAME || 'admin';
 const password = process.env.AI_SMOKE_PASSWORD || '123456';
 const question = process.env.AI_SMOKE_QUESTION || '请简短告诉我：我有几条待审批？';
+const cookieJar = new Map();
+
+function rememberResponseCookies(response) {
+  const values = typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : [response.headers.get('set-cookie')].filter(Boolean);
+  for (const value of values) {
+    const pair = value.split(';', 1)[0];
+    const separator = pair.indexOf('=');
+    if (separator <= 0) continue;
+    cookieJar.set(pair.slice(0, separator).trim(), pair.slice(separator + 1).trim());
+  }
+}
+
+async function fetchWithCookies(url, init = {}) {
+  const headers = new Headers(init.headers);
+  if (cookieJar.size > 0) {
+    headers.set('Cookie', [...cookieJar].map(([name, value]) => `${name}=${value}`).join('; '));
+  }
+  const response = await fetch(url, { ...init, headers });
+  rememberResponseCookies(response);
+  return response;
+}
 
 async function jsonRequest(path, init = {}, token) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetchWithCookies(`${baseUrl}${path}`, {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -51,7 +74,7 @@ function parseSseChunk(buffer, onEvent) {
 }
 
 async function streamChat(sessionId, token) {
-  const response = await fetch(`${baseUrl}/agent/chat`, {
+  const response = await fetchWithCookies(`${baseUrl}/agent/chat`, {
     method: 'POST',
     headers: {
       Accept: 'text/event-stream',

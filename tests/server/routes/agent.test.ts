@@ -68,8 +68,19 @@ describe('AI 助手路由契约', () => {
       type: 'tool_execution_start',
       toolName: 'worktime_query',
       toolCallId: 'tool-1',
-      args: { resource: 'personal_report', startDate: '2026-07-01', secret: 'hidden' },
-    })).toMatchObject({ args: { resource: 'personal_report', startDate: '2026-07-01' } });
+      args: {
+        resource: 'weekly_timesheet_summary',
+        weekStart: '2026-07-20',
+        weekEnd: '2026-07-26',
+        secret: 'hidden',
+      },
+    })).toMatchObject({
+      args: {
+        resource: 'weekly_timesheet_summary',
+        weekStart: '2026-07-20',
+        weekEnd: '2026-07-26',
+      },
+    });
     expect(sanitizeAgentEvent({ type: 'error', message: 'POST https://private-llm failed' }))
       .toEqual({ type: 'error', message: 'AI 处理失败，请稍后重试' });
   });
