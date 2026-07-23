@@ -6,7 +6,7 @@ import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { oidcCallbackLimiter } from '../middleware/security';
-import { buildFixedRedirectUri, buildTrustedRedirectUri } from '../services/oidc/redirectUri';
+import { buildFixedRedirectUri, buildTrustedRedirectUri, safeInternalRedirect } from '../services/oidc/redirectUri';
 import {
   getProvider,
   listVisibleProviders,
@@ -14,11 +14,34 @@ import {
   signState,
   verifyState,
 } from '../services/oidc/registry';
+import { parseString } from '../utils/validation';
 
 const router = Router();
 const authService = new AuthService();
 const identityService = new ExternalIdentityService();
 const auditService = new AuditService();
+
+/**
+ * 将“成功调用 next / 中间件已自行响应”都收敛成可 await 的结果，避免认证失败时 Promise 永久悬挂。
+ */
+export function runAuthMiddleware(req: AuthRequest, res: Response): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    };
+    res.once('finish', finish);
+    authMiddleware(req, res, (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      res.off('finish', finish);
+      if (error) reject(error);
+      else resolve(true);
+    });
+  });
+}
 
 /**
  * 推断前端回调页地址（用于构造 OAuth redirect_uri，回指前端 /oidc/callback 页面）。
@@ -34,22 +57,22 @@ function deriveRedirectUri(req: AuthRequest): string {
     return buildFixedRedirectUri(fixedOrigin, process.env.BASE_PATH || '');
   }
 
-  const base =
-    (req.query.redirectUriBase as string) ||
-    (req.body && req.body.redirectUriBase) ||
-    '';
-  if (base) {
-    const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol || 'http';
-    const host = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.get('host') || '';
-    const requestOrigin = `${proto}://${host}`;
-    const clientPort = process.env.CLIENT_PORT || '5173';
-    const configuredOrigins = (process.env.OIDC_REDIRECT_ORIGINS || process.env.ALLOWED_ORIGINS ||
-      `http://localhost:${clientPort},http://127.0.0.1:${clientPort}`).split(',');
-    return buildTrustedRedirectUri(base, requestOrigin, configuredOrigins);
-  }
-  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
-  const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || '';
-  return `${proto}://${host}/oidc/callback`;
+  const base = parseString(
+    req.query.redirectUriBase ?? req.body?.redirectUriBase,
+    'redirectUriBase',
+    { max: 2048 },
+  );
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.get('host') || '').split(',')[0].trim();
+  const requestOrigin = `${proto}://${host}`;
+  const clientPort = process.env.CLIENT_PORT || '5173';
+  const configuredOrigins = (process.env.OIDC_REDIRECT_ORIGINS || process.env.ALLOWED_ORIGINS ||
+    `http://localhost:${clientPort},http://127.0.0.1:${clientPort}`).split(',');
+
+  // 开发/测试环境允许当前 Host，便于 Vite 分端口运行；生产必须来自显式允许列表，
+  // 防止攻击者通过伪造 Host + redirectUriBase 把授权码导向任意域名。
+  const trustRequestOrigin = process.env.NODE_ENV !== 'production';
+  return buildTrustedRedirectUri(base || requestOrigin, requestOrigin, configuredOrigins, trustRequestOrigin);
 }
 
 // ========== 公开端点 ==========
@@ -77,25 +100,20 @@ router.get('/providers', (_req, res) => {
  */
 router.get('/:provider/login', async (req: AuthRequest, res: Response, next) => {
   try {
-    const provider = req.params.provider;
+    const provider = parseString(req.params.provider, 'provider', { required: true, max: 50 })!;
     const mode = (req.query.mode as string) === 'bind' ? 'bind' : 'login';
 
     // bind 模式必须有登录态
     if (mode === 'bind') {
-      // 手动走一次 authMiddleware 逻辑：这里用 await 复用中间件
-      await new Promise<void>((resolve, reject) => {
-        authMiddleware(req, res as any, (err?: any) => (err ? reject(err) : resolve()));
-      });
-      if (!req.user) {
-        return res.status(401).json({ code: 401, message: '绑定第三方账号需要先登录' });
-      }
+      const authenticated = await runAuthMiddleware(req, res);
+      if (!authenticated || !req.user) return;
     }
 
     // 两层可见性校验：未开放的 provider 拒绝（防绕过开关）
     assertProviderVisible(provider);
 
     const redirectUri = deriveRedirectUri(req);
-    const redirectTarget = (req.query.redirect as string) || '/';
+    const redirectTarget = safeInternalRedirect(parseString(req.query.redirect, 'redirect', { max: 500 }));
     const adapter = getProvider(provider);
     logger.info({ provider, mode, redirectUri, redirectUriBase: req.query.redirectUriBase }, 'OIDC 发起授权');
 
@@ -148,11 +166,9 @@ router.get('/:provider/login', async (req: AuthRequest, res: Response, next) => 
  */
 router.post('/:provider/callback', oidcCallbackLimiter, async (req: AuthRequest, res, next) => {
   try {
-    const provider = req.params.provider;
-    const { code, state } = req.body ?? {};
-    if (!code || !state) {
-      throw new BusinessError('缺少 code 或 state 参数', 400);
-    }
+    const provider = parseString(req.params.provider, 'provider', { required: true, max: 50 })!;
+    const code = parseString(req.body?.code, 'code', { required: true, max: 4096 })!;
+    const state = parseString(req.body?.state, 'state', { required: true, max: 8192 })!;
 
     const statePayload = verifyState(state);
     if (statePayload.provider !== provider) {
@@ -160,6 +176,17 @@ router.post('/:provider/callback', oidcCallbackLimiter, async (req: AuthRequest,
     }
     // 回调阶段再次校验可见性（管理员可能在授权期间关闭了开关）
     assertProviderVisible(provider);
+
+    let bindUserId: number | undefined;
+    if (statePayload.mode === 'bind') {
+      // 在向 IdP 交换授权码前完成本地登录态和发起者校验。
+      const authenticated = await runAuthMiddleware(req, res);
+      if (!authenticated || !req.user) return;
+      if (statePayload.userId !== req.user.id) {
+        throw new BusinessError('绑定发起者与当前登录用户不一致', 403);
+      }
+      bindUserId = req.user.id;
+    }
 
     const redirectUri = deriveRedirectUri(req);
     const adapter = getProvider(provider);
@@ -172,19 +199,9 @@ router.post('/:provider/callback', oidcCallbackLimiter, async (req: AuthRequest,
     });
 
     if (statePayload.mode === 'bind') {
-      // 绑定模式：必须有登录态且与发起者一致
-      await new Promise<void>((resolve, reject) => {
-        authMiddleware(req, res as any, (err?: any) => (err ? reject(err) : resolve()));
-      });
-      if (!req.user) {
-        throw new BusinessError('绑定第三方账号需要先登录', 401);
-      }
-      if (statePayload.userId !== req.user.id) {
-        throw new BusinessError('绑定发起者与当前登录用户不一致', 403);
-      }
-      const identity = await identityService.bind(req.user.id, provider, info);
+      const identity = await identityService.bind(bindUserId!, provider, info);
       auditService.log({
-        userId: req.user.id,
+        userId: bindUserId,
         action: 'oidc_bind',
         target: 'user_external_identity',
         targetId: identity.id,
@@ -212,7 +229,11 @@ router.post('/:provider/callback', oidcCallbackLimiter, async (req: AuthRequest,
       detail: provider,
       ip: req.ip,
     });
-    res.json({ code: 0, data: result, message: '登录成功' });
+    res.json({
+      code: 0,
+      data: { ...result, redirect: safeInternalRedirect(statePayload.redirect) },
+      message: '登录成功',
+    });
   } catch (error) {
     next(error);
   }
@@ -233,7 +254,7 @@ router.get('/bindings', authMiddleware, async (req: AuthRequest, res, next) => {
 /** 解绑当前用户的指定 provider */
 router.delete('/bindings/:provider', authMiddleware, async (req: AuthRequest, res, next) => {
   try {
-    const provider = req.params.provider;
+    const provider = parseString(req.params.provider, 'provider', { required: true, max: 50 })!;
     await identityService.unbind(req.user!.id, provider);
     auditService.log({
       userId: req.user!.id,

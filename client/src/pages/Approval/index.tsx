@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import {
   Card, Table, Button, Space, Tag, Tabs, Input, message, Typography, Select, Steps,
-  Descriptions, Modal, Spin, Tooltip, Popconfirm, DatePicker,
+  Alert, Descriptions, Modal, Spin, Popconfirm, DatePicker,
 } from 'antd';
 import {
-  CheckOutlined, CloseOutlined, EyeOutlined, ClockCircleOutlined,
+  CheckOutlined, CloseOutlined, ClockCircleOutlined,
   CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, UserOutlined,
-  LinkOutlined, CopyOutlined, ArrowLeftOutlined, RollbackOutlined, SendOutlined,
+  LinkOutlined, ArrowLeftOutlined, RollbackOutlined, SendOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
@@ -15,6 +15,7 @@ import { approvalApi, MySubmission, ApprovalDetail } from '../../api/approval';
 import { ApprovalItem, ApprovalRecord, statusMap, stepTypeMap } from '../../types';
 import { useNavigate, useParams } from 'react-router-dom';
 import { usePermission } from '../../hooks/usePermission';
+import { weeklyReportContentToText } from '../../utils/weeklyReportContent';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -49,9 +50,11 @@ const overtimeTypeLabels: Record<string, string> = {
 
 const statusOptions = [
   { label: '全部', value: '' },
+  { label: '草稿', value: 'draft' },
   { label: '审批中', value: 'submitted' },
   { label: '已通过', value: 'approved' },
   { label: '已驳回', value: 'rejected' },
+  { label: '已撤回', value: 'withdrawn' },
 ];
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -59,23 +62,9 @@ function getErrorMessage(error: unknown, fallback: string) {
   return e?.response?.data?.message || e?.message || fallback;
 }
 
-function sanitizeWeeklyHtml(value?: string) {
-  if (!value) return '';
-  return value
-    .replace(/<(?!\/?(strong|b|br)\b)[^>]*>/gi, '')
-    .replace(/<(strong|b)\b[^>]*>/gi, '<strong>')
-    .replace(/<\/(strong|b)>/gi, '</strong>')
-    .replace(/<br\s*\/?>/gi, '<br />');
-}
-
 function RichTextValue({ value }: { value?: string }) {
   if (!value) return <span>-</span>;
-  return (
-    <div
-      style={{ whiteSpace: 'pre-wrap' }}
-      dangerouslySetInnerHTML={{ __html: sanitizeWeeklyHtml(value) }}
-    />
-  );
+  return <div style={{ whiteSpace: 'pre-wrap' }}>{weeklyReportContentToText(value)}</div>;
 }
 
 /** 生成审批详情分享链接 */
@@ -99,6 +88,7 @@ function ApprovalDetailView({
       case 'approved': return <CheckCircleOutlined style={{ color: '#4A8B5E' }} />;
       case 'rejected': return <CloseCircleOutlined style={{ color: '#C0564B' }} />;
       case 'current': return <SyncOutlined spin style={{ color: '#6B8F71' }} />;
+      case 'withdrawn': return <RollbackOutlined style={{ color: '#fa8c16' }} />;
       default: return <ClockCircleOutlined style={{ color: '#d9d9d9' }} />;
     }
   };
@@ -168,7 +158,7 @@ function ApprovalDetailView({
                   type="link"
                   size="small"
                   icon={<LinkOutlined />}
-                  onClick={() => window.open(`/approval/detail/timesheet/${c.previousApproval!.targetId}`, '_blank')}
+                  onClick={() => window.open(getApprovalShareUrl('timesheet', c.previousApproval!.targetId), '_blank', 'noopener,noreferrer')}
                 >
                   查看原审批单
                 </Button>
@@ -250,6 +240,7 @@ function ApprovalDetailView({
       if (step.status === 'approved') status = 'finish';
       else if (step.status === 'rejected') status = 'error';
       else if (step.status === 'current') status = 'process';
+      else if (step.status === 'withdrawn' || step.status === 'skipped') status = 'finish';
 
       const icon = stepStatusIcon(step.status);
 
@@ -260,15 +251,41 @@ function ApprovalDetailView({
           {step.status === 'approved' && step.action === 'auto' && <Tag color="cyan" style={{ marginLeft: 8, fontSize: 11 }}>自动通过</Tag>}
           {step.status === 'approved' && step.action !== 'auto' && <Tag color="green" style={{ marginLeft: 8, fontSize: 11 }}>已通过</Tag>}
           {step.status === 'rejected' && <Tag color="red" style={{ marginLeft: 8, fontSize: 11 }}>已驳回</Tag>}
+          {step.status === 'skipped' && <Tag style={{ marginLeft: 8, fontSize: 11 }}>已跳过</Tag>}
+          {step.status === 'withdrawn' && <Tag color="orange" style={{ marginLeft: 8, fontSize: 11 }}>已撤回</Tag>}
         </span>
       );
+
+      const approverStatusMeta: Record<string, { label: string; color?: string }> = {
+        waiting: { label: '未到达' },
+        pending: { label: '待处理', color: 'blue' },
+        approved: { label: '已通过', color: 'green' },
+        rejected: { label: '已驳回', color: 'red' },
+        skipped: { label: '已跳过' },
+        withdrawn: { label: '已撤回', color: 'orange' },
+      };
 
       const description = (
         <div>
           <div>
             <UserOutlined style={{ marginRight: 4 }} />
             审批人：{step.approverNames?.length ? step.approverNames.join('、') : (step.approverName || '未指定')}
+            {step.requireAllApprovers && <Tag color="purple" style={{ marginLeft: 8 }}>会签</Tag>}
           </div>
+          {step.approverStatuses && step.approverStatuses.length > 1 && (
+            <div style={{ marginTop: 4 }}>
+              {step.approverStatuses.map((approver) => {
+                const meta = approverStatusMeta[approver.status] || { label: approver.status };
+                return (
+                  <div key={approver.id} style={{ fontSize: 12, marginTop: 2 }}>
+                    {approver.name}
+                    <Tag color={meta.color} style={{ marginLeft: 6 }}>{meta.label}</Tag>
+                    {approver.comment && <Text type="secondary">{approver.comment}</Text>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {step.status === 'approved' && step.approvedAt && (
             <div style={{ color: '#4A8B5E', fontSize: 12 }}>
               <CheckCircleOutlined style={{ marginRight: 4 }} />
@@ -379,61 +396,13 @@ function ApprovalDetailView({
   );
 }
 
-// ==================== 审批详情 Modal（列表页用） ====================
-function ApprovalDetailModal({ targetType, targetId, open, onClose }: {
-  targetType: string; targetId: number; open: boolean; onClose: () => void;
-}) {
-  const [detail, setDetail] = useState<ApprovalDetail | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (open && targetType && targetId) loadDetail();
-  }, [open, targetType, targetId]);
-
-  const loadDetail = async () => {
-    setLoading(true);
-    try {
-      const res = await approvalApi.getDetail(targetType, targetId);
-      if (res.data) setDetail(res.data);
-    } catch (error) {
-      message.error(getErrorMessage(error, '审批详情加载失败'));
-      setDetail(null);
-    }
-    setLoading(false);
-  };
-
-  const shareUrl = targetType && targetId ? getApprovalShareUrl(targetType, targetId) : '';
-
-  return (
-    <Modal
-      title={
-        <Space>
-          <span>审批详情</span>
-          {shareUrl && (
-            <Tooltip title="复制分享链接">
-              <Button size="small" type="text" icon={<LinkOutlined />}
-                onClick={() => { navigator.clipboard.writeText(shareUrl); message.success('链接已复制到剪贴板'); }} />
-            </Tooltip>
-          )}
-        </Space>
-      }
-      open={open}
-      onCancel={onClose}
-      footer={null}
-      width={720}
-      destroyOnClose
-    >
-      <ApprovalDetailView detail={detail} loading={loading} />
-    </Modal>
-  );
-}
-
 // ==================== 独立审批详情页（可通过链接直接访问） ====================
 export function ApprovalDetailPage() {
   const { targetType, targetId } = useParams<{ targetType: string; targetId: string }>();
   const navigate = useNavigate();
   const [detail, setDetail] = useState<ApprovalDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [comment, setComment] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [ccModalOpen, setCcModalOpen] = useState(false);
@@ -449,17 +418,23 @@ export function ApprovalDetailPage() {
 
   const loadDetail = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const res = await approvalApi.getDetail(targetType!, Number(targetId));
       if (res.data) setDetail(res.data);
     } catch (error) {
-      message.error(getErrorMessage(error, '审批详情加载失败'));
+      setLoadError(getErrorMessage(error, '审批详情加载失败'));
       setDetail(null);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleApprove = async (action: 'approve' | 'reject') => {
+    if (action === 'reject' && !comment.trim()) {
+      message.warning('驳回时请填写原因');
+      return;
+    }
     setActionLoading(true);
     try {
       await approvalApi.approve([{
@@ -539,6 +514,15 @@ export function ApprovalDetailPage() {
 
       <ApprovalDetailView detail={detail} loading={loading} />
 
+      {loadError && (
+        <Alert
+          type="warning"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void loadDetail()}>重试</Button>}
+        />
+      )}
+
       {/* === 审批操作区：当前步骤审批人或系统管理员可见 === */}
       {isSubmitted && canApprove && (isCurrentApprover || isAdmin) && (
         <Card title={isAdmin && !isCurrentApprover ? '管理员审批操作' : '审批操作'} size="small" style={{ marginTop: 16 }}>
@@ -556,8 +540,10 @@ export function ApprovalDetailPage() {
           <TextArea
             value={comment}
             onChange={(e) => setComment(e.target.value)}
-            placeholder="审批意见（可选）"
+            placeholder="通过意见（可选）；驳回原因（必填）"
             rows={2}
+            maxLength={1000}
+            showCount
             style={{ marginBottom: 12 }}
           />
           <Space>
@@ -581,6 +567,16 @@ export function ApprovalDetailPage() {
         </Card>
       )}
 
+      {isSubmitted && isCurrentApprover && !canApprove && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 16 }}
+          message="该审批已分配给您，但当前角色没有审批处理权限"
+          description="请联系管理员授予“审批中心-处理分配给我的任务”权限。"
+        />
+      )}
+
       {/* === 提交人操作区：撤回 + 抄送（admin 申请人也可见） === */}
       {isSubmitted && isApplicant && !isCurrentApprover && (
         <Card title="操作" size="small" style={{ marginTop: 16 }}>
@@ -601,7 +597,7 @@ export function ApprovalDetailPage() {
         </Card>
       )}
 
-      {/* === 已完成/已驳回状态提示 === */}
+      {/* === 已结束状态提示 === */}
       {/* === viewerContext 缺失兜底：无法确定角色时提示 === */}
       {isSubmitted && !ctx && (
         <Card size="small" style={{ marginTop: 16 }}>
@@ -627,7 +623,13 @@ export function ApprovalDetailPage() {
               </Text>
             )}
             {detail.content.status === 'draft' && (
-              <Text type="secondary">该申请已撤回，尚未提交审批</Text>
+              <Text type="secondary">该申请尚未提交审批</Text>
+            )}
+            {detail.content.status === 'withdrawn' && (
+              <Text type="secondary">
+                <RollbackOutlined style={{ marginRight: 8 }} />
+                该申请已撤回，可修改后重新提交
+              </Text>
             )}
           </div>
         </Card>
@@ -665,19 +667,21 @@ export function ApprovalDetailPage() {
 /** 我的申请 Tab */
 function MySubmissionsTab() {
   const [data, setData] = useState<MySubmission[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
-  const [detailTarget, setDetailTarget] = useState<{ targetType: string; targetId: number } | null>(null);
   const navigate = useNavigate();
 
-  useEffect(() => { loadData(); }, [statusFilter, typeFilter, dateRange]);
+  useEffect(() => { loadData(); }, [statusFilter, typeFilter, dateRange, page]);
 
   const loadData = async () => {
     setLoading(true);
     try {
       const res = await approvalApi.getMySubmissions({
+        page,
         pageSize: 20,
         status: statusFilter || undefined,
         targetType: typeFilter || undefined,
@@ -686,10 +690,12 @@ function MySubmissionsTab() {
       });
       if (res.data) {
         setData(res.data.list);
+        setTotal(res.data.total);
       }
     } catch (error) {
       message.error(getErrorMessage(error, '我的申请加载失败'));
       setData([]);
+      setTotal(0);
     }
     setLoading(false);
   };
@@ -702,6 +708,7 @@ function MySubmissionsTab() {
     if (record.status === 'approved') return <Tag color="green">已完成全部 {totalSteps} 步审批</Tag>;
     if (record.status === 'rejected') return <Tag color="red">审批被驳回（第 {currentStep} 步）</Tag>;
     if (record.status === 'submitted') return <Tag color="blue">审批中 ({currentStep}/{totalSteps})</Tag>;
+    if (record.status === 'withdrawn') return <Tag>已撤回，可修改后重提</Tag>;
     return '-';
   };
 
@@ -742,13 +749,13 @@ function MySubmissionsTab() {
       <div style={{ marginBottom: 16, display: 'flex', gap: 12 }}>
         <Select placeholder="类型筛选" allowClear style={{ width: 140 }}
           options={approvalTypeOptions}
-          onChange={(v) => setTypeFilter(v || '')} />
+          onChange={(v) => { setTypeFilter(v || ''); setPage(1); }} />
         <Select placeholder="状态筛选" allowClear style={{ width: 140 }}
           options={statusOptions}
-          onChange={(v) => setStatusFilter(v || '')} />
+          onChange={(v) => { setStatusFilter(v || ''); setPage(1); }} />
         <DatePicker.RangePicker
           placeholder={['开始日期', '结束日期']}
-          onChange={(v) => { setDateRange(v as any); }}
+          onChange={(v) => { setDateRange(v as any); setPage(1); }}
           style={{ width: 240 }}
         />
       </div>
@@ -757,7 +764,14 @@ function MySubmissionsTab() {
         loading={loading}
         columns={columns}
         dataSource={data}
-        pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+        pagination={{
+          current: page,
+          pageSize: 20,
+          total,
+          showSizeChanger: false,
+          showTotal: (t) => `共 ${t} 条`,
+          onChange: setPage,
+        }}
         size="middle"
       />
     </>
@@ -767,28 +781,38 @@ function MySubmissionsTab() {
 /** 待审批 Tab */
 function PendingApprovalTab() {
   const [data, setData] = useState<ApprovalItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [selectedRows, setSelectedRows] = useState<React.Key[]>([]);
   const [comment, setComment] = useState('');
   const navigate = useNavigate();
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    setSelectedRows([]);
+    loadData();
+  }, [page]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const res = await approvalApi.getPending({ pageSize: 100 });
-      if (res.data) setData(res.data.list);
+      const res = await approvalApi.getPending({ page, pageSize: 20 });
+      if (res.data) {
+        setData(res.data.list);
+        setTotal(res.data.total);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, '待审批列表加载失败'));
       setData([]);
+      setTotal(0);
     }
     setLoading(false);
   };
 
   const handleApprove = async (action: 'approve' | 'reject') => {
     if (selectedRows.length === 0) return message.warning('请选择审批项');
+    if (action === 'reject' && !comment.trim()) return message.warning('批量驳回时请填写原因');
     setActionLoading(true);
     try {
       // 过滤掉找不到的项（数据可能在选中后被刷新），避免 item! 崩溃
@@ -804,7 +828,8 @@ function PendingApprovalTab() {
       message.success(action === 'approve' ? '审批通过' : '已驳回');
       setSelectedRows([]);
       setComment('');
-      loadData();
+      if (page === 1) loadData();
+      else setPage(1);
     } catch (error) {
       message.error(getErrorMessage(error, action === 'approve' ? '批量通过失败' : '批量驳回失败'));
     } finally {
@@ -860,7 +885,14 @@ function PendingApprovalTab() {
           selectedRowKeys: selectedRows,
           onChange: (keys) => setSelectedRows(keys),
         }}
-        pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+        pagination={{
+          current: page,
+          pageSize: 20,
+          total,
+          showSizeChanger: false,
+          showTotal: (t) => `共 ${t} 条`,
+          onChange: setPage,
+        }}
         size="middle"
         scroll={{ x: 1000 }}
       />
@@ -868,9 +900,11 @@ function PendingApprovalTab() {
         <TextArea
           value={comment}
           onChange={(e) => setComment(e.target.value)}
-          placeholder="审批意见（可选）"
+          placeholder="通过意见（可选）；驳回原因（必填）"
           style={{ width: 300 }}
           rows={1}
+          maxLength={1000}
+          aria-label="批量审批意见"
         />
         <Button type="primary" icon={<CheckOutlined />} onClick={() => handleApprove('approve')}
           disabled={selectedRows.length === 0} loading={actionLoading}>
@@ -888,24 +922,30 @@ function PendingApprovalTab() {
 /** 已审批 Tab */
 function ApprovedByMeTab() {
   const [data, setData] = useState<ApprovalRecord[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [typeFilter, setTypeFilter] = useState('');
   const navigate = useNavigate();
 
-  useEffect(() => { loadData(); }, [typeFilter]);
+  useEffect(() => { loadData(); }, [typeFilter, page]);
 
   const loadData = async () => {
     setLoading(true);
     try {
       const res = await approvalApi.getHistory({
-        pageSize: 100,
-        mine: true,
+        page,
+        pageSize: 20,
         targetType: typeFilter || undefined,
       });
-      if (res.data) setData(res.data.list);
+      if (res.data) {
+        setData(res.data.list);
+        setTotal(res.data.total);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, '已审批列表加载失败'));
       setData([]);
+      setTotal(0);
     }
     setLoading(false);
   };
@@ -942,14 +982,21 @@ function ApprovedByMeTab() {
       <div style={{ marginBottom: 16, display: 'flex', gap: 12 }}>
         <Select placeholder="类型筛选" allowClear style={{ width: 140 }}
           options={approvalTypeOptions}
-          onChange={(v) => setTypeFilter(v || '')} />
+          onChange={(v) => { setTypeFilter(v || ''); setPage(1); }} />
       </div>
       <Table
         rowKey={(r) => r.id}
         loading={loading}
         columns={columns}
         dataSource={data}
-        pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+        pagination={{
+          current: page,
+          pageSize: 20,
+          total,
+          showSizeChanger: false,
+          showTotal: (t) => `共 ${t} 条`,
+          onChange: setPage,
+        }}
         size="middle"
         scroll={{ x: 800 }}
       />
@@ -960,19 +1007,25 @@ function ApprovedByMeTab() {
 /** 抄送给我的 Tab */
 function MyCcTab() {
   const [data, setData] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(); }, [page]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const res = await approvalApi.getMyCc({ pageSize: 100 });
-      if (res.data) setData(res.data.list);
+      const res = await approvalApi.getMyCc({ page, pageSize: 20 });
+      if (res.data) {
+        setData(res.data.list);
+        setTotal(res.data.total);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, '抄送列表加载失败'));
       setData([]);
+      setTotal(0);
     }
     setLoading(false);
   };
@@ -1009,7 +1062,14 @@ function MyCcTab() {
       loading={loading}
       columns={columns}
       dataSource={data}
-      pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+      pagination={{
+        current: page,
+        pageSize: 20,
+        total,
+        showSizeChanger: false,
+        showTotal: (t) => `共 ${t} 条`,
+        onChange: setPage,
+      }}
       size="middle"
     />
   );

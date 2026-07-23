@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany, Index } from 'typeorm';
 import { ApprovalFlowStep } from './ApprovalFlowStep';
 
 /**
@@ -6,6 +6,10 @@ import { ApprovalFlowStep } from './ApprovalFlowStep';
  * 管理员可配置不同类型（工时/加班/周报）的审批层级
  */
 @Entity('approval_flows')
+@Index('uq_approval_flow_default_type', ['type'], {
+  unique: true,
+  where: `"isDefault" = true`,
+})
 export class ApprovalFlow {
   @PrimaryGeneratedColumn()
   id!: number;

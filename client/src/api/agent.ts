@@ -21,6 +21,8 @@ export interface AgentHistoryMessage {
 }
 
 export const agentApi = {
+  getStatus: () =>
+    request.get<any, { code: number; data: { enabled: boolean } }>('/agent/status'),
   getSessions: () =>
     request.get<any, { code: number; data: AgentSessionSummary[] }>('/agent/sessions'),
   createSession: () =>

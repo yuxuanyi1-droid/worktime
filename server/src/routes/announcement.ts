@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import { AnnouncementService } from '../services/announcementService';
+import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requirePermission, getUserOrgInfo } from '../middleware/permission';
 import {
   parseArray,
   parseEnum,
+  parseOptionalBooleanQuery,
   parsePagination,
   parsePositiveInt,
   parseString,
@@ -12,6 +14,7 @@ import {
 
 const router = Router();
 const announcementService = new AnnouncementService();
+const auditService = new AuditService();
 const announcementTypes = ['info', 'important', 'urgent'] as const;
 const targetScopes = ['all', 'department', 'group', 'user'] as const;
 
@@ -54,9 +57,18 @@ router.get('/admin/list', requirePermission('system:announcement:view'), async (
 // 创建公告
 router.post('/admin', requirePermission('system:announcement:create'), async (req: AuthRequest, res, next) => {
   try {
+    const payload = parseAnnouncementPayload(req.body as Record<string, unknown>);
     const data = await announcementService.create({
-      ...parseAnnouncementPayload(req.body as Record<string, unknown>),
+      ...payload,
       createdById: req.user!.id,
+    });
+    auditService.log({
+      userId: req.user!.id,
+      action: 'announcement.create',
+      target: 'announcement',
+      targetId: data.id,
+      detail: JSON.stringify({ title: payload.title, targetScope: payload.targetScope, ttStatus: data.ttStatus }),
+      ip: req.ip,
     });
     res.json({ code: 0, data });
   } catch (error) {
@@ -67,10 +79,13 @@ router.post('/admin', requirePermission('system:announcement:create'), async (re
 // 更新公告
 router.put('/admin/:id', requirePermission('system:announcement:update'), async (req: AuthRequest, res, next) => {
   try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    const payload = parseAnnouncementPayload(req.body as Record<string, unknown>);
     const data = await announcementService.update(
-      parsePositiveInt(req.params.id, 'id'),
-      parseAnnouncementPayload(req.body as Record<string, unknown>),
+      id,
+      payload,
     );
+    auditService.log({ userId: req.user!.id, action: 'announcement.update', target: 'announcement', targetId: id, detail: JSON.stringify({ title: payload.title, targetScope: payload.targetScope }), ip: req.ip });
     res.json({ code: 0, data });
   } catch (error) {
     next(error);
@@ -80,7 +95,9 @@ router.put('/admin/:id', requirePermission('system:announcement:update'), async 
 // 删除公告
 router.delete('/admin/:id', requirePermission('system:announcement:delete'), async (req: AuthRequest, res, next) => {
   try {
-    await announcementService.delete(parsePositiveInt(req.params.id, 'id'));
+    const id = parsePositiveInt(req.params.id, 'id');
+    await announcementService.delete(id);
+    auditService.log({ userId: req.user!.id, action: 'announcement.delete', target: 'announcement', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -107,7 +124,7 @@ router.get('/my', async (req: AuthRequest, res, next) => {
     const data = await announcementService.getForUser(req.user!.id, orgInfo.departmentId, orgInfo.groupId, {
       page,
       pageSize,
-      isRead: req.query.isRead !== undefined ? req.query.isRead === 'true' : undefined,
+      isRead: parseOptionalBooleanQuery(req.query.isRead, 'isRead'),
     });
     res.json({ code: 0, data });
   } catch (error) {
@@ -129,7 +146,13 @@ router.get('/my/unread-count', async (req: AuthRequest, res, next) => {
 // 标记公告已读
 router.put('/my/read/:id', async (req: AuthRequest, res, next) => {
   try {
-    await announcementService.markAsRead(req.user!.id, parsePositiveInt(req.params.id, 'id'));
+    const orgInfo = await getUserOrgInfo(req.user!.id);
+    await announcementService.markAsRead(
+      req.user!.id,
+      parsePositiveInt(req.params.id, 'id'),
+      orgInfo.departmentId,
+      orgInfo.groupId,
+    );
     res.json({ code: 0, message: '已标记已读' });
   } catch (error) {
     next(error);

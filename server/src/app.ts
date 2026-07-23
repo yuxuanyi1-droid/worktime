@@ -29,10 +29,10 @@ import { permissionRequestRoutes } from './routes/permissionRequest';
 import { patRoutes } from './routes/pat';
 import { agentRoutes } from './routes/agent';
 import { ensurePiModelsJson } from './config/ai';
-import { preloadPi } from './ai/agentRunner';
+import { preloadPi, stopAgentWorker } from './ai/agentRunner';
 import { timesheetReminderScheduler } from './services/timesheetReminderService';
 
-const app = express();
+export const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
 // PORT 统一在根 .env 配置；Number 化避免字符串端口传入 listen
 const PORT = Number(process.env.PORT) || 3000;
@@ -152,8 +152,8 @@ app.use(v1Base, (req, res, next) => {
 
 // 登录接口额外限流
 app.use(`${v1Base}/auth/login`, loginLimiter);
-// AI 聊天限流（每次对话触发 LLM 调用，成本与延时较高）
-app.use(`${v1Base}/agent/chat`, agentLimiter);
+// AI 接口统一限流：除模型调用外，也防止恶意批量创建会话文件或灌入排队消息。
+app.use(`${v1Base}/agent`, agentLimiter);
 
 // 路由
 app.use(`${v1Base}/auth`, authRoutes);
@@ -225,9 +225,15 @@ if (isProduction) {
 // 错误处理
 app.use(errorHandler);
 
-// 启动服务
-AppDataSource.initialize()
-  .then(async () => {
+/**
+ * 启动 API 服务。拆成显式函数，避免单元测试或其他模块仅导入 app 时就连接数据库、
+ * 监听端口和注册进程信号。
+ */
+export async function startServer(): Promise<Server> {
+  if (httpServer) return httpServer;
+  shuttingDown = false;
+  try {
+    await AppDataSource.initialize();
     await ensureSchema();
     const redisOk = await initRedis();
     activateRateLimiters();
@@ -260,17 +266,19 @@ AppDataSource.initialize()
     httpServer = app.listen(PORT, API_HOST, () => {
       logger.info({ host: API_HOST, port: PORT }, '服务端已启动');
     });
-  })
-  .catch((error) => {
+  } catch (error) {
     logger.error({ err: error }, '数据库连接失败，请检查根 .env 中的数据库配置');
     // 即使数据库连接失败也启动服务，方便调试
-    initRedis().finally(() => activateRateLimiters());
+    await initRedis().catch(() => false);
+    activateRateLimiters();
     httpServer = app.listen(PORT, API_HOST, () => {
       logger.warn({ host: API_HOST, port: PORT }, '服务端已启动（数据库未连接）');
     });
-  });
+  }
+  return httpServer;
+}
 
-async function gracefulShutdown(signal: string): Promise<void> {
+export async function gracefulShutdown(signal: string, exitProcess = true): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   dbConnected = false;
@@ -288,16 +296,26 @@ async function gracefulShutdown(signal: string): Promise<void> {
   });
   await Promise.race([drained, timeout]);
 
+  await stopAgentWorker().catch(() => undefined);
   await stopApprovalQueueWorker().catch(() => undefined);
   await closeRedis().catch(() => undefined);
   if (AppDataSource.isInitialized) {
     await AppDataSource.destroy().catch(() => undefined);
   }
   logger.info({ signal }, '服务端已安全退出');
-  process.exit(0);
+  httpServer = null;
+  if (exitProcess) process.exit(0);
 }
 
-process.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
-process.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+export function registerShutdownSignals(target: Pick<NodeJS.Process, 'once'> = process) {
+  target.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+  target.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+}
+
+if (process.env.WORKTIME_DISABLE_AUTO_START !== '1'
+  && path.resolve(process.argv[1] || '') === path.resolve(__filename)) {
+  registerShutdownSignals();
+  void startServer();
+}
 
 export default app;

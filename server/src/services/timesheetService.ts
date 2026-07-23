@@ -8,6 +8,7 @@ import { ApprovalInstance } from '../entities/ApprovalInstance';
 import { Between, In, Not, Brackets } from 'typeorm';
 import { NotificationPublisher } from './notifications';
 import { User } from '../entities/User';
+import { Project } from '../entities/Project';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { AccessPolicyService, OrgSnapshot } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
@@ -60,17 +61,31 @@ type PendingNotification =
 export class TimesheetService {
   constructor(private manager?: EntityManager) {}
 
+  private transaction<T>(work: (manager: EntityManager) => Promise<T>): Promise<T> {
+    if (this.manager?.queryRunner?.isTransactionActive) return work(this.manager);
+    return (this.manager?.connection ?? AppDataSource).transaction(work);
+  }
+
   private get repo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
   private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
   private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
   private get accessPolicy() { return new AccessPolicyService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
   private get settingRepo() { return (this.manager ?? AppDataSource).getRepository(SystemSetting); }
   private get seqRepo() { return (this.manager ?? AppDataSource).getRepository(SubmissionSequence); }
 
   private createRecord(data: Partial<Timesheet> & { userId: number }, orgSnapshot: OrgSnapshot) {
     return this.repo.create({ ...data, ...orgSnapshot });
+  }
+
+  private async validateActiveProjects(projectIds: number[]): Promise<void> {
+    const uniqueIds = [...new Set(projectIds)];
+    const projects = uniqueIds.length ? await this.projectRepo.findBy({ id: In(uniqueIds) }) : [];
+    if (projects.length !== uniqueIds.length) throw new BusinessError('包含不存在的项目');
+    const unavailable = projects.find((project) => project.status !== 'active');
+    if (unavailable) throw new BusinessError(`项目“${unavailable.name}”已非进行中状态，不能填报工时`);
   }
 
   /** 读系统设置（Redis 缓存，未命中回落 DB） */
@@ -124,6 +139,15 @@ export class TimesheetService {
     }
   }
 
+  private validateDistinctProjectDates(items: { projectId: number; date: string }[]) {
+    const seen = new Set<string>();
+    for (const item of items) {
+      const key = `${item.projectId}:${item.date}`;
+      if (seen.has(key)) throw new BusinessError(`项目 ${item.projectId} 在 ${item.date} 存在重复工时`);
+      seen.add(key);
+    }
+  }
+
   /** 校验每个 days 值是步长的整数倍（带浮点容差） */
   private validateStepMultiple(entries: { date: string; days: number }[], step: number, field: string) {
     for (const e of entries) {
@@ -138,6 +162,7 @@ export class TimesheetService {
 
   async create(data: { userId: number; projectId: number; date: string; days: number; description?: string }) {
     // 草稿创建也校验步长倍数，防止非步长值落库（每日上限留待提交时校验，草稿可跨日累积）
+    await this.validateActiveProjects([data.projectId]);
     const step = await this.loadUnitStep();
     this.validateStepMultiple([{ date: data.date, days: data.days }], step, '工时');
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
@@ -146,11 +171,51 @@ export class TimesheetService {
   }
 
   async batchCreate(userId: number, items: { projectId: number; date: string; days: number; description?: string }[]) {
+    this.validateDistinctProjectDates(items);
+    await this.validateActiveProjects(items.map((item) => item.projectId));
     const step = await this.loadUnitStep();
     items.forEach((item, i) => this.validateStepMultiple([{ date: item.date, days: item.days }], step, `items[${i}]`));
+    const dailyDays: Record<string, number> = {};
+    for (const item of items) dailyDays[item.date] = round2((dailyDays[item.date] || 0) + item.days);
+    this.validateDailyDays(dailyDays);
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
     const records = items.map(item => this.createRecord({ ...item, userId }, orgSnapshot));
     return this.repo.save(records);
+  }
+
+  /**
+   * 原子替换某周草稿：旧草稿删除与新草稿写入同一事务。
+   * 避免客户端“先逐条删除、再批量新建”在网络或校验失败时丢失已保存草稿。
+   */
+  async replaceWeekDrafts(
+    userId: number,
+    weekStart: string,
+    items: { projectId: number; date: string; days: number; description?: string }[],
+  ) {
+    const start = dayjsExt(weekStart);
+    if (start.isoWeekday() !== 1) throw new BusinessError('weekStart必须是周一');
+    const weekEnd = start.add(6, 'day').format('YYYY-MM-DD');
+    if (items.some((item) => item.date < weekStart || item.date > weekEnd)) {
+      throw new BusinessError('草稿日期必须在指定周内');
+    }
+
+    return this.transaction(async (manager) => {
+      const txService = new TimesheetService(manager);
+      txService.validateDistinctProjectDates(items);
+      await txService.validateActiveProjects(items.map((item) => item.projectId));
+      const step = await txService.loadUnitStep();
+      items.forEach((item, index) => {
+        txService.validateStepMultiple([{ date: item.date, days: item.days }], step, `items[${index}]`);
+      });
+      const dailyDays: Record<string, number> = {};
+      for (const item of items) dailyDays[item.date] = round2((dailyDays[item.date] || 0) + item.days);
+      txService.validateDailyDays(dailyDays);
+      const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(userId);
+
+      await txService.repo.delete({ userId, date: Between(weekStart, weekEnd), status: 'draft' });
+      const records = items.map((item) => txService.createRecord({ ...item, userId }, orgSnapshot));
+      return txService.repo.save(records);
+    });
   }
 
   async update(id: number, userId: number, data: { projectId?: number; days?: number; description?: string }) {
@@ -158,6 +223,9 @@ export class TimesheetService {
     if (!record) throw new BusinessError('记录不存在');
     if (record.userId !== userId) throw new BusinessError('只能修改自己的工时记录');
     if (record.status !== 'draft') throw new BusinessError('仅草稿状态可修改');
+    if (data.projectId !== undefined) {
+      await this.validateActiveProjects([data.projectId]);
+    }
     // 若更新了 days，校验步长倍数
     if (data.days !== undefined) {
       const step = await this.loadUnitStep();
@@ -196,18 +264,16 @@ export class TimesheetService {
         .andWhere('d.status NOT IN (:...excl)', { excl: ['deprecated', 'rejected', 'withdrawn'] })
         .andWhere('d.submissionGroupId IS NOT NULL')
         .groupBy('d.projectId, d.date');
-      if (startDate && endDate) {
-        maxGroupQb.andWhere('d.date BETWEEN :ds AND :de', { ds: startDate, de: endDate });
-      }
+      if (startDate) maxGroupQb.andWhere('d.date >= :ds', { ds: startDate });
+      if (endDate) maxGroupQb.andWhere('d.date <= :de', { de: endDate });
       if (status) {
         maxGroupQb.andWhere('d.status = :st', { st: status });
       }
       const maxGroupRows = await maxGroupQb.getRawMany<{ maxGroup: number }>();
       const maxGroups = maxGroupRows.map(r => r.maxGroup).filter(Boolean);
 
-      if (startDate && endDate) {
-        qb.andWhere('t.date BETWEEN :ds AND :de', { ds: startDate, de: endDate });
-      }
+      if (startDate) qb.andWhere('t.date >= :ds', { ds: startDate });
+      if (endDate) qb.andWhere('t.date <= :de', { de: endDate });
       // 并集：已提交最新版本(路径A) 或 真草稿(路径B)
       qb.andWhere(new Brackets(qb1 => {
         // 路径A：maxGroups 非空时取这些 group 的非终态记录
@@ -227,7 +293,14 @@ export class TimesheetService {
       // includeAll（历史记录）：按提交时间筛选，而非工时日期。
       // 这样跨周/跨月的提交记录能整组完整返回（一组工时共享同一个 submissionGroupId），
       // 只要提交时间落在筛选范围内，整组都显示。
-      if (startDate && endDate) qb.andWhere('t.updatedAt BETWEEN :startDate AND :endDate', { startDate, endDate });
+      if (startDate) {
+        qb.andWhere('t.updatedAt >= :historyStart', { historyStart: `${startDate}T00:00:00.000Z` });
+      }
+      if (endDate) {
+        const exclusiveEnd = new Date(`${endDate}T00:00:00.000Z`);
+        exclusiveEnd.setUTCDate(exclusiveEnd.getUTCDate() + 1);
+        qb.andWhere('t.updatedAt < :historyEnd', { historyEnd: exclusiveEnd.toISOString() });
+      }
       if (status) qb.andWhere('t.status = :status', { status });
     }
 
@@ -287,9 +360,8 @@ export class TimesheetService {
   private scheduleTimesheetApprovals(jobs: TimesheetApprovalJob[]): Promise<void> | void {
     if (!jobs.length) return;
     if (process.env.SUBMIT_APPROVAL_SYNC === '1') {
-      return this.processApprovalJobs(jobs).catch((err) => {
-        logger.error({ err, jobs: jobs.map((j) => j.targetId) }, '[timesheet] 后置审批失败');
-      });
+      // 同步模式用于测试/诊断，失败必须返回调用方，不能伪装成提交成功。
+      return this.processApprovalJobs(jobs);
     }
     return enqueueTimesheetApprovals(jobs).then((ok) => {
       if (ok) return;
@@ -305,7 +377,7 @@ export class TimesheetService {
   async processApprovalJobs(jobs: TimesheetApprovalJob[]) {
     if (!jobs.length) return;
     const notifications: PendingNotification[] = [];
-    await AppDataSource.transaction(async (manager) => {
+    await this.transaction(async (manager) => {
       const svc = new TimesheetService(manager);
       const submitterCache = new Map<number, User | null>();
 
@@ -408,18 +480,21 @@ export class TimesheetService {
   /** 提交审批 */
   async submit(ids: number[], userId: number) {
     if (!ids?.length) throw new BusinessError('请选择要提交的记录');
+    const uniqueIds = [...new Set(ids)];
 
     // 预读工时填报单位（天步长），供校验
     const unitStep = await this.loadUnitStep();
     const approvalJobs: TimesheetApprovalJob[] = [];
 
     // 锁检查移出事务，缩短写事务持锁时间
-    const preview = await this.repo.findBy({ id: In(ids) });
+    const preview = await this.repo.findBy({ id: In(uniqueIds) });
+    if (preview.length !== uniqueIds.length) throw new BusinessError('包含不存在的工时记录');
     await this.checkTimesheetLock(preview.map((r) => r.date));
 
-    await AppDataSource.transaction(async (manager) => {
+    await this.transaction(async (manager) => {
       const txService = new TimesheetService(manager);
-      const records = await txService.repo.findBy({ id: In(ids) });
+      const records = await txService.repo.findBy({ id: In(uniqueIds) });
+      if (records.length !== uniqueIds.length) throw new BusinessError('包含不存在的工时记录');
       const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(userId);
       for (const r of records) {
         if (r.userId !== userId) throw new BusinessError('只能提交自己的工时记录');
@@ -432,6 +507,13 @@ export class TimesheetService {
       const dailyDays: Record<string, number> = {};
       for (const e of entries) dailyDays[e.date] = (dailyDays[e.date] || 0) + e.days;
       txService.validateDailyDays(dailyDays);
+
+      await txService.validateActiveProjects(records.map((record) => record.projectId));
+      await txService.approvalInstanceService.validateStartMany(records.map((record) => ({
+        targetType: 'timesheet' as const,
+        applicantId: userId,
+        projectId: record.projectId,
+      })));
 
       // 批量 UPDATE，避免逐条 save
       const recordIds = records.map((r) => r.id);
@@ -466,8 +548,27 @@ export class TimesheetService {
   /**
    * 按行提交审批（事务化写工时；审批实例入 Redis 队列异步创建）
    */
-  async submitByRows(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[]) {
+  async submitByRows(
+    userId: number,
+    rows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[],
+    options: { preserveOmittedProjects?: boolean } = {},
+  ) {
     if (!rows?.length) throw new BusinessError('请选择要提交的记录');
+
+    const weekStart = rows[0].weekStart;
+    const start = dayjsExt(weekStart);
+    if (start.isoWeekday() !== 1) throw new BusinessError('weekStart必须是周一');
+    const weekEnd = start.add(6, 'day').format('YYYY-MM-DD');
+    if (rows.some((row) => row.weekStart !== weekStart)) {
+      throw new BusinessError('一次只能提交同一周的工时');
+    }
+    const projectIdsInPayload = rows.map((row) => row.projectId);
+    if (new Set(projectIdsInPayload).size !== projectIdsInPayload.length) {
+      throw new BusinessError('同一项目在一周内只能提交一行');
+    }
+    if (rows.some((row) => row.entries.some((entry) => entry.date < weekStart || entry.date > weekEnd))) {
+      throw new BusinessError('工时日期必须在指定周内');
+    }
 
     const allDates = rows.flatMap(r => r.entries.map(e => e.date));
     await this.checkTimesheetLock(allDates);
@@ -477,22 +578,33 @@ export class TimesheetService {
     rows.forEach((row, i) => this.validateStepMultiple(row.entries, unitStep, `rows[${i}]`));
 
     const dailyDays: Record<string, number> = {};
+    let positiveEntryCount = 0;
     for (const row of rows) {
       for (const e of row.entries) {
         dailyDays[e.date] = (dailyDays[e.date] || 0) + e.days;
+        if (e.days > 0) positiveEntryCount += 1;
       }
     }
+    if (positiveEntryCount === 0) throw new BusinessError('请至少填写一条大于 0 的工时记录');
     this.validateDailyDays(dailyDays);
 
     const approvalJobs: TimesheetApprovalJob[] = [];
 
-    await AppDataSource.transaction(async (manager) => {
+    await this.transaction(async (manager) => {
       const txService = new TimesheetService(manager);
       const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(userId);
-      const submitter = await txService.userRepo.findOneBy({ id: userId });
+      const submitter = await txService.userRepo.findOneBy({ id: userId, status: 1 });
+      if (!submitter) throw new BusinessError('提交人不存在或已被禁用');
 
-      const weekStart = rows[0].weekStart;
-      const weekEnd = dayjsExt(weekStart).add(6, 'day').format('YYYY-MM-DD');
+      const projectIds = [...new Set(rows
+        .filter((row) => row.entries.some((entry) => entry.days > 0))
+        .map((row) => row.projectId))];
+      await txService.validateActiveProjects(projectIds);
+      await txService.approvalInstanceService.validateStartMany(projectIds.map((projectId) => ({
+        targetType: 'timesheet' as const,
+        applicantId: userId,
+        projectId,
+      })));
 
       const existingRecords = await txService.repo.find({
         where: [
@@ -507,13 +619,11 @@ export class TimesheetService {
       const previousGroupId = recWithPrev?.previousGroupId || null;
 
       const projectDates = new Map<number, Set<string>>();
-      const allEntryDates = new Set<string>();
       for (const row of rows) {
         const dates = new Set<string>();
         for (const e of row.entries) {
           if (e.days > 0) {
             dates.add(e.date);
-            allEntryDates.add(e.date);
           }
         }
         projectDates.set(row.projectId, dates);
@@ -528,10 +638,11 @@ export class TimesheetService {
       // 第一遍：分类清理，批量写库（替代逐条 save/remove）
       for (const rec of existingRecords) {
         const dates = projectDates.get(rec.projectId);
-        const isInEntries = dates ? dates.has(rec.date) : allEntryDates.has(rec.date);
+        if (!dates && options.preserveOmittedProjects) continue;
+        const isInEntries = !!dates?.has(rec.date);
 
         if (rec.status === 'rejected') {
-          if (!dates || (dates && !isInEntries)) {
+          if (!dates || !isInEntries) {
             toRemoveIds.push(rec.id);
             removedIds.add(rec.id);
           }
@@ -545,8 +656,8 @@ export class TimesheetService {
             removedIds.add(rec.id);
           }
         } else if (rec.status === 'approved' || rec.status === 'submitted') {
-          // 被删项目立即 deprecate（见原注释：修改提交即生效）
-          if (!dates) {
+          // 整周提交：载荷中删除的项目/日期废弃；局部修改：只处理载荷明确包含的项目。
+          if (!dates || !isInEntries) {
             toDeprecateIds.push(rec.id);
             removedIds.add(rec.id);
           }
@@ -724,7 +835,7 @@ export class TimesheetService {
    * 审批通过即不可篡改，改动必须走新审批。
    */
   async modifySubmitted(userId: number, rows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[]) {
-    return this.submitByRows(userId, rows);
+    return this.submitByRows(userId, rows, { preserveOmittedProjects: true });
   }
 
   /** 事务提交后统一发送通知（失败不影响业务） */

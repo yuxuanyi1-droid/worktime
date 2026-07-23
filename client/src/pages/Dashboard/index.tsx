@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Alert, Tag, Typography } from 'antd';
+import { Alert, Button, Spin, Tag } from 'antd';
 import {
   ClockCircleOutlined,
   CheckCircleOutlined,
@@ -30,9 +30,11 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const { user } = useAuthStore();
   const navigate = useNavigate();
+  const fetchRequestId = useRef(0);
 
   useEffect(() => {
     fetchData();
+    return () => { fetchRequestId.current += 1; };
   }, []);
 
   // 窗口重新获得焦点时刷新数据（从其它页面返回 Dashboard 后数据自动更新）
@@ -48,19 +50,36 @@ export default function Dashboard() {
   }, []);
 
   const fetchData = async () => {
+    const requestId = ++fetchRequestId.current;
     setLoading(true);
     setError(null);
     try {
       const res = await reportApi.getDashboard();
-      if (res.data) setData(res.data);
+      if (requestId === fetchRequestId.current && res.data) setData(res.data);
     } catch (e: any) {
-      setError(e?.response?.data?.message || e?.message || '工作台数据加载失败');
+      if (requestId === fetchRequestId.current) {
+        setError(e?.response?.data?.message || e?.message || '工作台数据加载失败');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === fetchRequestId.current) setLoading(false);
     }
   };
 
-  const trendOption = data?.trend ? {
+  const canViewTimesheet = hasPermission('timesheet:view:self');
+  const canViewOvertime = hasPermission('overtime:view:self');
+  const canViewApprovals = hasPermission('approval:access') && hasPermission('approval:view:todo');
+  const canFillTimesheet = hasPermission('timesheet:access') && canViewTimesheet && hasPermission('timesheet:create');
+  const canSubmitTimesheet = canFillTimesheet && hasPermission('timesheet:submit:self');
+  const canFillWeeklyReport = hasPermission('weekly_report:access')
+    && hasPermission('weekly_report:view:self')
+    && hasPermission('weekly_report:create');
+  const canSubmitWeeklyReport = canFillWeeklyReport && hasPermission('weekly_report:submit:self');
+  const canOpenWeeklyReport = hasPermission('weekly_report:access') && hasPermission('weekly_report:view:self');
+  const weeklyReportStatusLabel: Record<string, string> = {
+    draft: '草稿', submitted: '审批中', approved: '已通过', rejected: '已驳回', withdrawn: '已撤回',
+  };
+
+  const trendOption = canViewTimesheet && data?.trend?.length ? {
     tooltip: { trigger: 'axis' as const },
     grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
     xAxis: {
@@ -94,46 +113,47 @@ export default function Dashboard() {
   } : null;
 
   const todoItems = [];
-  if (hasPermission('timesheet:create')) {
+  if (canSubmitTimesheet && data?.hasTimesheetDrafts) {
     todoItems.push({ title: '提交本周工时', tag: '工时', color: 'green', path: '/timesheet' });
   }
-  if (hasPermission('weekly_report:create')) {
+  if (canSubmitWeeklyReport && (!data?.weeklyReportStatus || ['draft', 'rejected', 'withdrawn'].includes(data.weeklyReportStatus))) {
     todoItems.push({ title: '提交本周周报', tag: '周报', color: 'green', path: '/weekly-report' });
   }
-  if ((data?.pendingCount || 0) > 0) {
-    todoItems.push({ title: `审批工时申请 (${data?.pendingCount || 0})`, tag: '审批', color: 'orange', path: '/approval' });
+  if (canViewApprovals && (data?.pendingCount || 0) > 0) {
+    todoItems.push({ title: `处理待审批 (${data?.pendingCount || 0})`, tag: '审批', color: 'orange', path: '/approval' });
   }
 
   const statCards = [
-    hasPermission('timesheet:view:self') && {
+    canViewTimesheet && {
       icon: <ClockCircleOutlined />,
       value: `${data?.monthDays || 0}天`,
       label: '本月工时',
       color: '#6B8F71',
       bg: '#EAF0EB',
     },
-    (data?.pendingCount || 0) > 0 && {
+    canViewApprovals && (data?.pendingCount || 0) > 0 && {
       icon: <CheckCircleOutlined />,
       value: `${data?.pendingCount || 0}`,
       label: '待审批',
       color: '#C89B50',
       bg: '#F5F0E0',
     },
-    hasPermission('overtime:view:self') && {
+    canViewOvertime && {
       icon: <ThunderboltOutlined />,
       value: `${data?.overtimeDays || 0}天`,
       label: '本月加班',
       color: '#C0564B',
       bg: '#F5E8E6',
     },
-      hasPermission('weekly_report:view:self') && {
+    canOpenWeeklyReport && {
       icon: <FileTextOutlined />,
-      value: '待提交',
+      value: data?.weeklyReportStatus ? weeklyReportStatusLabel[data.weeklyReportStatus] || data.weeklyReportStatus : '未填写',
       label: '本周周报',
       color: '#6B8F71',
       bg: '#EAF0EB',
+      path: '/weekly-report',
     },
-  ].filter(Boolean) as { icon: React.ReactNode; value: string; label: string; color: string; bg: string }[];
+  ].filter(Boolean) as { icon: React.ReactNode; value: string; label: string; color: string; bg: string; path?: string }[];
 
   return (
     <div>
@@ -142,11 +162,12 @@ export default function Dashboard() {
           type="error"
           showIcon
           message={error}
-          closable
-          onClose={() => setError(null)}
+          action={<Button size="small" onClick={() => void fetchData()}>重试</Button>}
           style={{ marginBottom: 16 }}
         />
       )}
+
+      <Spin spinning={loading} size="large">
 
       {/* Hero */}
       <div style={{ maxWidth: 520, marginBottom: 36 }}>
@@ -167,8 +188,8 @@ export default function Dashboard() {
           {getGreeting(now)}，{user?.realName || '用户'}
         </h1>
         <div style={{ marginTop: 8, fontSize: 15, color: '#7A7060', lineHeight: 1.5 }}>
-          本月已填报 {data?.monthDays || 0} 天
-          {data?.pendingCount ? `，还有 ${data.pendingCount} 条审批需要处理。` : '。'}
+          {canViewTimesheet ? `本月已填报 ${data?.monthDays || 0} 天` : '欢迎使用工时管理系统'}
+          {canViewApprovals && data?.pendingCount ? `，还有 ${data.pendingCount} 条审批需要处理。` : '。'}
         </div>
       </div>
 
@@ -177,6 +198,13 @@ export default function Dashboard() {
         {statCards.map((stat, i) => (
           <div
             key={i}
+            role={stat.path ? 'button' : undefined}
+            tabIndex={stat.path ? 0 : undefined}
+            aria-label={stat.path ? `${stat.label}：${stat.value}` : undefined}
+            onClick={stat.path ? () => navigate(stat.path!) : undefined}
+            onKeyDown={stat.path ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ') navigate(stat.path!);
+            } : undefined}
             style={{
               flex: '1 1 180px',
               padding: '20px 24px',
@@ -184,7 +212,7 @@ export default function Dashboard() {
               background: '#FDFBF7',
               border: '1px solid #E8E0D4',
               transition: 'all 0.25s ease',
-              cursor: 'default',
+              cursor: stat.path ? 'pointer' : 'default',
             }}
           >
             <div style={{
@@ -211,7 +239,7 @@ export default function Dashboard() {
       </div>
 
       {/* 双栏内容 */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 24 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 320px), 1fr))', gap: 24 }}>
         {/* 工时趋势 */}
         <div style={{
           background: '#FDFBF7',
@@ -226,7 +254,11 @@ export default function Dashboard() {
             <span style={{ fontSize: 15, fontWeight: 600, color: '#2C2418' }}>本月工时趋势</span>
           </div>
           <div style={{ padding: '0 22px 18px' }}>
-            {trendOption ? (
+            {!canViewTimesheet ? (
+              <div style={{ height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#B0A898' }}>
+                无工时查看权限
+              </div>
+            ) : trendOption ? (
               <LazyEChart option={trendOption} style={{ height: 300 }} />
             ) : (
               <div style={{ height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#B0A898' }}>
@@ -248,29 +280,37 @@ export default function Dashboard() {
             <div style={{ fontSize: 15, fontWeight: 600, color: '#2C2418', marginBottom: 14 }}>
               快捷操作
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
               {[
-                { icon: '✏️', title: '填报工时', desc: '记录今天的工作', path: '/timesheet', perm: 'timesheet:create' },
-                { icon: '📤', title: '提交周工时', desc: '一键提交审批', path: '/timesheet', perm: 'timesheet:create' },
-                { icon: '📊', title: '月度统计', desc: '工时趋势分析', path: '/report', perm: 'report:access' },
-                { icon: '✅', title: '审批中心', desc: `${data?.pendingCount || 0} 条待处理`, path: '/approval', perm: '', visible: (data?.pendingCount || 0) > 0 },
-              ].filter(item => item.visible !== false && (!item.perm || hasPermission(item.perm))).map((item, i) => (
-                <div
-                  key={i}
+                { icon: '✏️', title: '填报工时', desc: '记录今天的工作', path: '/timesheet', visible: canFillTimesheet },
+                { icon: '📤', title: '提交周工时', desc: '一键提交审批', path: '/timesheet', visible: canSubmitTimesheet && !!data?.hasTimesheetDrafts },
+                { icon: '📊', title: '月度统计', desc: '工时趋势分析', path: '/report', visible: hasPermission('report:access') && hasPermission('report:view:self') },
+                { icon: '✅', title: '审批中心', desc: `${data?.pendingCount || 0} 条待处理`, path: '/approval', visible: canViewApprovals && (data?.pendingCount || 0) > 0 },
+              ].filter(item => item.visible).map((item) => (
+                <button
+                  type="button"
+                  key={item.title}
                   onClick={() => navigate(item.path)}
                   style={{
                     padding: '14px 16px', borderRadius: 12,
                     background: '#F8F4ED', cursor: 'pointer',
                     transition: 'background 0.2s',
+                    border: 0, textAlign: 'left', width: '100%', font: 'inherit',
                   }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#EDE8DE'; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#F8F4ED'; }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = '#EDE8DE'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = '#F8F4ED'; }}
                 >
                   <div style={{ fontSize: 20, marginBottom: 6 }}>{item.icon}</div>
                   <div style={{ fontSize: 13, fontWeight: 600, color: '#2C2418' }}>{item.title}</div>
                   <div style={{ fontSize: 11, color: '#9A9080', marginTop: 2 }}>{item.desc}</div>
-                </div>
+                </button>
               ))}
+              {![
+                canFillTimesheet,
+                canSubmitTimesheet && !!data?.hasTimesheetDrafts,
+                hasPermission('report:access') && hasPermission('report:view:self'),
+                canViewApprovals && (data?.pendingCount || 0) > 0,
+              ].some(Boolean) && <div style={{ color: '#B0A898', fontSize: 13 }}>暂无可用操作</div>}
             </div>
           </div>
 
@@ -288,19 +328,21 @@ export default function Dashboard() {
             {todoItems.length > 0 ? (
               <div>
                 {todoItems.map((item, i) => (
-                  <div
-                    key={i}
+                  <button
+                    type="button"
+                    key={item.title}
                     onClick={() => navigate(item.path)}
                     style={{
                       padding: '10px 0',
                       borderBottom: i < todoItems.length - 1 ? '1px solid #F0EBE2' : 'none',
                       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                       cursor: 'pointer',
+                      background: 'transparent', border: 0, width: '100%', font: 'inherit',
                     }}
                   >
                     <span style={{ fontSize: 13, fontWeight: 600, color: '#2C2418' }}>{item.title}</span>
                     <Tag color={item.color} style={{ borderRadius: 999, fontSize: 11, margin: 0 }}>{item.tag}</Tag>
-                  </div>
+                  </button>
                 ))}
               </div>
             ) : (
@@ -311,6 +353,7 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+      </Spin>
     </div>
   );
 }

@@ -20,22 +20,40 @@ import { logger } from '../utils/logger';
 export type AiProvider = 'anthropic' | 'openai' | 'custom';
 export type AiApiType = 'anthropic-messages' | 'openai-completions' | 'openai-responses';
 
-const provider = (process.env.AI_PROVIDER || 'anthropic').toLowerCase() as AiProvider;
+const supportedProviders = new Set<AiProvider>(['anthropic', 'openai', 'custom']);
+const supportedApiTypes = new Set<AiApiType>(['anthropic-messages', 'openai-completions', 'openai-responses']);
+const rawProvider = (process.env.AI_PROVIDER || 'anthropic').trim().toLowerCase();
+const provider = rawProvider as AiProvider;
 const apiKey = process.env.AI_API_KEY || '';
 const baseUrl = (process.env.AI_BASE_URL || '').trim();
 const modelId = (process.env.AI_MODEL || '').trim();
 const modelName = (process.env.AI_MODEL_NAME || '').trim();
 
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value >= min && value <= max ? value : fallback;
+}
+
+function validBaseUrl(value: string): boolean {
+  if (!value) return true;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 /** 推断 API 协议：显式配置优先，否则按 provider 默认 */
-function resolveApiType(): AiApiType {
-  const explicit = (process.env.AI_API_TYPE || '').trim() as AiApiType;
-  if (explicit) return explicit;
+function resolveApiType(): AiApiType | null {
+  const explicit = (process.env.AI_API_TYPE || '').trim();
+  if (explicit) return supportedApiTypes.has(explicit as AiApiType) ? explicit as AiApiType : null;
   return provider === 'anthropic' ? 'anthropic-messages' : 'openai-completions';
 }
 
 const apiType = resolveApiType();
-const contextWindow = parseInt(process.env.AI_CONTEXT_WINDOW || '128000', 10);
-const maxTokens = parseInt(process.env.AI_MAX_TOKENS || '16384', 10);
+const contextWindow = envInt('AI_CONTEXT_WINDOW', 128_000, 1_024, 10_000_000);
+const maxTokens = Math.min(envInt('AI_MAX_TOKENS', 16_384, 1, 1_000_000), contextWindow);
 
 /** PI_MODELS_JSON 路径（固定在 data 目录），由 ensurePiModelsJson 写入 */
 const dataDir = path.resolve(__dirname, '../../data');
@@ -53,6 +71,18 @@ const PI_PROVIDER_NAME = 'worktime-llm';
  * - custom：注册全新 provider，必须给出 baseUrl + api + models[]
  */
 function buildModelsJson(): Record<string, unknown> | null {
+  if (!supportedProviders.has(provider)) {
+    logger.error({ provider: rawProvider }, '[ai] AI_PROVIDER 配置无效');
+    return null;
+  }
+  if (!apiType) {
+    logger.error({ apiType: process.env.AI_API_TYPE }, '[ai] AI_API_TYPE 配置无效');
+    return null;
+  }
+  if (!validBaseUrl(baseUrl)) {
+    logger.error('[ai] AI_BASE_URL 必须是无内嵌账号密码的 HTTP(S) 地址');
+    return null;
+  }
   // 通用模型条目（custom provider 必填）
   const modelEntry = (id: string) => ({
     id,
@@ -112,6 +142,7 @@ const modelsJsonContent = buildModelsJson();
 
 /** 当前选中的模型（provider + modelId），供 agentRunner 传给 createAgentSession */
 function resolveSelectedModel(): { provider: string; modelId: string } | null {
+  if (!supportedProviders.has(provider) || !apiType || !validBaseUrl(baseUrl)) return null;
   if (provider === 'custom') {
     return { provider: PI_PROVIDER_NAME, modelId };
   }
@@ -127,19 +158,31 @@ export const selectedModel = resolveSelectedModel();
  * 未就绪时聊天端点返回 503，其他业务功能不受影响。
  */
 export const aiReady = !!(apiKey && modelsJsonContent && selectedModel);
+let runtimeModelsReady = false;
+
+/** 配置有效且本次进程已经成功落盘 models.json，才允许对外宣称 AI 可用。 */
+export function isAiRuntimeReady(): boolean {
+  return aiReady && runtimeModelsReady;
+}
 
 /**
  * 把 models.json 写到 data 目录，返回写入路径；未就绪则跳过。
  * 由 app 启动时调用一次。
  */
-export function ensurePiModelsJson(): void {
-  if (!modelsJsonContent) return;
+export function ensurePiModelsJson(): boolean {
+  runtimeModelsReady = false;
+  if (!modelsJsonContent) return false;
   try {
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(piModelsJsonPath, JSON.stringify(modelsJsonContent, null, 2), 'utf8');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dataDir, 0o700);
+    fs.writeFileSync(piModelsJsonPath, JSON.stringify(modelsJsonContent, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(piModelsJsonPath, 0o600);
+    runtimeModelsReady = true;
     logger.info({ path: piModelsJsonPath, provider, modelId: selectedModel?.modelId }, '[ai] pi models.json 已生成');
+    return true;
   } catch (e) {
     logger.error({ err: e }, '[ai] 写 pi-models.json 失败');
+    return false;
   }
 }
 

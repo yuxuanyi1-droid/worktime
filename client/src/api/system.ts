@@ -53,7 +53,7 @@ export const systemApi = {
   createUser: (data: any) => request.post<any, { code: number }>('/system/users', data),
   updateUser: (id: number, data: any) => request.put<any, { code: number }>(`/system/users/${id}`, data),
   deleteUser: (id: number) => request.delete<any, { code: number }>(`/system/users/${id}`),
-  resetPassword: (id: number, password: string) => request.put<any, { code: number }>(`/system/users/${id}/reset-password`, { password }),
+  resetPassword: (id: number, password?: string) => request.put<any, { code: number; data?: { password: string } }>(`/system/users/${id}/reset-password`, password ? { password } : {}),
 
   // 角色
   getRoles: () => request.get<any, { code: number; data: Role[] }>('/system/roles'),

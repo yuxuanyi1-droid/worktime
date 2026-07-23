@@ -5,6 +5,7 @@ import { Timesheet } from '../entities/Timesheet';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requireAllPermissions, requirePermission } from '../middleware/permission';
 import {
+  assertDateRange,
   firstQueryValue,
   parseArray,
   parseBooleanQuery,
@@ -16,12 +17,13 @@ import {
   parsePositiveInt,
   parseString,
 } from '../utils/validation';
-import { canAccessUserData } from '../utils/accessControl';
+import { AccessPolicyService } from '../services/accessPolicyService';
 import { BusinessError } from '../utils/errors';
 
 const router = Router();
 const timesheetService = new TimesheetService();
-const timesheetStatuses = ['draft', 'submitted', 'approved', 'rejected', 'deprecated'] as const;
+const accessPolicy = new AccessPolicyService();
+const timesheetStatuses = ['draft', 'submitted', 'approved', 'rejected', 'deprecated', 'withdrawn'] as const;
 
 function parseTimesheetItem(item: unknown, index: number) {
   const row = item as Record<string, unknown>;
@@ -59,9 +61,12 @@ router.use(authMiddleware);
 router.get('/my', requirePermission('timesheet:view:self'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query, 50);
+    const startDate = parseOptionalDateString(firstQueryValue(req.query.startDate), 'startDate');
+    const endDate = parseOptionalDateString(firstQueryValue(req.query.endDate), 'endDate');
+    assertDateRange(startDate, endDate);
     const data = await timesheetService.getByUser(req.user!.id, {
-      startDate: parseOptionalDateString(firstQueryValue(req.query.startDate), 'startDate'),
-      endDate: parseOptionalDateString(firstQueryValue(req.query.endDate), 'endDate'),
+      startDate,
+      endDate,
       status: parseOptionalEnum(firstQueryValue(req.query.status), 'status', timesheetStatuses),
       page,
       pageSize,
@@ -79,7 +84,7 @@ router.get('/weekly-summary', requirePermission('timesheet:view:self', 'timeshee
     const weekStart = parseDateString(firstQueryValue(req.query.weekStart), 'weekStart');
     const weekEnd = parseDateString(firstQueryValue(req.query.weekEnd), 'weekEnd');
     const targetUserId = req.query.userId ? parsePositiveInt(firstQueryValue(req.query.userId), 'userId') : req.user!.id;
-    if (!await canAccessUserData(req.user!, targetUserId, {
+    if (!await accessPolicy.canAccessUserData(req.user!, targetUserId, {
       departmentPermissions: ['timesheet:view:department'],
       groupPermissions: ['timesheet:view:group'],
     })) {
@@ -115,6 +120,18 @@ router.post('/batch', requirePermission('timesheet:create'), async (req: AuthReq
   }
 });
 
+// 原子替换整周草稿（删除旧值与写入新值同一事务）
+router.post('/drafts/replace', requireAllPermissions('timesheet:create', 'timesheet:view:self'), async (req: AuthRequest, res, next) => {
+  try {
+    const weekStart = parseDateString(req.body?.weekStart, 'weekStart');
+    const items = parseArray(req.body?.items, 'items', parseTimesheetItem, { min: 1, max: 200 });
+    const data = await timesheetService.replaceWeekDrafts(req.user!.id, weekStart, items);
+    res.json({ code: 0, data, message: '草稿已保存' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // 更新工时 — service 层校验所有权和状态
 router.put('/:id', requirePermission('timesheet:update:self'), async (req: AuthRequest, res, next) => {
   try {
@@ -141,14 +158,14 @@ router.delete('/:id', requirePermission('timesheet:delete:self'), async (req: Au
 });
 
 // 查看某条工时的完整修改链（v1→v2→v3…，含已 deprecated 的历史版本）
-router.get('/chain/:id', async (req: AuthRequest, res, next) => {
+router.get('/chain/:id', requirePermission('timesheet:view:self', 'timesheet:view:group', 'timesheet:view:department'), async (req: AuthRequest, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, 'id');
     // 鉴权：先取种子记录，校验查看者对其有访问权
     const seed = await AppDataSource.getRepository(Timesheet).findOne({ where: { id } });
     if (!seed) throw new BusinessError('记录不存在');
     const owner = seed.userId;
-    if (!await canAccessUserData(req.user!, owner, {
+    if (!await accessPolicy.canAccessUserData(req.user!, owner, {
       departmentPermissions: ['timesheet:view:department'],
       groupPermissions: ['timesheet:view:group'],
     })) {
@@ -164,7 +181,9 @@ router.get('/chain/:id', async (req: AuthRequest, res, next) => {
 // 提交审批
 router.post('/submit', requirePermission('timesheet:submit:self'), async (req: AuthRequest, res, next) => {
   try {
-    const ids = parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 200 });
+    const ids = Array.from(new Set(
+      parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 200 }),
+    ));
     await timesheetService.submit(ids, req.user!.id);
     res.json({ code: 0, message: '提交成功' });
   } catch (error) {

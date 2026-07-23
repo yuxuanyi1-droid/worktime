@@ -8,6 +8,7 @@ import { AccessPolicyService } from '../services/accessPolicyService';
 import { ReportService } from '../services/reportService';
 import { BusinessError } from '../utils/errors';
 import {
+  assertDateRange,
   firstQueryValue,
   parseDateString,
   parseOptionalPositiveInt,
@@ -20,6 +21,13 @@ const accessPolicy = new AccessPolicyService();
 const timesheetRepo = () => AppDataSource.getRepository(Timesheet);
 
 type Viewer = NonNullable<AuthRequest['user']>;
+
+function parseReportDateRange(query: { startDate?: unknown; endDate?: unknown }) {
+  const startDate = parseDateString(firstQueryValue(query.startDate), 'startDate');
+  const endDate = parseDateString(firstQueryValue(query.endDate), 'endDate');
+  assertDateRange(startDate, endDate);
+  return { startDate, endDate };
+}
 
 async function getProjectFilterOptions(projectId: number) {
   const records = await timesheetRepo().createQueryBuilder('t')
@@ -140,6 +148,18 @@ function serializeProjects(projects: Awaited<ReturnType<AccessPolicyService['get
   }));
 }
 
+async function canExportScope(
+  viewer: Viewer,
+  scope: { departmentId?: number; groupId?: number; projectId?: number } = {},
+) {
+  const exportScope = await accessPolicy.getPermissionScope(viewer, 'report:export');
+  if (exportScope.unrestricted) return true;
+  if (scope.groupId && exportScope.groupIds.includes(scope.groupId)) return true;
+  if (scope.departmentId && exportScope.departmentIds.includes(scope.departmentId)) return true;
+  if (scope.projectId && exportScope.projectIds.includes(scope.projectId)) return true;
+  return false;
+}
+
 router.use(authMiddleware);
 
 router.get('/scope', requirePermission('report:access'), async (req: AuthRequest, res, next) => {
@@ -151,25 +171,36 @@ router.get('/scope', requirePermission('report:access'), async (req: AuthRequest
       canDepartmentPermission,
       canProjectPermission,
       canOvertimePermission,
+      canAllReports,
+      canExportPermission,
     ] = await Promise.all([
       accessPolicy.hasPermission(viewer, 'report:view:self'),
       accessPolicy.hasPermission(viewer, 'report:view:group'),
       accessPolicy.hasPermission(viewer, 'report:view:department'),
       accessPolicy.hasPermission(viewer, 'report:view:project'),
       accessPolicy.hasPermission(viewer, 'report:view:overtime'),
+      accessPolicy.hasUnrestrictedPermission(viewer, 'report:view:all'),
+      accessPolicy.hasPermission(viewer, 'report:export'),
     ]);
 
-    const [departments, groups, projects] = await Promise.all([
+    const [departments, groups, projects, overtimeProjects, exportScope] = await Promise.all([
       canDepartmentPermission || canOvertimePermission ? accessPolicy.getVisibleDepartments(viewer) : Promise.resolve([]),
       canGroupPermission || canDepartmentPermission || canOvertimePermission ? accessPolicy.getVisibleGroups(viewer) : Promise.resolve([]),
       canProjectPermission ? accessPolicy.getVisibleReportProjects(viewer) : Promise.resolve([]),
+      canOvertimePermission
+        ? accessPolicy.getVisibleProjectsForPermissions(viewer, ['report:view:overtime'])
+        : Promise.resolve([]),
+      canExportPermission
+        ? accessPolicy.getPermissionScope(viewer, 'report:export')
+        : Promise.resolve({ unrestricted: false, departmentIds: [], groupIds: [], projectIds: [] }),
     ]);
 
     const canViewDepartment = canDepartmentPermission && departments.length > 0;
     const canViewGroup = canGroupPermission && groups.length > 0;
     const canViewProject = canProjectPermission && projects.length > 0;
     const canViewOvertime = canOvertimePermission
-      && (departments.length > 0 || groups.length > 0);
+      && (accessPolicy.isAdmin(viewer) || canAllReports
+        || departments.length > 0 || groups.length > 0 || overtimeProjects.length > 0);
 
     res.json({
       code: 0,
@@ -182,6 +213,13 @@ router.get('/scope', requirePermission('report:access'), async (req: AuthRequest
         departments: serializeDepartments(departments),
         groups: serializeGroups(groups),
         projects: serializeProjects(projects),
+        overtimeProjects: overtimeProjects.map((project) => ({
+          id: project.id,
+          name: project.name,
+          code: project.code,
+          status: project.status,
+        })),
+        exportScope,
       },
     });
   } catch (error) {
@@ -191,8 +229,7 @@ router.get('/scope', requirePermission('report:access'), async (req: AuthRequest
 
 router.get('/personal', requirePermission('report:view:self'), async (req: AuthRequest, res, next) => {
   try {
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
     const targetUserId = firstQueryValue(req.query.userId)
       ? parsePositiveInt(firstQueryValue(req.query.userId), 'userId')
       : req.user!.id;
@@ -215,8 +252,7 @@ router.get('/personal', requirePermission('report:view:self'), async (req: AuthR
 router.get('/group', requirePermission('report:view:group'), async (req: AuthRequest, res, next) => {
   try {
     const groupId = parsePositiveInt(firstQueryValue(req.query.groupId), 'groupId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (!await accessPolicy.canAccessGroup(req.user!, groupId, { allowDepartmentLeader: false })) {
       return res.status(403).json({ code: 403, message: '只能查看自己负责组别的报表' });
@@ -234,8 +270,7 @@ router.get('/department', requirePermission('report:view:department'), async (re
   try {
     const departmentId = parsePositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (!await accessPolicy.canAccessDepartment(req.user!, departmentId)) {
       return res.status(403).json({ code: 403, message: '只能查看自己负责部门的报表' });
@@ -257,8 +292,7 @@ router.get('/project', requirePermission('report:view:project'), async (req: Aut
     const projectId = parsePositiveInt(firstQueryValue(req.query.projectId), 'projectId');
     const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (!await accessPolicy.canAccessProjectReport(req.user!, projectId)) {
       return res.status(403).json({ code: 403, message: '只能查看自己负责项目的报表' });
@@ -276,9 +310,9 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
   try {
     const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
+    const projectId = parseOptionalPositiveInt(firstQueryValue(req.query.projectId), 'projectId');
     const requestedUserId = parseOptionalPositiveInt(firstQueryValue(req.query.userId), 'userId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (departmentId && !await accessPolicy.canAccessDepartment(req.user!, departmentId)) {
       return res.status(403).json({ code: 403, message: '只能查看自己负责部门的加班报表' });
@@ -288,6 +322,12 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
     }
     if (departmentId && groupId && !await accessPolicy.isGroupInDepartment(groupId, departmentId)) {
       return res.status(400).json({ code: 400, message: '组别不属于当前部门' });
+    }
+    if (projectId) {
+      const projectIds = await accessPolicy.getAccessibleProjectIds(req.user!, ['report:view:overtime']);
+      if (projectIds !== null && !projectIds.includes(projectId)) {
+        return res.status(403).json({ code: 403, message: '只能查看自己负责项目的加班报表' });
+      }
     }
     if (requestedUserId && !await accessPolicy.canAccessUserData(req.user!, requestedUserId, {
       allPermissions: ['report:view:all'],
@@ -299,27 +339,31 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
 
     let groupIds = groupId ? await accessPolicy.getGroupAndDescendantIds([groupId]) : undefined;
     let departmentIds: number[] | undefined;
+    let projectIds: number[] | undefined;
     let matchAnyScope = false;
-    let hasAllOvertimeScope = accessPolicy.isAdmin(req.user!) || await accessPolicy.hasPermission(req.user!, 'report:view:all');
-    if (!departmentId && !groupId && !requestedUserId && !accessPolicy.isAdmin(req.user!)) {
-      const [accessibleDepartmentIds, accessibleGroupIds] = await Promise.all([
+    let hasAllOvertimeScope = await accessPolicy.hasUnrestrictedPermission(req.user!, 'report:view:all');
+    if (!departmentId && !groupId && !projectId && !requestedUserId && !accessPolicy.isAdmin(req.user!)) {
+      const [accessibleDepartmentIds, accessibleGroupIds, accessibleProjectIds] = await Promise.all([
         accessPolicy.getAccessibleDepartmentIds(req.user!, ['report:view:overtime']),
         accessPolicy.getAccessibleGroupIds(req.user!, ['report:view:overtime']),
+        accessPolicy.getAccessibleProjectIds(req.user!, ['report:view:overtime']),
       ]);
-      if (accessibleDepartmentIds === null || accessibleGroupIds === null || hasAllOvertimeScope) {
+      if (accessibleDepartmentIds === null || accessibleGroupIds === null || accessibleProjectIds === null || hasAllOvertimeScope) {
         hasAllOvertimeScope = true;
         departmentIds = undefined;
         groupIds = undefined;
-      } else if (accessibleDepartmentIds.length === 0 && accessibleGroupIds.length === 0) {
+        projectIds = undefined;
+      } else if (accessibleDepartmentIds.length === 0 && accessibleGroupIds.length === 0 && accessibleProjectIds.length === 0) {
         // 有报表码但无任何可见范围（scope 仅 project/self 等），无数据可见，直接返回空
-        return res.json({ code: 0, data: { totalDays: 0, byType: {}, records: [] } });
+        return res.json({ code: 0, data: { totalDays: 0, byType: {}, byUser: {}, byGroup: {}, records: [] } });
       } else {
         departmentIds = accessibleDepartmentIds.length ? accessibleDepartmentIds : undefined;
         groupIds = accessibleGroupIds.length ? accessibleGroupIds : undefined;
-        matchAnyScope = !!departmentIds?.length && !!groupIds?.length;
+        projectIds = accessibleProjectIds.length ? accessibleProjectIds : undefined;
+        matchAnyScope = [departmentIds, groupIds, projectIds].filter((ids) => ids?.length).length > 1;
       }
     }
-    const userId = departmentId || groupId || groupIds?.length || departmentIds?.length || hasAllOvertimeScope
+    const userId = departmentId || groupId || projectId || groupIds?.length || departmentIds?.length || projectIds?.length || hasAllOvertimeScope
       ? requestedUserId
       : (requestedUserId ?? req.user!.id);
     const data = await reportService.getOvertimeReport({
@@ -327,10 +371,13 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
       departmentIds,
       groupId,
       groupIds,
+      projectId,
+      projectIds,
       userId,
       startDate,
       endDate,
       matchAnyScope,
+      allowAll: hasAllOvertimeScope,
     });
     res.json({ code: 0, data });
   } catch (error) {
@@ -340,7 +387,13 @@ router.get('/overtime', requirePermission('report:view:overtime'), async (req: A
 
 router.get('/dashboard', async (req: AuthRequest, res, next) => {
   try {
-    const data = await reportService.getDashboardData(req.user!.id);
+    const [timesheet, overtime, approvals, weeklyReport] = await Promise.all([
+      accessPolicy.hasPermission(req.user!, 'timesheet:view:self'),
+      accessPolicy.hasPermission(req.user!, 'overtime:view:self'),
+      accessPolicy.hasPermission(req.user!, 'approval:view:todo'),
+      accessPolicy.hasPermission(req.user!, 'weekly_report:view:self'),
+    ]);
+    const data = await reportService.getDashboardData(req.user!.id, { timesheet, overtime, approvals, weeklyReport });
     res.json({ code: 0, data });
   } catch (error) {
     next(error);
@@ -349,11 +402,14 @@ router.get('/dashboard', async (req: AuthRequest, res, next) => {
 
 router.get('/export/personal', requireAllPermissions('report:view:self', 'report:export'), async (req: AuthRequest, res, next) => {
   try {
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
     const userId = firstQueryValue(req.query.userId)
       ? parsePositiveInt(firstQueryValue(req.query.userId), 'userId')
       : req.user!.id;
+
+    if (!await canExportScope(req.user!)) {
+      return res.status(403).json({ code: 403, message: '导出权限不包含个人报表范围' });
+    }
 
     if (!await accessPolicy.canAccessUserData(req.user!, userId, {
       allPermissions: ['report:view:all'],
@@ -404,14 +460,16 @@ router.get('/export/department', requireAllPermissions('report:view:department',
   try {
     const departmentId = parsePositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (!await accessPolicy.canAccessDepartment(req.user!, departmentId)) {
       return res.status(403).json({ code: 403, message: '只能导出自己负责部门的报表' });
     }
     if (groupId && !await accessPolicy.isGroupInDepartment(groupId, departmentId)) {
       return res.status(400).json({ code: 400, message: '组别不属于当前部门' });
+    }
+    if (!await canExportScope(req.user!, { departmentId, groupId })) {
+      return res.status(403).json({ code: 403, message: '导出权限不包含当前部门或组别范围' });
     }
 
     const groupIds = groupId ? await accessPolicy.getGroupAndDescendantIds([groupId]) : undefined;
@@ -457,11 +515,13 @@ router.get('/export/department', requireAllPermissions('report:view:department',
 router.get('/export/group', requireAllPermissions('report:view:group', 'report:export'), async (req: AuthRequest, res, next) => {
   try {
     const groupId = parsePositiveInt(firstQueryValue(req.query.groupId), 'groupId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (!await accessPolicy.canAccessGroup(req.user!, groupId, { allowDepartmentLeader: false })) {
       return res.status(403).json({ code: 403, message: '只能导出自己负责组别的报表' });
+    }
+    if (!await canExportScope(req.user!, { groupId })) {
+      return res.status(403).json({ code: 403, message: '导出权限不包含当前组别范围' });
     }
 
     const groupIds = await accessPolicy.getGroupAndDescendantIds([groupId]);
@@ -506,11 +566,13 @@ router.get('/export/project', requireAllPermissions('report:view:project', 'repo
     const projectId = parsePositiveInt(firstQueryValue(req.query.projectId), 'projectId');
     const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (!await accessPolicy.canAccessProjectReport(req.user!, projectId)) {
       return res.status(403).json({ code: 403, message: '只能导出自己负责项目的报表' });
+    }
+    if (!await canExportScope(req.user!, { projectId, departmentId, groupId })) {
+      return res.status(403).json({ code: 403, message: '导出权限不包含当前项目或筛选范围' });
     }
 
     const { reportFilters } = await getProjectScopedFilters(projectId, departmentId, groupId);
@@ -554,9 +616,9 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
   try {
     const departmentId = parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
+    const projectId = parseOptionalPositiveInt(firstQueryValue(req.query.projectId), 'projectId');
     const requestedUserId = parseOptionalPositiveInt(firstQueryValue(req.query.userId), 'userId');
-    const startDate = parseDateString(firstQueryValue(req.query.startDate), 'startDate');
-    const endDate = parseDateString(firstQueryValue(req.query.endDate), 'endDate');
+    const { startDate, endDate } = parseReportDateRange(req.query);
 
     if (departmentId && !await accessPolicy.canAccessDepartment(req.user!, departmentId)) {
       return res.status(403).json({ code: 403, message: '只能导出自己负责部门的加班报表' });
@@ -564,25 +626,57 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
     if (groupId && !await accessPolicy.canAccessGroup(req.user!, groupId)) {
       return res.status(403).json({ code: 403, message: '只能导出自己负责组别的加班报表' });
     }
+    if (departmentId && groupId && !await accessPolicy.isGroupInDepartment(groupId, departmentId)) {
+      return res.status(400).json({ code: 400, message: '组别不属于当前部门' });
+    }
+    if (projectId) {
+      const accessibleProjectIds = await accessPolicy.getAccessibleProjectIds(req.user!, ['report:view:overtime']);
+      if (accessibleProjectIds !== null && !accessibleProjectIds.includes(projectId)) {
+        return res.status(403).json({ code: 403, message: '只能导出自己负责项目的加班报表' });
+      }
+    }
+    if (requestedUserId && !await accessPolicy.canAccessUserData(req.user!, requestedUserId, {
+      allPermissions: ['report:view:all'],
+      departmentPermissions: ['report:view:overtime'],
+      groupPermissions: ['report:view:overtime'],
+    })) {
+      return res.status(403).json({ code: 403, message: '只能导出自己或负责范围内成员的加班报表' });
+    }
+    if (!await canExportScope(req.user!, { departmentId, groupId, projectId })) {
+      return res.status(403).json({ code: 403, message: '导出权限不包含当前加班报表范围' });
+    }
 
     let groupIds = groupId ? await accessPolicy.getGroupAndDescendantIds([groupId]) : undefined;
     let departmentIds: number[] | undefined;
-    const hasAllOvertimeScope = accessPolicy.isAdmin(req.user!) || await accessPolicy.hasPermission(req.user!, 'report:view:all');
-    if (!departmentId && !groupId && !requestedUserId && !accessPolicy.isAdmin(req.user!)) {
-      const [accessibleDepartmentIds, accessibleGroupIds] = await Promise.all([
+    let projectIds: number[] | undefined;
+    let hasAllOvertimeScope = await accessPolicy.hasUnrestrictedPermission(req.user!, 'report:view:all');
+    let hasNoVisibleScope = false;
+    if (!departmentId && !groupId && !projectId && !requestedUserId && !accessPolicy.isAdmin(req.user!)) {
+      const [accessibleDepartmentIds, accessibleGroupIds, accessibleProjectIds] = await Promise.all([
         accessPolicy.getAccessibleDepartmentIds(req.user!, ['report:view:overtime']),
         accessPolicy.getAccessibleGroupIds(req.user!, ['report:view:overtime']),
+        accessPolicy.getAccessibleProjectIds(req.user!, ['report:view:overtime']),
       ]);
-      departmentIds = accessibleDepartmentIds?.length ? accessibleDepartmentIds : undefined;
-      groupIds = accessibleGroupIds?.length ? accessibleGroupIds : (groupIds ?? undefined);
+      if (accessibleDepartmentIds === null || accessibleGroupIds === null || accessibleProjectIds === null || hasAllOvertimeScope) {
+        hasAllOvertimeScope = true;
+      } else if (accessibleDepartmentIds.length === 0 && accessibleGroupIds.length === 0 && accessibleProjectIds.length === 0) {
+        hasNoVisibleScope = true;
+      } else {
+        departmentIds = accessibleDepartmentIds.length ? accessibleDepartmentIds : undefined;
+        groupIds = accessibleGroupIds.length ? accessibleGroupIds : undefined;
+        projectIds = accessibleProjectIds.length ? accessibleProjectIds : undefined;
+      }
     }
-    const userId = departmentId || groupId || groupIds?.length || departmentIds?.length || hasAllOvertimeScope
+    const userId = departmentId || groupId || projectId || groupIds?.length || departmentIds?.length || projectIds?.length || hasAllOvertimeScope
       ? requestedUserId
       : (requestedUserId ?? req.user!.id);
-    const data = await reportService.getOvertimeReport({
-      departmentId, departmentIds, groupId, groupIds, userId, startDate, endDate,
-      matchAnyScope: !!departmentIds?.length && !!groupIds?.length,
-    });
+    const data = hasNoVisibleScope
+      ? { totalDays: 0, byType: {}, byUser: {}, byGroup: {}, records: [] }
+      : await reportService.getOvertimeReport({
+        departmentId, departmentIds, groupId, groupIds, projectId, projectIds, userId, startDate, endDate,
+        matchAnyScope: [departmentIds, groupIds, projectIds].filter((ids) => ids?.length).length > 1,
+        allowAll: hasAllOvertimeScope,
+      });
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('加班统计报表');
 

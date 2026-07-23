@@ -24,6 +24,8 @@ export interface UserInfo {
 export interface LoginResult {
   token: string;
   user: UserInfo;
+  /** OIDC 登录时由服务端签名 state 恢复的站内跳转目标；密码登录不返回。 */
+  redirect?: string;
 }
 
 // ==================== OIDC / 第三方登录 ====================
@@ -42,6 +44,8 @@ export interface OidcBinding {
   provider: string;
   providerLabel: string;
   externalUsername?: string | null;
+  /** 是否为系统自动维护、不可自助解绑的主身份源 */
+  jit?: boolean;
   boundAt: string;
 }
 
@@ -288,6 +292,8 @@ export interface DashboardData {
   overtimeDays: number;
   pendingCount: number;
   trend: { date: string; days: number }[];
+  hasTimesheetDrafts: boolean;
+  weeklyReportStatus: WeeklyReport['status'] | null;
 }
 
 export interface PersonalReport {
@@ -335,6 +341,13 @@ export interface ReportScope {
   departments: Department[];
   groups: Group[];
   projects: Project[];
+  overtimeProjects?: Pick<Project, 'id' | 'name' | 'code' | 'status'>[];
+  exportScope?: {
+    unrestricted: boolean;
+    departmentIds: number[];
+    groupIds: number[];
+    projectIds: number[];
+  };
 }
 
 export interface OvertimeReport {

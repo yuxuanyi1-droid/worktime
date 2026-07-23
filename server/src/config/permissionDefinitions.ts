@@ -12,7 +12,7 @@ export type PermissionDefinition = {
 };
 
 // 权限推导规则变更时递增，使按旧规则展开的登录缓存自动失效。
-export const PERMISSION_MODEL_VERSION = 2;
+export const PERMISSION_MODEL_VERSION = 3;
 
 const selfScopes = ['self'];
 const managedScopes = ['group', 'department', 'project', 'global'];
@@ -69,17 +69,17 @@ export const permissionDefinitions: PermissionDefinition[] = [
   { code: 'project:assign_se', name: '项目管理-维护负责项目的模块SE', requestName: '项目管理-维护指定项目的模块SE', module: 'project', action: 'assign_se', grantable: true, scopeTypes: ['project'] },
 
   { code: 'system:access', name: '系统管理-显示入口', description: '控制系统管理菜单和页面入口，具体管理模块需单独授予。', module: 'system', action: 'access' },
-  { code: 'system:user:manage', name: '系统管理-用户管理', module: 'system', action: 'user:manage' },
-  { code: 'system:role:manage', name: '系统管理-角色管理', module: 'system', action: 'role:manage' },
-  { code: 'system:permission:manage', name: '系统管理-权限管理', module: 'system', action: 'permission:manage' },
-  { code: 'system:org:manage', name: '系统管理-组织管理', module: 'system', action: 'org:manage' },
-  { code: 'system:approval_flow:manage', name: '系统管理-审批流管理', module: 'system', action: 'approval_flow:manage' },
-  { code: 'system:announcement:view', name: '系统管理-查看公告管理', module: 'system', action: 'announcement:view' },
-  { code: 'system:announcement:create', name: '系统管理-发布公告', module: 'system', action: 'announcement:create' },
-  { code: 'system:announcement:update', name: '系统管理-编辑公告', module: 'system', action: 'announcement:update' },
-  { code: 'system:announcement:delete', name: '系统管理-删除公告', module: 'system', action: 'announcement:delete' },
-  { code: 'system:audit:view', name: '系统管理-审计日志查看', module: 'system', action: 'audit:view' },
-  { code: 'system:settings:manage', name: '系统管理-系统设置', module: 'system', action: 'settings:manage' },
+  { code: 'system:user:manage', name: '系统管理-用户管理', description: '查看用户目录，并创建、编辑、禁用、删除账号以及重置密码。', module: 'system', action: 'user:manage' },
+  { code: 'system:role:manage', name: '系统管理-角色管理', description: '创建和维护自定义角色，并从现有权限目录为角色分配权限。', module: 'system', action: 'role:manage' },
+  { code: 'system:permission:manage', name: '系统管理-权限目录管理', description: '查看权限的实际控制说明，并将数据库目录与当前代码定义同步；不能自定义新的控制点。', module: 'system', action: 'permission:manage' },
+  { code: 'system:org:manage', name: '系统管理-组织管理', description: '维护部门、分组、层级关系和负责人。', module: 'system', action: 'org:manage' },
+  { code: 'system:approval_flow:manage', name: '系统管理-审批流管理', description: '创建、编辑、启停和删除工时、加班、周报及权限申请的审批流程。', module: 'system', action: 'approval_flow:manage' },
+  { code: 'system:announcement:view', name: '系统管理-查看公告管理', description: '查看全部公告及其当前范围内的已读统计，不包含发布、编辑或删除能力。', module: 'system', action: 'announcement:view' },
+  { code: 'system:announcement:create', name: '系统管理-发布公告', description: '向选定范围发布站内公告，并尝试同步发送 TT 通知。', module: 'system', action: 'announcement:create' },
+  { code: 'system:announcement:update', name: '系统管理-编辑公告', description: '编辑已发布公告及其可见范围；编辑不会再次发送 TT。', module: 'system', action: 'announcement:update' },
+  { code: 'system:announcement:delete', name: '系统管理-删除公告', description: '删除公告及其全部已读记录。', module: 'system', action: 'announcement:delete' },
+  { code: 'system:audit:view', name: '系统管理-审计日志查看', description: '只读查询关键操作审计记录及详情，不提供编辑或删除能力。', module: 'system', action: 'audit:view' },
+  { code: 'system:settings:manage', name: '系统管理-系统设置', description: '维护系统名称、工时填报规则、历史锁定日期和 TT 定时提醒。', module: 'system', action: 'settings:manage' },
 
   { code: 'permission_request:access', name: '权限申请-显示入口', description: '控制权限申请菜单和页面入口，提交、查看和授权操作需单独授予。', module: 'permission_request', action: 'access' },
   { code: 'permission_request:create', name: '权限申请-提交申请', module: 'permission_request', action: 'create' },

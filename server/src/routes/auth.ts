@@ -5,7 +5,7 @@ import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { getRedis, isRedisReady } from '../config/redis';
 import { isBusinessError } from '../utils/errors';
-import { parseString } from '../utils/validation';
+import { parseOptionalEmail, parseOptionalPhone, parseString } from '../utils/validation';
 
 const router = Router();
 const authService = new AuthService();
@@ -113,8 +113,8 @@ router.put('/profile', authMiddleware, async (req: AuthRequest, res, next) => {
     const body = req.body as Record<string, unknown>;
     const data = await authService.updateProfile(req.user!.id, {
       realName: body.realName === undefined ? undefined : parseString(body.realName, '姓名', { required: true, max: 50 }),
-      email: parseString(body.email, '邮箱', { max: 100 }),
-      phone: parseString(body.phone, '手机', { max: 20 }),
+      email: parseOptionalEmail(body.email, '邮箱'),
+      phone: parseOptionalPhone(body.phone, '手机号'),
     });
     res.json({ code: 0, data, message: '更新成功' });
   } catch (error) {

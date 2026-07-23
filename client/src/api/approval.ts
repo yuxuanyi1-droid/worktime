@@ -70,10 +70,19 @@ export interface ApprovalDetail {
     approverIds: number[];
     approverNames: string[];
     approverName: string | null;
-    status: 'pending' | 'current' | 'approved' | 'rejected';
+    status: 'pending' | 'current' | 'approved' | 'rejected' | 'skipped' | 'withdrawn';
     action: string | null;
     comment: string | null;
     approvedAt: string | null;
+    requireAllApprovers?: boolean;
+    approverStatuses?: {
+      id: number;
+      name: string;
+      status: 'waiting' | 'pending' | 'approved' | 'rejected' | 'skipped' | 'withdrawn';
+      action: string | null;
+      comment: string | null;
+      actedAt: string | null;
+    }[];
   }[];
   records: {
     stepOrder: number;

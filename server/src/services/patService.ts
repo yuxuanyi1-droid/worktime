@@ -3,6 +3,8 @@ import { AppDataSource } from '../config/database';
 import { PersonalAccessToken } from '../entities/PersonalAccessToken';
 import { BusinessError } from '../utils/errors';
 import { PAT_PREFIX, hashPat } from '../middleware/auth';
+import { EntityManager } from 'typeorm';
+import { User } from '../entities/User';
 
 /** PAT 明文随机部分的长度（hex 字符数），与 prefix 展示长度无关 */
 const PAT_RANDOM_LEN = 32;
@@ -17,7 +19,11 @@ const PREFIX_DISPLAY_LEN = 12;
  * PAT 权限默认继承用户全部权限（scope 字段预留收窄），鉴权复用 authMiddleware + 现有权限链路。
  */
 export class PatService {
-  private patRepo = AppDataSource.getRepository(PersonalAccessToken);
+  constructor(private manager?: EntityManager) {}
+
+  private get source() { return this.manager ?? AppDataSource; }
+  private get patRepo() { return this.source.getRepository(PersonalAccessToken); }
+  private get userRepo() { return this.source.getRepository(User); }
 
   /** 生成明文令牌：wpat_ + 32 位 hex */
   private generatePlainToken(): string {
@@ -64,6 +70,25 @@ export class PatService {
     if (expiresAt && expiresAt.getTime() <= Date.now()) {
       throw new BusinessError('过期时间必须晚于当前时间');
     }
+
+    // 每用户令牌上限需要“计数+写入”原子化；通过用户行锁串行化同一用户的并发创建。
+    if (!this.manager?.queryRunner?.isTransactionActive) {
+      return (this.manager?.connection ?? AppDataSource).transaction((manager) => (
+        new PatService(manager).createMine(userId, trimmed, expiresAt)
+      ));
+    }
+
+    const user = await this.userRepo.createQueryBuilder('user')
+      .setLock('pessimistic_write')
+      .where('user.id = :userId', { userId })
+      .andWhere('user.status = :status', { status: 1 })
+      .getOne();
+    if (!user) throw new BusinessError('用户不存在或已禁用', 401);
+    const activeCount = await this.patRepo.createQueryBuilder('pat')
+      .where('pat.userId = :userId', { userId })
+      .andWhere('(pat.expiresAt IS NULL OR pat.expiresAt > :now)', { now: new Date() })
+      .getCount();
+    if (activeCount >= 20) throw new BusinessError('个人访问令牌最多保留 20 个，请先删除不再使用的令牌');
 
     const plain = this.generatePlainToken();
     const pat = this.patRepo.create({

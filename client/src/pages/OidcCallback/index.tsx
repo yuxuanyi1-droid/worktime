@@ -3,6 +3,13 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Spin, Result, Button, message } from 'antd';
 import { authApi } from '../../api/auth';
 import { useAuthStore } from '../../stores/authStore';
+import { safeInternalRedirect } from '../../utils/navigation';
+import {
+  getRedirectUriBase,
+  setOidcIntent,
+  takeOidcIntent,
+  type OidcIntent,
+} from '../../utils/oidcIntent';
 
 /**
  * OIDC 回调页：IdP 认证完成后回跳到这里（/oidc/callback?code=xxx&state=xxx）。
@@ -12,25 +19,15 @@ import { useAuthStore } from '../../stores/authStore';
  *
  * state 是后端 HMAC 签名的完整 token，前端只透传不解析。
  */
-const SS_KEY = 'oidc_pending_intent';
-
-export function setOidcIntent(intent: { mode: 'login' | 'bind'; provider: string; redirect?: string }) {
-  sessionStorage.setItem(SS_KEY, JSON.stringify(intent));
-}
-
-/**
- * 计算前端自身的基地址（origin + __BASE_PATH__），作为 OAuth redirect_uri 的根。
- * dev 下前端在 5174、后端在 3001，必须传前端地址，否则 IdP 回跳到后端端口导致 SPA 加载不到。
- */
-export function getRedirectUriBase(): string {
-  return `${window.location.origin}${__BASE_PATH__ || ''}`;
-}
+// 保留页面原有导出，避免现有调用方在迁移到独立工具模块期间失效。
+export { getRedirectUriBase, setOidcIntent };
 
 export default function OidcCallbackPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { setAuth } = useAuthStore();
   const [error, setError] = useState<string | null>(null);
+  const [recovery, setRecovery] = useState<Pick<OidcIntent, 'mode' | 'redirect'>>({ mode: 'login' });
   const ranRef = useRef(false);
 
   useEffect(() => {
@@ -41,6 +38,18 @@ export default function OidcCallbackPage() {
   }, []);
 
   async function handleCallback() {
+    const intent = takeOidcIntent();
+    if (intent) setRecovery({ mode: intent.mode, redirect: intent.redirect });
+
+    const providerError = searchParams.get('error');
+    if (providerError) {
+      const description = searchParams.get('error_description')?.trim().slice(0, 300);
+      setError(providerError === 'access_denied'
+        ? '你已取消或拒绝第三方授权，请重新发起'
+        : `身份源返回错误：${description || providerError}`);
+      return;
+    }
+
     const code = searchParams.get('code');
     const state = searchParams.get('state');
     if (!code || !state) {
@@ -48,17 +57,6 @@ export default function OidcCallbackPage() {
       return;
     }
 
-    // 从 sessionStorage 取发起方记录的意图
-    let intent: { mode: 'login' | 'bind'; provider: string; redirect?: string } | null = null;
-    try {
-      const raw = sessionStorage.getItem(SS_KEY);
-      if (raw) {
-        intent = JSON.parse(raw);
-        sessionStorage.removeItem(SS_KEY);
-      }
-    } catch {
-      // ignore
-    }
     if (!intent) {
       setError('登录意图已丢失，请重新发起');
       return;
@@ -76,15 +74,18 @@ export default function OidcCallbackPage() {
       }
 
       // 登录模式：响应里有 token + user
-      if (intent.mode === 'login' && 'token' in res.data) {
+      if ('token' in res.data && typeof res.data.token === 'string') {
         setAuth(res.data.token, res.data.user);
         message.success('登录成功');
-        navigate(intent.redirect || '/');
+        const serverRedirect = 'redirect' in res.data && typeof res.data.redirect === 'string'
+          ? res.data.redirect
+          : intent.redirect;
+        navigate(safeInternalRedirect(serverRedirect));
         return;
       }
 
       // 绑定模式：响应里有 provider/providerLabel
-      if (intent.mode === 'bind') {
+      if ('provider' in res.data) {
         message.success(`${(res.data as any).providerLabel || '第三方账号'} 绑定成功`);
         navigate('/profile');
         return;
@@ -103,11 +104,17 @@ export default function OidcCallbackPage() {
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F8F4ED' }}>
         <Result
           status="warning"
-          title="第三方登录失败"
+          title={recovery.mode === 'bind' ? '第三方账号绑定失败' : '第三方登录失败'}
           subTitle={error}
           extra={[
-            <Button key="login" type="primary" onClick={() => navigate('/login')}>
-              返回登录
+            <Button
+              key="retry"
+              type="primary"
+              onClick={() => navigate(recovery.mode === 'bind'
+                ? '/profile'
+                : `/login?redirect=${encodeURIComponent(safeInternalRedirect(recovery.redirect))}`)}
+            >
+              {recovery.mode === 'bind' ? '返回个人信息重新绑定' : '返回登录重新发起'}
             </Button>,
             <Button key="home" onClick={() => navigate('/')}>
               返回首页

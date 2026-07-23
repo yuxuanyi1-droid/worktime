@@ -112,8 +112,24 @@ export function verifyState(token: string): StatePayload {
   } catch {
     throw new BusinessError('SSO state 解析失败', 400);
   }
-  if (typeof payload.exp !== 'number' || payload.exp < Date.now()) {
+  if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp <= Date.now()) {
     throw new BusinessError('SSO state 已过期，请重新发起登录', 400);
+  }
+  if (
+    !['login', 'bind'].includes(payload.mode) ||
+    typeof payload.provider !== 'string' ||
+    !/^[A-Za-z0-9._-]{1,50}$/.test(payload.provider)
+  ) {
+    throw new BusinessError('SSO state 内容无效', 400);
+  }
+  if (payload.mode === 'bind' && (!Number.isInteger(payload.userId) || Number(payload.userId) <= 0)) {
+    throw new BusinessError('SSO 绑定 state 缺少有效用户标识', 400);
+  }
+  if (payload.nonce !== undefined && (typeof payload.nonce !== 'string' || payload.nonce.length > 500)) {
+    throw new BusinessError('SSO state nonce 无效', 400);
+  }
+  if (payload.redirect !== undefined && (typeof payload.redirect !== 'string' || payload.redirect.length > 500)) {
+    throw new BusinessError('SSO state redirect 无效', 400);
   }
   return payload;
 }

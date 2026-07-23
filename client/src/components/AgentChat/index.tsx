@@ -53,6 +53,7 @@ SyntaxHighlighter.registerLanguage('css', css);
 SyntaxHighlighter.registerLanguage('python', python);
 SyntaxHighlighter.registerLanguage('py', python);
 import { useChat } from './useChat';
+import { agentApi } from '../../api/agent';
 
 /**
  * 全局悬浮 AI 助手。
@@ -60,6 +61,7 @@ import { useChat } from './useChat';
  * 走当前用户 JWT session 鉴权（不走 PAT），PAT 仅用于 skill 内部 curl。
  */
 export default function AgentChat() {
+  const [available, setAvailable] = useState(false);
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
   const [showLatest, setShowLatest] = useState(false);
@@ -85,6 +87,14 @@ export default function AgentChat() {
   } = useChat();
 
   const currentTitle = sessions.find((session) => session.id === currentSessionId)?.title || '新对话';
+
+  useEffect(() => {
+    let active = true;
+    agentApi.getStatus()
+      .then((response) => { if (active) setAvailable(response.data.enabled); })
+      .catch(() => { if (active) setAvailable(false); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -161,6 +171,8 @@ export default function AgentChat() {
 
   const suggestions = ['我这周填了多少工时', '我有几条待审批', '统计一下本月加班'];
 
+  if (!available) return null;
+
   return (
     <>
       {!open && (
@@ -234,7 +246,7 @@ export default function AgentChat() {
                     <SessionList
                       sessions={sessions}
                       currentSessionId={currentSessionId}
-                      disabled={sending}
+                      disabled={sending || loadingSession}
                       onSwitch={async (sessionId) => {
                         await switchSession(sessionId);
                         setHistoryOpen(false);
@@ -397,6 +409,7 @@ export default function AgentChat() {
                 <Input.TextArea
                   ref={inputRef}
                   value={input}
+                  maxLength={10000}
                   onChange={(event) => setInput(event.target.value)}
                   onPressEnter={(event) => {
                     if (!event.shiftKey && !(event.nativeEvent as any).isComposing) {
@@ -456,6 +469,9 @@ export default function AgentChat() {
                     </button>
                   </Space>
                 </div>
+              </div>
+              <div style={{ marginTop: 6, textAlign: 'center', fontSize: 10.5, color: '#A39A8B' }}>
+                AI 仅执行只读查询，结果请以系统记录为准
               </div>
             </footer>
           </aside>
@@ -736,11 +752,11 @@ function MessageBubble({
       {showActions && (
         <div style={{ display: 'flex', gap: 4, marginTop: 3 }}>
           <Tooltip title="复制">
-            <Button type="text" size="small" icon={<CopyOutlined />} onClick={handleCopy} style={{ color: '#9A9080' }} />
+            <Button aria-label="复制回答" type="text" size="small" icon={<CopyOutlined />} onClick={handleCopy} style={{ color: '#9A9080' }} />
           </Tooltip>
           {canRegenerate && (
             <Tooltip title="重新生成">
-              <Button type="text" size="small" icon={<ReloadOutlined />} onClick={onRegenerate} style={{ color: '#9A9080' }} />
+              <Button aria-label="重新生成回答" type="text" size="small" icon={<ReloadOutlined />} onClick={onRegenerate} style={{ color: '#9A9080' }} />
             </Tooltip>
           )}
         </div>
@@ -807,7 +823,11 @@ function ProcessGroup({
                   fontFamily: part.type === 'tool' ? 'Consolas, Monaco, monospace' : 'inherit',
                 }}
               >
-                {part.type === 'tool' ? part.detail || '正在等待查询结果…' : part.text || '正在生成分析内容…'}
+                {part.type === 'tool'
+                  ? part.detail || '正在等待查询结果…'
+                  : part.type === 'thinking'
+                    ? 'AI 已完成内部分析，原始推理内容不会展示。'
+                    : part.text || '正在整理结果…'}
               </div>
             </CollapsibleBar>
           );
@@ -949,6 +969,27 @@ function CodeBlock({ language, children }: { language: string; children: string 
  * 区分行内代码（inline）与代码块。
  */
 const markdownComponents: Components = {
+  // 禁止模型输出触发外部图片请求，避免第三方跟踪像素或带敏感查询串的 URL。
+  img({ alt }) {
+    return <span style={{ color: '#7A7060' }}>[图片已隐藏{alt ? `：${alt}` : ''}]</span>;
+  },
+  // 仅允许站内相对链接和 HTTP(S) 链接；外部链接在新窗口安全打开。
+  a({ href, children, node, ...rest }) {
+    const value = typeof href === 'string' ? href.trim() : '';
+    const isRelative = value.startsWith('/') && !value.startsWith('//');
+    const isHttp = /^https?:\/\//i.test(value);
+    if (!isRelative && !isHttp) return <span>{children}</span>;
+    return (
+      <a
+        {...rest}
+        href={value}
+        target={isHttp ? '_blank' : undefined}
+        rel={isHttp ? 'noopener noreferrer' : undefined}
+      >
+        {children}
+      </a>
+    );
+  },
   // code：react-markdown v10 中，行内 code 的 props 有 inline 标志
   code(props) {
     const { children, className, node, ...rest } = props;

@@ -95,6 +95,7 @@ export default function TimesheetPage() {
   // 之前用 originalStatus==='draft' 派生判断会误报（已保存草稿也恒为 draft）且漏报（新行 undefined）。
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [weekLoading, setWeekLoading] = useState(false);
   const [editing, setEditing] = useState(false); // 编辑模式：控制已提交/已审批行是否可编辑
   const rowSnapshotRef = useRef<Map<string, WeekRow>>(new Map()); // 编辑模式开始时的行快照
   const weekLoadReqId = useRef(0); // 切周请求竞态守卫：只接受最新一次的响应
@@ -110,6 +111,7 @@ export default function TimesheetPage() {
   const canDelete = hasPermission('timesheet:delete:self');
   const canSubmit = hasPermission('timesheet:submit:self');
   const canWithdraw = hasPermission('approval:withdraw:self');
+  const canFill = canCreate && canViewSelf;
 
   // 判断当前周是否有已提交/已审批的行
   const hasSubmittedRows = rows.some(r => r.originalStatus && r.originalStatus !== 'draft');
@@ -184,9 +186,9 @@ export default function TimesheetPage() {
       setDirty(false);
       return;
     }
-    if (projects.length === 0) return;
     // 竞态守卫：快速切周时只接受最后一次请求的响应，避免旧响应覆盖新数据
     const reqId = ++weekLoadReqId.current;
+    setWeekLoading(true);
     try {
       // 加载该周所有状态的工时记录
       const res = await timesheetApi.getMy({
@@ -236,9 +238,12 @@ export default function TimesheetPage() {
         setDirty(false);
       }
     } catch (error) {
+      if (reqId !== weekLoadReqId.current) return;
       message.error(getErrorMessage(error, '本周工时加载失败'));
       setRows([newRow()]);
       setDirty(false);
+    } finally {
+      if (reqId === weekLoadReqId.current) setWeekLoading(false);
     }
   };
 
@@ -438,6 +443,7 @@ export default function TimesheetPage() {
   /** 保存草稿 / 修改工时 */
   const handleSaveDraft = async () => {
     if (editing) {
+      if (!validateWeekTotal(collectItems())) return;
       // 编辑模式下：只保存有变更的行（对比快照）
       const submittedRows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[] = [];
       for (const row of rows) {
@@ -447,7 +453,10 @@ export default function TimesheetPage() {
         const entries = weekDates
           .filter(d => row.days[d] && row.days[d] > 0)
           .map(d => ({ date: d, days: row.days[d] }));
-        if (entries.length === 0) continue;
+        if (entries.length === 0) {
+          message.warning('修改后的项目至少需要保留一天有效工时，不能直接清空整行');
+          return;
+        }
         submittedRows.push({
           projectId: row.projectId,
           description: row.description || '',
@@ -504,18 +513,10 @@ export default function TimesheetPage() {
 
     setSaving(true);
     try {
-      const existingRes = await timesheetApi.getMy({
-        startDate: weekDates[0], endDate: weekDates[6], status: 'draft', pageSize: 200,
-      });
-      if (existingRes.data?.list) {
-        for (const item of existingRes.data.list) {
-          await timesheetApi.delete(item.id);
-        }
-      }
       const draftItems = draftRows.flatMap(r => r.entries.map(e => ({
         projectId: r.projectId, date: e.date, days: e.days, description: r.description || undefined,
       })));
-      await timesheetApi.batchCreate(draftItems);
+      await timesheetApi.replaceWeekDrafts(weekDates[0], draftItems);
       message.success('草稿已保存');
       setDirty(false);
       loadWeekDrafts();
@@ -755,41 +756,46 @@ export default function TimesheetPage() {
           );
         }
         // 草稿
+        if (!canFill && !canDelete) return '-';
         return (
           <Space>
-            <Button
-              type="link" size="small"
-              onClick={() => setCurrentWeekStart(dayjs(record.weekStart))}
-            >
-              编辑
-            </Button>
-            <Popconfirm
-              title="确定删除该草稿？"
-              onConfirm={async () => {
-                try {
-                  const res = await timesheetApi.getMy({
-                    startDate: record.weekStart,
-                    endDate: record.weekEnd,
-                    status: 'draft',
-                    pageSize: 200,
-                  });
-                  if (res.data?.list) {
-                    for (const item of res.data.list) {
-                      if (item.projectId === record.projectId) {
-                        await timesheetApi.delete(item.id);
+            {canFill && (
+              <Button
+                type="link" size="small"
+                onClick={() => setCurrentWeekStart(dayjs(record.weekStart))}
+              >
+                编辑
+              </Button>
+            )}
+            {canDelete && (
+              <Popconfirm
+                title="确定删除该草稿？"
+                onConfirm={async () => {
+                  try {
+                    const res = await timesheetApi.getMy({
+                      startDate: record.weekStart,
+                      endDate: record.weekEnd,
+                      status: 'draft',
+                      pageSize: 200,
+                    });
+                    if (res.data?.list) {
+                      for (const item of res.data.list) {
+                        if (item.projectId === record.projectId) {
+                          await timesheetApi.delete(item.id);
+                        }
                       }
                     }
+                    message.success('草稿已删除');
+                    loadHistory();
+                    loadWeekDrafts();
+                  } catch (error) {
+                    message.error(getErrorMessage(error, '删除失败'));
                   }
-                  message.success('草稿已删除');
-                  loadHistory();
-                  loadWeekDrafts();
-                } catch (error) {
-                  message.error(getErrorMessage(error, '删除失败'));
-                }
-              }}
-            >
-              <Button type="link" size="small" danger>删除</Button>
-            </Popconfirm>
+                }}
+              >
+                <Button type="link" size="small" danger>删除</Button>
+              </Popconfirm>
+            )}
           </Space>
         );
       },
@@ -799,9 +805,9 @@ export default function TimesheetPage() {
   // ===== 周表格列定义 =====
   const isRowReadonly = (row: WeekRow) => {
     // 编辑模式下所有行可编辑
-    if (editing) return false;
+    if (editing) return !canUpdate;
     // 草稿和新行：可编辑
-    if (!row.originalStatus || row.originalStatus === 'draft') return false;
+    if (!row.originalStatus || row.originalStatus === 'draft') return !canFill;
     // 驳回行：默认可编辑（用户可直接修改后重新提交）
     if (row.originalStatus === 'rejected') return false;
     // 已通过/审批中：只读
@@ -887,6 +893,7 @@ export default function TimesheetPage() {
             value={row.description}
             onChange={(e) => updateRow(row.key, { description: e.target.value })}
             size="small"
+            maxLength={1000}
             autoSize={{ minRows: 1, maxRows: 4 }}
           />
         ),
@@ -896,16 +903,18 @@ export default function TimesheetPage() {
       key: 'action',
       width: 50,
       render: (_: any, row: WeekRow) => {
-        const disabled = rows.length <= 1 || isRowReadonly(row);
-        if (row.originalStatus === 'draft' && !disabled) {
+        const isPersistedSubmitted = !!row.originalStatus && row.originalStatus !== 'draft';
+        const isPersistedDraft = row.originalStatus === 'draft';
+        if (isPersistedDraft && canDelete) {
           return (
             <Popconfirm title="确定删除该草稿？" onConfirm={() => removeRow(row.key)}>
               <Button type="text" size="small" danger icon={<DeleteOutlined />} />
             </Popconfirm>
           );
         }
+        const disabled = rows.length <= 1 || isRowReadonly(row) || isPersistedSubmitted;
         return (
-          <Tooltip title="删除行">
+          <Tooltip title={isPersistedSubmitted ? '已提交工时不支持整行删除' : '删除行'}>
             <Button
               type="text" size="small" danger icon={<DeleteOutlined />}
               onClick={() => removeRow(row.key)}
@@ -927,15 +936,17 @@ export default function TimesheetPage() {
           <Row justify="space-between" align="middle">
             <Col>
               <Space size="middle">
-                <Button icon={<LeftOutlined />} onClick={prevWeek} size="small" />
+                <Button aria-label="上一周" icon={<LeftOutlined />} onClick={prevWeek} size="small" />
                 <span style={{ fontWeight: 600, fontSize: 15 }}>
                   {currentWeekStart.format('YYYY年M月D日')} — {currentWeekStart.add(6, 'day').format('M月D日')}
                 </span>
-                <Button icon={<RightOutlined />} onClick={nextWeek} size="small" />
+                <Button aria-label="下一周" icon={<RightOutlined />} onClick={nextWeek} size="small" />
                 <Button size="small" onClick={goThisWeek}>本周</Button>
-                <Tooltip title="复制上周工时到当前周">
-                  <Button size="small" icon={<CopyOutlined />} onClick={handleCopyLastWeek}>复制上周</Button>
-                </Tooltip>
+                {canFill && (
+                  <Tooltip title="复制上周工时到当前周">
+                    <Button size="small" icon={<CopyOutlined />} onClick={handleCopyLastWeek}>复制上周</Button>
+                  </Tooltip>
+                )}
               </Space>
             </Col>
             <Col>
@@ -948,29 +959,35 @@ export default function TimesheetPage() {
                         onClick={() => {
                           if (hasPendingRows) {
                             // 有审批中的提交：先撤回本周所有审批中的单子，再进入编辑
-                            const pendingTargetIds = rows
+                            const pendingTargetIds = [...new Set(rows
                               .filter(r => r.originalStatus === 'submitted' && r.targetId)
-                              .map(r => r.targetId!);
+                              .map(r => r.targetId!))];
+                            const editableRows = rows.map(r => ({ ...r, days: { ...r.days } }));
                             Modal.confirm({
                               title: '撤回确认',
                               content: '此操作会撤回本周所有正在审批中的提交，已审批通过的不受影响，确认撤回吗？',
                               okText: '确认撤回',
                               cancelText: '取消',
                               onOk: async () => {
-                                try {
-                                  await Promise.all(
-                                    pendingTargetIds.map(id => approvalApi.withdraw('timesheet', id))
-                                  );
-                                  message.success('已撤回审批中的提交');
-                                  // 快照当前行数据，用于后续判断是否有变更
-                                  const snap = new Map<string, WeekRow>();
-                                  rows.forEach(r => snap.set(r.key, { ...r, days: { ...r.days } }));
-                                  rowSnapshotRef.current = snap;
-                                  await loadWeekDrafts();
-                                  setEditing(true);
-                                } catch (error) {
-                                  message.error(getErrorMessage(error, '撤回失败'));
+                                const results = await Promise.allSettled(
+                                  pendingTargetIds.map(id => approvalApi.withdraw('timesheet', id))
+                                );
+                                const failed = results.filter(result => result.status === 'rejected');
+                                if (failed.length) {
+                                  message.error(failed.length === results.length
+                                    ? '撤回失败，请刷新后重试'
+                                    : '部分审批已撤回、部分失败，已刷新当前周，请确认后重试');
+                                  await Promise.all([loadWeekDrafts(), loadHistory()]);
+                                  return;
                                 }
+                                message.success('已撤回审批中的提交，可以继续修改');
+                                rowSnapshotRef.current = new Map(editableRows.map(r => [r.key, r]));
+                                setRows(editableRows.map(r => r.originalStatus === 'submitted'
+                                  ? { ...r, status: 'withdrawn' }
+                                  : r));
+                                setDirty(false);
+                                setEditing(true);
+                                void loadHistory();
                               },
                             });
                           } else {
@@ -985,7 +1002,7 @@ export default function TimesheetPage() {
                         {hasPendingRows ? '撤回修改' : '修改工时'}
                       </Button>
                     ) : null}
-                    {canCreate && !editing && !hasSubmittedRows && (
+                    {canFill && !editing && !hasSubmittedRows && (
                       <Button
                         icon={<SaveOutlined />}
                         onClick={handleSaveDraft}
@@ -994,9 +1011,14 @@ export default function TimesheetPage() {
                         保存草稿
                       </Button>
                     )}
-                    {canCreate && canSubmit && (
+                    {canFill && canSubmit && !editing && (
                       <Button type="primary" icon={<SendOutlined />} onClick={handleSubmitApproval} loading={saving}>
                         提交审批
+                      </Button>
+                    )}
+                    {editing && canUpdate && (
+                      <Button type="primary" icon={<SaveOutlined />} onClick={handleSaveDraft} loading={saving}>
+                        保存修改并重新提交
                       </Button>
                     )}
                     {editing && (
@@ -1014,15 +1036,17 @@ export default function TimesheetPage() {
       >
         <Table
           rowKey="key"
+          loading={weekLoading}
           columns={weekColumns}
           dataSource={rows}
           pagination={false}
           size="small"
           bordered
+          scroll={{ x: 'max-content' }}
           footer={() => (
             <Row justify="space-between" align="middle">
               <Col>
-                <Button type="dashed" icon={<PlusOutlined />} onClick={addRow}>添加项目行</Button>
+                {canFill && !editing && <Button type="dashed" icon={<PlusOutlined />} onClick={addRow}>添加项目行</Button>}
               </Col>
               <Col>
                 <Space size="large">

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Card, Tabs, Table, Button, Space, Modal, Form, Input, Select, Tag, message,
   Typography, Row, Col, Popconfirm, Switch, InputNumber, Tree, Tooltip, Empty, Radio,
@@ -13,11 +13,17 @@ import {
   SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import { systemApi, UserListItem, SimpleUser, TimesheetReminderConfig } from '../../api/system';
-import { Department, Group, Role, Permission, Project, ProjectSE, ProjectWorkloadAllocation, ApprovalFlow, ApprovalFlowStep, stepTypeMap } from '../../types';
+import { Department, Group, Role, Permission, ApprovalFlow, ApprovalFlowStep, stepTypeMap } from '../../types';
 import { announcementApi, AnnouncementItem, AnnouncementStats } from '../../api/notification';
 import { useAppStore } from '../../stores/appStore';
+import { useAuthStore } from '../../stores/authStore';
 import { usePermission } from '../../hooks/usePermission';
 import { auditApi, AuditLogItem } from '../../api/audit';
+import {
+  DEFAULT_TIMESHEET_REMINDER_CONFIG,
+  parseStoredTimesheetReminderConfig,
+  validateTimesheetReminderConfig,
+} from '../../utils/timesheetReminderConfig';
 
 const { Title, Text } = Typography;
 
@@ -29,7 +35,8 @@ function PermissionGuard({ permission, children }: { permission: string; childre
 const systemTabOptions = [
   { key: 'org', label: '\u7ec4\u7ec7\u67b6\u6784', permission: 'system:org:manage' },
   { key: 'user', label: '\u7528\u6237\u7ba1\u7406', permission: 'system:user:manage' },
-  { key: 'role', label: '\u89d2\u8272\u6743\u9650', permission: 'system:role:manage' },
+  { key: 'role', label: '\u89d2\u8272\u7ba1\u7406', permission: 'system:role:manage' },
+  { key: 'permission', label: '\u6743\u9650\u76ee\u5f55', permission: 'system:permission:manage' },
   { key: 'approval-flow', label: '\u5ba1\u6279\u6d41\u7a0b', permission: 'system:approval_flow:manage' },
   { key: 'announcement', label: '\u516c\u544a\u7ba1\u7406', permission: 'system:announcement:view' },
   { key: 'audit', label: '审计日志', permission: 'system:audit:view' },
@@ -61,6 +68,7 @@ export default function System() {
         {activeTabKey === 'org' && <OrgTab />}
         {activeTabKey === 'user' && <UserTab />}
         {activeTabKey === 'role' && <RoleTab />}
+        {activeTabKey === 'permission' && <PermissionCatalogTab />}
         {activeTabKey === 'approval-flow' && <ApprovalFlowTab />}
         {activeTabKey === 'announcement' && <AnnouncementTab />}
         {activeTabKey === 'audit' && <AuditTab />}
@@ -70,7 +78,7 @@ export default function System() {
   );
 }
 
-// ==================== 组织架构（可设置部门/组负责人，审批流程依赖此字段） ====================
+// ==================== 组织架构（部门/分组 CRUD 与负责人配置） ====================
 function OrgTab() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [groupTree, setGroupTree] = useState<any[]>([]);
@@ -80,27 +88,41 @@ function OrgTab() {
   const [leaderForm] = Form.useForm();
   const [allUsers, setAllUsers] = useState<SimpleUser[]>([]);
   const [saving, setSaving] = useState(false);
+  const [deletingKey, setDeletingKey] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadRequestId = useRef(0);
+  const [orgModal, setOrgModal] = useState<{
+    kind: 'department' | 'group';
+    mode: 'create' | 'edit';
+    id?: number;
+  } | null>(null);
+  const [orgForm] = Form.useForm();
 
   const load = async () => {
-    const [deptRes, usersRes] = await Promise.all([
-      systemApi.getDepartments(),
-      systemApi.getAllUsers(),
-    ]);
-    if (deptRes.data) setDepartments(deptRes.data);
-    if (usersRes.data) setAllUsers(usersRes.data);
-
-    // 根据是否选中部门加载对应分组树
-    if (selectedDeptId) {
-      const treeRes = await systemApi.getGroupTree(selectedDeptId);
+    const requestId = ++loadRequestId.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [deptRes, usersRes, treeRes] = await Promise.all([
+        systemApi.getDepartments(),
+        systemApi.getAllUsers(),
+        systemApi.getGroupTree(selectedDeptId || undefined),
+      ]);
+      if (requestId !== loadRequestId.current) return;
+      if (deptRes.data) setDepartments(deptRes.data);
+      if (usersRes.data) setAllUsers(usersRes.data);
       if (treeRes.data) setGroupTree(treeRes.data);
-    } else {
-      // 未选中部门时加载所有分组
-      const treeRes = await systemApi.getGroupTree();
-      if (treeRes.data) setGroupTree(treeRes.data);
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '组织架构加载失败');
+      }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
     }
   };
 
-  useEffect(() => { load(); }, [selectedDeptId]);
+  useEffect(() => { void load(); }, [selectedDeptId]);
 
   // 打开设置负责人弹窗（e.stopPropagation 防止触发树节点选中）
   const openLeaderModal = (e: any, type: 'group' | 'dept', id: number, name: string, currentLeaderId?: number) => {
@@ -131,6 +153,72 @@ function OrgTab() {
     }
   };
 
+  const flattenGroups = (groups: any[]): any[] => groups.flatMap(group => [
+    group,
+    ...flattenGroups(group.children || []),
+  ]);
+  const allGroups = flattenGroups(groupTree);
+
+  const openOrgModal = (
+    event: { stopPropagation?: () => void } | undefined,
+    kind: 'department' | 'group',
+    mode: 'create' | 'edit',
+    item?: any,
+    defaults?: { departmentId?: number; parentId?: number | null },
+  ) => {
+    event?.stopPropagation?.();
+    setOrgModal({ kind, mode, id: item?.id });
+    orgForm.resetFields();
+    orgForm.setFieldsValue(kind === 'department'
+      ? { name: item?.name, description: item?.description }
+      : {
+        name: item?.name,
+        description: item?.description,
+        departmentId: item?.departmentId ?? defaults?.departmentId,
+        parentId: item?.parentId ?? defaults?.parentId ?? null,
+      });
+  };
+
+  const handleOrgSave = async (values: any) => {
+    if (!orgModal) return;
+    setSaving(true);
+    try {
+      if (orgModal.kind === 'department') {
+        if (orgModal.mode === 'create') await systemApi.createDepartment(values);
+        else await systemApi.updateDepartment(orgModal.id!, values);
+      } else {
+        const payload = {
+          name: values.name,
+          description: values.description,
+          departmentId: values.departmentId,
+          parentId: values.parentId ?? null,
+        };
+        if (orgModal.mode === 'create') await systemApi.createGroup(payload);
+        else await systemApi.updateGroup(orgModal.id!, payload);
+      }
+      message.success(orgModal.mode === 'create' ? '创建成功' : '更新成功');
+      setOrgModal(null);
+      orgForm.resetFields();
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteOrgNode = async (kind: 'department' | 'group', id: number) => {
+    const key = `${kind}:${id}`;
+    setDeletingKey(key);
+    try {
+      if (kind === 'department') await systemApi.deleteDepartment(id);
+      else await systemApi.deleteGroup(id);
+      if (kind === 'department' && selectedDeptId === id) setSelectedDeptId(null);
+      message.success('删除成功');
+      await load();
+    } finally {
+      setDeletingKey(undefined);
+    }
+  };
+
   // 将分组树转为 Ant Design Tree 结构
   const buildTreeData = (groups: any[]): any[] => {
     return groups.map(g => ({
@@ -147,6 +235,25 @@ function OrgTab() {
               onClick={(e) => openLeaderModal(e, 'group', g.id, g.name, g.leader?.id)}>
               设置负责人
             </Button>
+            <Tooltip title="新增子分组">
+              <Button aria-label={`在${g.name}下新增子分组`} type="link" size="small" icon={<PlusOutlined />}
+                style={{ padding: '0 4px', height: 'auto', fontSize: 12 }}
+                onClick={(e) => openOrgModal(e, 'group', 'create', undefined, { departmentId: g.departmentId, parentId: g.id })} />
+            </Tooltip>
+            <Tooltip title="编辑分组">
+              <Button aria-label={`编辑分组${g.name}`} type="link" size="small" icon={<EditOutlined />}
+                style={{ padding: '0 4px', height: 'auto', fontSize: 12 }}
+                onClick={(e) => openOrgModal(e, 'group', 'edit', g)} />
+            </Tooltip>
+            <Popconfirm
+              title={`删除分组“${g.name}”？`}
+              description="存在子分组、成员或项目配置引用时无法删除。"
+              okButtonProps={{ danger: true, loading: deletingKey === `group:${g.id}` }}
+              onConfirm={() => deleteOrgNode('group', g.id)}
+            >
+              <Button aria-label={`删除分组${g.name}`} type="link" size="small" danger icon={<DeleteOutlined />}
+                loading={deletingKey === `group:${g.id}`} onClick={e => e.stopPropagation()} />
+            </Popconfirm>
           </PermissionGuard>
         </span>
       ),
@@ -193,6 +300,20 @@ function OrgTab() {
                 onClick={(e) => openLeaderModal(e, 'dept', dept.id, dept.name, dept.leader?.id)}>
                 设置负责人
               </Button>
+              <Tooltip title="编辑部门">
+                <Button aria-label={`编辑部门${dept.name}`} type="link" size="small" icon={<EditOutlined />}
+                  style={{ padding: '0 4px', height: 'auto', fontSize: 12 }}
+                  onClick={(e) => openOrgModal(e, 'department', 'edit', dept)} />
+              </Tooltip>
+              <Popconfirm
+                title={`删除部门“${dept.name}”？`}
+                description="存在分组或成员时无法删除。"
+                okButtonProps={{ danger: true, loading: deletingKey === `department:${dept.id}` }}
+                onConfirm={() => deleteOrgNode('department', dept.id)}
+              >
+                <Button aria-label={`删除部门${dept.name}`} type="link" size="small" danger icon={<DeleteOutlined />}
+                  loading={deletingKey === `department:${dept.id}`} onClick={e => e.stopPropagation()} />
+              </Popconfirm>
             </PermissionGuard>
           </span>
         ),
@@ -211,28 +332,47 @@ function OrgTab() {
   return (
     <div>
       <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
-        组织架构来自身份源（Authentik）同步；部门/组负责人可在此处设置（审批流程的「直属负责人/上级负责人/部门负责人」依赖此字段）。
+        组织架构可由第三方身份源同步或在系统中维护；部门/组负责人可在此处设置（审批流程的「直属负责人/上级负责人/部门负责人」依赖此字段）。
       </div>
-      <Row gutter={16}>
-        <Col span={6}>
-          <Card title="部门列表" size="small">
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openOrgModal(undefined, 'department', 'create')}>
+          新增部门
+        </Button>
+        <Button icon={<PlusOutlined />} disabled={!selectedDeptId}
+          onClick={() => openOrgModal(undefined, 'group', 'create', undefined, { departmentId: selectedDeptId || undefined, parentId: null })}>
+          新增顶级分组
+        </Button>
+      </div>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={6}>
+          <Card title="部门列表" size="small" loading={loading}>
             {departments.map(d => (
-              <div key={d.id} style={{
+              <button type="button" key={d.id} style={{
                 padding: '8px 12px', cursor: 'pointer', borderRadius: 6, marginBottom: 4,
                 background: selectedDeptId === d.id ? '#eef2ff' : 'transparent',
                 fontWeight: selectedDeptId === d.id ? 600 : 400,
+                border: 0, width: '100%', textAlign: 'left', color: 'inherit',
               }} onClick={() => setSelectedDeptId(selectedDeptId === d.id ? null : d.id)}>
                 <ApartmentOutlined style={{ marginRight: 8 }} />
                 {d.name}
                 {d.leader && <Tag color="green" style={{ marginLeft: 8, fontSize: 11 }}>{d.leader.realName}</Tag>}
-              </div>
+              </button>
             ))}
           </Card>
         </Col>
-        <Col span={18}>
+        <Col xs={24} lg={18}>
           <Card title={`组织架构 ${selectedDeptId ? `(${departments.find(d => d.id === selectedDeptId)?.name || ''})` : ''}`}
-            size="small" extra={
-              <Button size="small" icon={<ReloadOutlined />} onClick={load} />
+            size="small" loading={loading} extra={
+              <Button aria-label="刷新组织架构" size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} />
             }>
             {treeData.length ? (
               <Tree treeData={treeData} defaultExpandAll blockNode />
@@ -245,7 +385,8 @@ function OrgTab() {
 
       <Modal title={leaderModal ? `设置「${leaderModal.name}」负责人` : ''}
         open={!!leaderModal} width={480} confirmLoading={saving}
-        onCancel={() => { setLeaderModal(null); leaderForm.resetFields(); }}
+        closable={!saving} maskClosable={false} keyboard={!saving}
+        onCancel={() => { if (!saving) { setLeaderModal(null); leaderForm.resetFields(); } }}
         onOk={() => leaderForm.submit()}>
         <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
           负责人将作为该{leaderModal?.type === 'group' ? '组' : '部门'}提交工时/加班/周报时的默认审批人。清空可移除负责人。
@@ -258,12 +399,70 @@ function OrgTab() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <Modal
+        title={orgModal
+          ? `${orgModal.mode === 'create' ? '新增' : '编辑'}${orgModal.kind === 'department' ? '部门' : '分组'}`
+          : ''}
+        open={!!orgModal}
+        confirmLoading={saving}
+        closable={!saving}
+        maskClosable={false}
+        keyboard={!saving}
+        onCancel={() => { if (!saving) { setOrgModal(null); orgForm.resetFields(); } }}
+        onOk={() => orgForm.submit()}
+        destroyOnHidden
+      >
+        <Form form={orgForm} layout="vertical" onFinish={handleOrgSave}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }, { max: 100 }]}>
+            <Input maxLength={100} />
+          </Form.Item>
+          <Form.Item name="description" label="说明" rules={[{ max: 255 }]}>
+            <Input.TextArea rows={3} maxLength={255} showCount />
+          </Form.Item>
+          {orgModal?.kind === 'group' && (
+            <>
+              <Form.Item name="departmentId" label="所属部门" rules={[{ required: true, message: '请选择所属部门' }]}>
+                <Select
+                  options={departments.map(department => ({ label: department.name, value: department.id }))}
+                  onChange={() => orgForm.setFieldValue('parentId', null)}
+                />
+              </Form.Item>
+              <Form.Item noStyle shouldUpdate={(previous, current) => previous.departmentId !== current.departmentId}>
+                {({ getFieldValue }) => {
+                  const departmentId = getFieldValue('departmentId');
+                  const currentGroup = orgModal.id ? allGroups.find(group => group.id === orgModal.id) : undefined;
+                  const blockedIds = currentGroup
+                    ? new Set(allGroups
+                      .filter(group => String(group.path || '').split('/').includes(String(currentGroup.id)))
+                      .map(group => group.id))
+                    : new Set<number>();
+                  return (
+                    <Form.Item name="parentId" label="父级分组" extra="留空表示部门下的顶级分组。">
+                      <Select
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        options={allGroups
+                          .filter(group => group.departmentId === departmentId && !blockedIds.has(group.id))
+                          .map(group => ({ label: group.name, value: group.id }))}
+                        placeholder="顶级分组"
+                      />
+                    </Form.Item>
+                  );
+                }}
+              </Form.Item>
+            </>
+          )}
+        </Form>
+      </Modal>
     </div>
   );
 }
 
 // ==================== 用户管理 ====================
 function UserTab() {
+  const currentUserId = useAuthStore(state => state.user?.id);
   const [data, setData] = useState<UserListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -273,22 +472,46 @@ function UserTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editItem, setEditItem] = useState<UserListItem | null>(null);
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [actionKey, setActionKey] = useState<string>();
+  const [keyword, setKeyword] = useState('');
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadRequestId = useRef(0);
   const [form] = Form.useForm();
 
-  const load = async () => {
-    const [userRes, deptRes, groupRes, roleRes] = await Promise.all([
-      systemApi.getUsers({ page, pageSize: 20 }),
-      systemApi.getDepartments(),
-      systemApi.getGroupTree(),
-      systemApi.getRoles(),
-    ]);
-    if (userRes.data) { setData(userRes.data.list); setTotal(userRes.data.total); }
-    if (deptRes.data) setDepartments(deptRes.data);
-    if (groupRes.data) setGroupTreeData(groupRes.data);
-    if (roleRes.data) setRoles(roleRes.data);
+  const load = async (targetPage = page) => {
+    const requestId = ++loadRequestId.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [userRes, deptRes, groupRes, roleRes] = await Promise.all([
+        systemApi.getUsers({ page: targetPage, pageSize: 20, keyword: keyword.trim() || undefined }),
+        systemApi.getDepartments(),
+        systemApi.getGroupTree(),
+        systemApi.getRoles(),
+      ]);
+      if (requestId !== loadRequestId.current) return;
+      if (userRes.data) {
+        setData(userRes.data.list);
+        setTotal(userRes.data.total);
+        setPage(targetPage);
+      }
+      if (deptRes.data) setDepartments(deptRes.data);
+      if (groupRes.data) setGroupTreeData(groupRes.data);
+      if (roleRes.data) setRoles(roleRes.data);
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '用户列表加载失败');
+      }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
+    }
   };
 
-  useEffect(() => { load(); }, [page]);
+  useEffect(() => {
+    void load(page);
+    return () => { loadRequestId.current += 1; };
+  }, [page]);
 
   // 构建分组 TreeSelect 数据：部门 > 分组(多级)
   const buildGroupNodes = (groups: any[]): any[] => {
@@ -336,16 +559,57 @@ function UserTab() {
   }, [watchedDeptId]);
 
   const handleSave = async (values: any) => {
-    if (editItem) {
-      await systemApi.updateUser(editItem.id, values);
-    } else {
-      await systemApi.createUser(values);
+    setSaving(true);
+    try {
+      if (editItem) {
+        await systemApi.updateUser(editItem.id, values);
+      } else {
+        await systemApi.createUser(values);
+      }
+      message.success('操作成功');
+      setModalOpen(false);
+      setEditItem(null);
+      form.resetFields();
+      await load();
+    } finally {
+      setSaving(false);
     }
-    message.success('操作成功');
-    setModalOpen(false);
-    setEditItem(null);
-    form.resetFields();
-    load();
+  };
+
+  const handleResetPassword = async (record: UserListItem) => {
+    setActionKey(`reset:${record.id}`);
+    try {
+      const response = await systemApi.resetPassword(record.id);
+      const generatedPassword = response.data?.password;
+      if (!generatedPassword) {
+        message.success('密码已重置');
+        return;
+      }
+      Modal.success({
+        title: `已重置 ${record.realName} 的密码`,
+        content: (
+          <div>
+            <p>临时密码只在本次显示，请安全地交给用户，并提醒其登录后立即修改。</p>
+            <Text code copyable={{ text: generatedPassword }}>{generatedPassword}</Text>
+          </div>
+        ),
+        okText: '我已保存',
+      });
+    } finally {
+      setActionKey(undefined);
+    }
+  };
+
+  const handleDelete = async (record: UserListItem) => {
+    setActionKey(`delete:${record.id}`);
+    try {
+      await systemApi.deleteUser(record.id);
+      message.success('删除成功');
+      const targetPage = data.length === 1 && page > 1 ? page - 1 : page;
+      await load(targetPage);
+    } finally {
+      setActionKey(undefined);
+    }
   };
 
   const columns = [
@@ -365,11 +629,26 @@ function UserTab() {
             form.setFieldsValue({ ...record, departmentId: record.department?.id, groupId: record.group?.id, roleIds: record.roles.map(r => r.id) });
             setModalOpen(true);
           }}>编辑</Button>
-          <Popconfirm title="确定重置密码为123456?" onConfirm={async () => { await systemApi.resetPassword(record.id, '123456'); message.success('密码已重置'); }}>
-            <Button type="link" size="small">重置密码</Button>
+          <Popconfirm
+            title={`重置 ${record.realName} 的密码？`}
+            description="系统将生成一次性随机临时密码，旧密码和现有登录状态会立即失效。"
+            onConfirm={() => handleResetPassword(record)}
+            disabled={record.id === currentUserId}
+          >
+            <Tooltip title={record.id === currentUserId ? '请在个人中心修改自己的密码' : undefined}>
+              <Button type="link" size="small" disabled={record.id === currentUserId} loading={actionKey === `reset:${record.id}`}>重置密码</Button>
+            </Tooltip>
           </Popconfirm>
-          <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteUser(record.id); message.success('删除成功'); load(); }}>
-            <Button type="link" size="small" danger>删除</Button>
+          <Popconfirm
+            title={`删除用户“${record.realName}”？`}
+            description="仅未参与任何业务的账号可删除；已有记录的账号请改为禁用。"
+            okButtonProps={{ danger: true, loading: actionKey === `delete:${record.id}` }}
+            disabled={record.id === currentUserId}
+            onConfirm={() => handleDelete(record)}
+          >
+            <Tooltip title={record.id === currentUserId ? '不能删除当前登录账号' : undefined}>
+              <Button type="link" size="small" danger disabled={record.id === currentUserId} loading={actionKey === `delete:${record.id}`}>删除</Button>
+            </Tooltip>
           </Popconfirm>
         </Space>
       ),
@@ -378,38 +657,63 @@ function UserTab() {
 
   return (
     <>
-      <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 16 }}
-        onClick={() => { setEditItem(null); form.resetFields(); setModalOpen(true); }}>
-        新增用户
-      </Button>
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        <Button type="primary" icon={<PlusOutlined />}
+          onClick={() => { setEditItem(null); form.resetFields(); setModalOpen(true); }}>
+          新增用户
+        </Button>
+        <Input.Search
+          allowClear
+          value={keyword}
+          onChange={event => setKeyword(event.target.value)}
+          onSearch={() => { if (page === 1) void load(1); else setPage(1); }}
+          placeholder="搜索用户名或姓名"
+          enterButton="搜索"
+          style={{ width: 320, maxWidth: '100%' }}
+        />
+      </div>
       <Table rowKey="id" columns={columns} dataSource={data}
+        loading={loading}
         pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: (t) => `共 ${t} 条` }} size="middle" />
       <Modal title={editItem ? '编辑用户' : '新增用户'} open={modalOpen} width={600} confirmLoading={saving}
-        onCancel={() => { setModalOpen(false); setEditItem(null); }} onOk={() => form.submit()}>
+        closable={!saving} maskClosable={false} keyboard={!saving}
+        onCancel={() => { if (!saving) { setModalOpen(false); setEditItem(null); } }} onOk={() => form.submit()}>
         <Form form={form} layout="vertical" onFinish={handleSave}>
           <Row gutter={16}>
             <Col span={12}>
-              <Form.Item name="username" label="用户名" rules={[{ required: true }]}>
-                <Input disabled={!!editItem} />
+              <Form.Item name="username" label="用户名" rules={[{ required: true }, { max: 50 }]}>
+                <Input disabled={!!editItem} autoComplete="username" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="realName" label="姓名" rules={[{ required: true }]}>
-                <Input />
+              <Form.Item name="realName" label="姓名" rules={[{ required: true }, { max: 50 }]}>
+                <Input maxLength={50} />
               </Form.Item>
             </Col>
           </Row>
           {!editItem && (
-            <Form.Item name="password" label="密码" rules={[{ required: true }]}>
-              <Input.Password />
+            <Form.Item name="password" label="初始密码" extra="至少 8 位；建议使用随机密码并要求用户首次登录后修改。" rules={[
+              { required: true, message: '请输入初始密码' },
+              { min: 8, message: '密码至少需要 8 位' },
+            ]}>
+              <Input.Password autoComplete="new-password" />
             </Form.Item>
           )}
           <Row gutter={16}>
             <Col span={12}>
-              <Form.Item name="email" label="邮箱"><Input /></Form.Item>
+              <Form.Item name="email" label="邮箱" rules={[{ type: 'email', message: '请输入有效邮箱地址' }, { max: 100 }]}><Input maxLength={100} /></Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="phone" label="手机号"><Input /></Form.Item>
+              <Form.Item name="phone" label="手机号" rules={[{ pattern: /^\+?[0-9 ()-]{6,20}$/, message: '请输入有效手机号' }]}><Input maxLength={20} /></Form.Item>
             </Col>
           </Row>
           <Row gutter={16}>
@@ -454,15 +758,20 @@ function RoleTab() {
   const [selectedRole, setSelectedRole] = useState<number>();
   const [checkedKeys, setCheckedKeys] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [keyword, setKeyword] = useState('');
   const [roleModal, setRoleModal] = useState<{ mode: 'create' | 'copy' | 'edit'; role?: Role } | null>(null);
   const [roleForm] = Form.useForm();
+  const loadRequestId = useRef(0);
 
   const load = async (preferredRoleId?: number) => {
+    const requestId = ++loadRequestId.current;
     setLoading(true);
+    setLoadError(null);
     try {
       const [roleRes, permRes] = await Promise.all([systemApi.getRoles(), systemApi.getPermissions()]);
+      if (requestId !== loadRequestId.current) return;
       const nextRoles = roleRes.data || [];
       const nextPermissions = permRes.data || [];
       setRoles(nextRoles);
@@ -473,12 +782,19 @@ function RoleTab() {
       setCheckedKeys(nextSelected?.name === 'admin'
         ? nextPermissions.map(permission => permission.id)
         : nextSelected?.permissions.map(permission => permission.id) || []);
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '角色权限加载失败');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestId.current) setLoading(false);
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    void load();
+    return () => { loadRequestId.current += 1; };
+  }, []);
 
   const handleRoleSelect = (roleId: number) => {
     setSelectedRole(roleId);
@@ -494,7 +810,7 @@ function RoleTab() {
     try {
       await systemApi.updateRolePermissions(selectedRole, checkedKeys);
       message.success('角色权限已更新，关联用户将在下次请求时生效');
-      await load();
+      await load(selectedRole);
     } finally {
       setSaving(false);
     }
@@ -514,6 +830,9 @@ function RoleTab() {
 
   const currentRole = roles.find(role => role.id === selectedRole);
   const isAdminRole = currentRole?.name === 'admin';
+  const effectivePermissionIds = (role?: Role) => role?.name === 'admin'
+    ? permissions.map(permission => permission.id)
+    : role?.permissions.map(permission => permission.id) || [];
   const visiblePermissions = permissions.filter(permission => {
     const query = keyword.trim().toLowerCase();
     if (!query) return true;
@@ -552,7 +871,7 @@ function RoleTab() {
           name: values.name,
           label: values.label,
           description: values.description,
-          permissionIds: template?.permissions.map(permission => permission.id) || [],
+          permissionIds: effectivePermissionIds(template),
         });
         preferredRoleId = res.data?.id;
         message.success(template ? '角色已创建，并复制模板权限' : '角色已创建');
@@ -566,14 +885,28 @@ function RoleTab() {
   };
 
   const deleteRole = async (role: Role) => {
-    await systemApi.deleteRole(role.id);
-    message.success('角色已删除');
-    if (selectedRole === role.id) setSelectedRole(undefined);
-    await load();
+    setSaving(true);
+    try {
+      await systemApi.deleteRole(role.id);
+      message.success('角色已删除');
+      if (selectedRole === role.id) setSelectedRole(undefined);
+      await load();
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <>
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Alert
         type="info"
         showIcon
@@ -627,7 +960,7 @@ function RoleTab() {
                             description={role.userCount ? `该角色仍分配给 ${role.userCount} 名用户，无法删除。` : '删除后不可恢复。'}
                             okText="删除角色"
                             cancelText="取消"
-                            okButtonProps={{ danger: true, disabled: !!role.userCount }}
+                            okButtonProps={{ danger: true, disabled: !!role.userCount, loading: saving }}
                             onConfirm={() => deleteRole(role)}
                           >
                             <Button aria-label={`删除角色${role.label}`} type="text" size="small" danger icon={<DeleteOutlined />} />
@@ -638,7 +971,7 @@ function RoleTab() {
                   )}
                 </div>
                 <div style={{ marginTop: 4, color: '#8A8175', fontSize: 12 }}>
-                  {role.name} · {role.userCount || 0} 名用户 · {role.permissions.length} 项权限
+                  {role.name} · {role.userCount || 0} 名用户 · {effectivePermissionIds(role).length} 项权限
                 </div>
               </div>
             ))}
@@ -746,9 +1079,12 @@ function RoleTab() {
       <Modal
         title={roleModal?.mode === 'edit' ? '编辑自定义角色' : roleModal?.mode === 'copy' ? '复制角色' : '新建自定义角色'}
         open={!!roleModal}
-        onCancel={() => setRoleModal(null)}
+        onCancel={() => { if (!saving) setRoleModal(null); }}
         onOk={() => roleForm.submit()}
         confirmLoading={saving}
+        closable={!saving}
+        maskClosable={false}
+        keyboard={!saving}
         okText={roleModal?.mode === 'edit' ? '保存角色信息' : '创建角色'}
         destroyOnHidden
       >
@@ -778,7 +1114,7 @@ function RoleTab() {
                 allowClear
                 showSearch
                 optionFilterProp="label"
-                options={roles.map(role => ({ label: `${role.label}（${role.permissions.length} 项）`, value: role.id }))}
+                options={roles.map(role => ({ label: `${role.label}（${effectivePermissionIds(role).length} 项）`, value: role.id }))}
                 placeholder="从现有角色复制权限"
               />
             </Form.Item>
@@ -789,259 +1125,140 @@ function RoleTab() {
   );
 }
 
-// ==================== 项目管理（含PM/SPM/SE） ====================
-function ProjectTab() {
-  const [data, setData] = useState<any[]>([]);
-  const [users, setUsers] = useState<SimpleUser[]>([]);
-  const [groups, setGroups] = useState<Group[]>([]);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [seModalOpen, setSeModalOpen] = useState(false);
-  const [allocationModalOpen, setAllocationModalOpen] = useState(false);
-  const [editItem, setEditItem] = useState<any | null>(null);
-  const [selectedProject, setSelectedProject] = useState<any>(null);
-  const [projectSEs, setProjectSEs] = useState<ProjectSE[]>([]);
-  const [projectAllocations, setProjectAllocations] = useState<ProjectWorkloadAllocation[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [form] = Form.useForm();
-  const [seForm] = Form.useForm();
-  const [allocationForm] = Form.useForm();
+// ==================== 权限目录 ====================
+function PermissionCatalogTab() {
+  const [permissions, setPermissions] = useState<Permission[]>([]);
+  const [keyword, setKeyword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadRequestId = useRef(0);
+
+  const moduleLabels: Record<string, string> = {
+    timesheet: '工时管理',
+    overtime: '加班管理',
+    weekly_report: '周报管理',
+    approval: '审批中心',
+    report: '报表中心',
+    project: '项目管理',
+    system: '系统管理',
+    permission_request: '权限申请',
+    permission_grant: '权限授权',
+  };
 
   const load = async () => {
-    const [projRes, userRes, groupRes] = await Promise.all([
-      systemApi.getProjects(),
-      systemApi.getAllUsers(),
-      systemApi.getGroups(),
-    ]);
-    if (projRes.data) setData(projRes.data);
-    if (userRes.data) setUsers(userRes.data);
-    if (groupRes.data) setGroups(groupRes.data);
-  };
-
-  useEffect(() => { load(); }, []);
-
-  const loadProjectSEs = async (projectId: number) => {
-    const res = await systemApi.getProjectSEs(projectId);
-    if (res.data) setProjectSEs(res.data);
-  };
-
-  const handleSave = async (values: any) => {
-    if (editItem) {
-      await systemApi.updateProject(editItem.id, values);
-    } else {
-      await systemApi.createProject(values);
+    const requestId = ++loadRequestId.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const response = await systemApi.getPermissions();
+      if (requestId === loadRequestId.current) setPermissions(response.data || []);
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '权限目录加载失败');
+      }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
     }
-    message.success('操作成功');
-    setModalOpen(false);
-    form.resetFields();
-    setEditItem(null);
-    load();
   };
 
-  const handleAddSE = async (values: any) => {
-    if (!selectedProject) return;
-    await systemApi.addProjectSE(selectedProject.id, values);
-    message.success('添加成功');
-    seForm.resetFields();
-    loadProjectSEs(selectedProject.id);
-    load();
+  useEffect(() => {
+    void load();
+    return () => { loadRequestId.current += 1; };
+  }, []);
+
+  const syncCatalog = async () => {
+    setSyncing(true);
+    try {
+      const response = await systemApi.initPermissions();
+      setPermissions(response.data || []);
+      message.success('权限目录已与当前代码定义同步');
+    } catch {
+      // 请求拦截器统一展示服务端错误。
+    } finally {
+      setSyncing(false);
+    }
   };
 
-  const loadProjectAllocations = async (projectId: number) => {
-    const res = await systemApi.getProjectAllocations(projectId);
-    if (res.data) setProjectAllocations(res.data);
-  };
-
-  const handleAddAllocation = async (values: any) => {
-    if (!selectedProject) return;
-    await systemApi.addProjectAllocation(selectedProject.id, values);
-    message.success('保存成功');
-    allocationForm.resetFields();
-    loadProjectAllocations(selectedProject.id);
-    load();
-  };
+  const query = keyword.trim().toLowerCase();
+  const visiblePermissions = permissions.filter(permission => !query || [
+    permission.name,
+    permission.code,
+    permission.description,
+    moduleLabels[permission.module],
+  ].filter(Boolean).some(value => String(value).toLowerCase().includes(query)));
 
   const columns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
-    { title: '项目名称', dataIndex: 'name' },
-    { title: '项目编码', dataIndex: 'code' },
     {
-      title: '项目管理员', key: 'managers', width: 180, render: (_: any, r: any) => {
-        const managers = r.managers || [];
-        return managers.length
-          ? managers.map((m: any) => <Tag key={m.id} color="blue">{m.realName}</Tag>)
-          : <Tag>未指定</Tag>;
-      },
+      title: '模块',
+      dataIndex: 'module',
+      width: 120,
+      render: (module: string) => <Tag>{moduleLabels[module] || module}</Tag>,
     },
-    { title: '模块SE', key: 'se', width: 200, render: (_: any, r: any) => {
-      const ses = r.moduleSEs || [];
-      return ses.length ? ses.map((se: any) => (
-        <Tag key={se.id} color="purple">{se.user?.realName} → {se.group?.name}</Tag>
-      )) : <Tag>未配置</Tag>;
-    }},
-    { title: '工时配额', key: 'allocations', width: 200, render: (_: any, r: any) => {
-      const allocs = r.workloadAllocations || [];
-      return allocs.length ? allocs.map((a: any) => (
-        <Tag key={a.id} color="cyan">{a.groupName}: {a.allocation}天</Tag>
-      )) : <Tag>未配置</Tag>;
-    }},
-    { title: '状态', dataIndex: 'status', width: 80, render: (s: number) => <Tag color={s === 1 ? 'green' : 'default'}>{s === 1 ? '进行中' : '已结束'}</Tag> },
     {
-      title: '操作', key: 'action', width: 340,
-      render: (_: any, record: any) => (
-        <Space>
-          <PermissionGuard permission="project:update">
-            <Button type="link" size="small" onClick={() => {
-              setEditItem(record);
-              form.setFieldsValue({
-                ...record,
-                managerIds: (record.managers || []).map((m: any) => m.id),
-              });
-              setModalOpen(true);
-            }}>编辑</Button>
-            <Button type="link" size="small" onClick={() => {
-              setSelectedProject(record);
-              loadProjectSEs(record.id);
-              seForm.resetFields();
-              setSeModalOpen(true);
-            }}>配置SE</Button>
-            <Button type="link" size="small" onClick={() => {
-              setSelectedProject(record);
-              loadProjectAllocations(record.id);
-              allocationForm.resetFields();
-              setAllocationModalOpen(true);
-            }}>配置工时</Button>
-          </PermissionGuard>
-          <PermissionGuard permission="project:delete">
-            <Popconfirm title="确定删除?" onConfirm={async () => { await systemApi.deleteProject(record.id); message.success('删除成功'); load(); }}>
-              <Button type="link" size="small" danger>删除</Button>
-            </Popconfirm>
-          </PermissionGuard>
-        </Space>
+      title: '权限名称',
+      dataIndex: 'name',
+      width: 230,
+      render: (name: string, record: Permission) => (
+        <div>
+          <Text strong>{name}</Text>
+          {record.grantable && <Tag color="blue" style={{ marginLeft: 8 }}>可申请</Tag>}
+        </div>
       ),
     },
-  ];
-
-  const seColumns = [
-    { title: 'SE', key: 'user', render: (_: any, r: ProjectSE) => r.user?.realName || '-' },
-    { title: '负责组', key: 'group', render: (_: any, r: ProjectSE) => r.group?.name || '-' },
     {
-      title: '操作', key: 'action', width: 80,
-      render: (_: any, r: ProjectSE) => (
-        <PermissionGuard permission="project:assign_se">
-          <Popconfirm title="确定删除?" onConfirm={async () => {
-            await systemApi.removeProjectSE(r.id);
-            message.success('删除成功');
-            if (selectedProject) loadProjectSEs(selectedProject.id);
-            load();
-          }}>
-            <Button type="link" size="small" danger>删除</Button>
-          </Popconfirm>
-        </PermissionGuard>
-      ),
+      title: '实际控制范围',
+      dataIndex: 'description',
+      render: (description: string | undefined) => description || '按权限名称所述的操作生效',
+    },
+    {
+      title: '权限码',
+      dataIndex: 'code',
+      width: 260,
+      render: (code: string) => <Text code copyable={{ text: code }}>{code}</Text>,
     },
   ];
 
   return (
     <>
-      <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 16 }}
-        onClick={() => { setEditItem(null); form.resetFields(); setModalOpen(true); }}>
-        新增项目
-      </Button>
-      <Table rowKey="id" columns={columns} dataSource={data} pagination={{ pageSize: 10 }} size="middle" />
-
-      {/* 项目编辑 Modal */}
-      <Modal title={editItem ? '编辑项目' : '新增项目'} open={modalOpen} confirmLoading={saving}
-        onCancel={() => { setModalOpen(false); setEditItem(null); }} onOk={() => form.submit()}>
-        <Form form={form} layout="vertical" onFinish={handleSave}>
-          <Form.Item name="name" label="项目名称" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="code" label="项目编码" rules={[{ required: true }]}>
-            <Input disabled={!!editItem} placeholder="如: PROJ-001" />
-          </Form.Item>
-          <Form.Item name="managerIds" label="项目管理员" rules={[{ required: true, message: '请选择至少一个项目管理员' }]}>
-            <Select mode="multiple" allowClear showSearch optionFilterProp="label"
-              options={users.map(u => ({ label: u.realName, value: u.id }))} />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* SE 配置 Modal */}
-      <Modal title={`配置模块SE - ${selectedProject?.name || ''}`} open={seModalOpen}
-        onCancel={() => { setSeModalOpen(false); setSelectedProject(null); }} footer={null} width={600}>
-        <Card size="small" title="已有SE" style={{ marginBottom: 16 }}>
-          <Table rowKey="id" columns={seColumns} dataSource={projectSEs} pagination={{ pageSize: 10 }} size="small"
-            locale={{ emptyText: '暂无SE配置' }} />
-        </Card>
-        <PermissionGuard permission="project:update">
-          <Card size="small" title="添加SE">
-          <Form form={seForm} layout="inline" onFinish={handleAddSE}>
-            <Form.Item name="userId" label="SE" rules={[{ required: true }]}>
-              <Select showSearch optionFilterProp="label" style={{ width: 150 }}
-                options={users.map(u => ({ label: u.realName, value: u.id }))} />
-            </Form.Item>
-            <Form.Item name="groupId" label="负责组" rules={[{ required: true }]}>
-              <Select showSearch optionFilterProp="label" style={{ width: 150 }}
-                options={groups.map(g => ({ label: g.name, value: g.id }))} />
-            </Form.Item>
-            <Form.Item>
-              <Button type="primary" htmlType="submit">添加</Button>
-            </Form.Item>
-          </Form>
-          </Card>
-        </PermissionGuard>
-      </Modal>
-
-      {/* 工时配额 Modal */}
-      <Modal title={`配置工时配额 - ${selectedProject?.name || ''}`} open={allocationModalOpen}
-        onCancel={() => { setAllocationModalOpen(false); setSelectedProject(null); }} footer={null} width={600}>
-        <div style={{ marginBottom: 12, color: '#9A9080', fontSize: 12 }}>
-          按组配置工时配额（单位：人/天）。用户提交工时后，审批单中会动态展示该组在本项目的配额消耗，超额时向审批人警告。未配置的组不限制。
-        </div>
-        <Card size="small" title="已有配额" style={{ marginBottom: 16 }}>
-          <Table rowKey="id" dataSource={projectAllocations} pagination={{ pageSize: 10 }} size="small"
-            locale={{ emptyText: '暂无配额配置' }}
-            columns={[
-              { title: '组', key: 'groupName', dataIndex: 'groupName' },
-              { title: '配额(人/天)', key: 'allocation', dataIndex: 'allocation', width: 120 },
-              {
-                title: '操作', key: 'action', width: 80,
-                render: (_: any, r: ProjectWorkloadAllocation) => (
-                  <Popconfirm title="确定删除?" onConfirm={async () => {
-                    await systemApi.removeProjectAllocation(r.id);
-                    message.success('删除成功');
-                    if (selectedProject) loadProjectAllocations(selectedProject.id);
-                    load();
-                  }}>
-                    <Button type="link" size="small" danger>删除</Button>
-                  </Popconfirm>
-                ),
-              },
-            ]}
-          />
-        </Card>
-        <Card size="small" title="添加/更新配额">
-          <Form form={allocationForm} layout="inline" onFinish={handleAddAllocation}>
-            <Form.Item name="groupId" label="组" rules={[{ required: true }]}>
-              <Select showSearch optionFilterProp="label" style={{ width: 180 }}
-                placeholder="选择组"
-                options={groups.map(g => ({ label: g.name, value: g.id }))} />
-            </Form.Item>
-            <Form.Item name="allocation" label="配额(人/天)" rules={[{ required: true, message: '请输入配额' }]}>
-              <InputNumber min={0} step={0.5} style={{ width: 130 }} placeholder="如 20" />
-            </Form.Item>
-            <Form.Item>
-              <Button type="primary" htmlType="submit">保存</Button>
-            </Form.Item>
-          </Form>
-          <div style={{ marginTop: 8, color: '#aaa', fontSize: 12 }}>
-            同一项目同一组重复保存会覆盖原配额值。
-          </div>
-        </Card>
-      </Modal>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="权限目录由代码中的实际控制点统一定义"
+        description="这里用于核对权限名称、权限码和实际作用；同步只补充或更新目录定义，不会改变任何角色当前选择的权限。角色授权请在“角色管理”中操作。"
+      />
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      <div style={{ display: 'flex', gap: 12, justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap' }}>
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          value={keyword}
+          onChange={event => setKeyword(event.target.value)}
+          placeholder="搜索权限名称、权限码、模块或说明"
+          style={{ width: 380, maxWidth: '100%' }}
+        />
+        <Button icon={<ReloadOutlined />} loading={syncing} disabled={loading} onClick={() => void syncCatalog()}>
+          同步系统权限目录
+        </Button>
+      </div>
+      <Table
+        rowKey="id"
+        columns={columns}
+        dataSource={visiblePermissions}
+        loading={loading}
+        size="middle"
+        scroll={{ x: 900 }}
+        pagination={{ pageSize: 20, showTotal: count => `共 ${count} 项权限` }}
+      />
     </>
   );
 }
@@ -1052,16 +1269,40 @@ function ApprovalFlowTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editFlow, setEditFlow] = useState<ApprovalFlow | null>(null);
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [form] = Form.useForm();
   const [users, setUsers] = useState<SimpleUser[]>([]);
+  const [deletingFlowId, setDeletingFlowId] = useState<number>();
+  const loadRequestId = useRef(0);
+  const selectedFlowType = Form.useWatch('type', form);
+  const supportsProjectSteps = selectedFlowType === 'timesheet' || selectedFlowType === 'overtime';
+  const stepTypeOptions = Object.entries(stepTypeMap)
+    .filter(([type]) => supportsProjectSteps || (type !== 'module_se' && type !== 'project_manager'))
+    .map(([value, label]) => ({ label, value }));
 
   const load = async () => {
-    const [flowRes, userRes] = await Promise.all([systemApi.getApprovalFlows(), systemApi.getAllUsers()]);
-    if (flowRes.data) setFlows(flowRes.data);
-    if (userRes.data) setUsers(userRes.data);
+    const requestId = ++loadRequestId.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [flowRes, userRes] = await Promise.all([systemApi.getApprovalFlows(), systemApi.getAllUsers()]);
+      if (requestId !== loadRequestId.current) return;
+      if (flowRes.data) setFlows(flowRes.data);
+      if (userRes.data) setUsers(userRes.data);
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '审批流程加载失败');
+      }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
+    }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    void load();
+    return () => { loadRequestId.current += 1; };
+  }, []);
 
   const handleSave = async (values: any) => {
     const data = {
@@ -1069,23 +1310,30 @@ function ApprovalFlowTab() {
       type: values.type,
       description: values.description,
       isDefault: values.isDefault,
+      enabled: values.enabled,
       steps: (values.steps || []).map((s: any, i: number) => ({
         stepType: s.stepType,
         label: s.label || stepTypeMap[s.stepType] || `步骤${i + 1}`,
-        parentLevel: s.parentLevel || 1,
+        parentLevel: s.stepType === 'parent_leader' ? (s.parentLevel || 1) : 1,
         customApproverId: s.stepType === 'custom' ? s.customApproverId : null,
+        requireAllApprovers: ['module_se', 'project_manager'].includes(s.stepType) && !!s.requireAllApprovers,
       })),
     };
-    if (editFlow) {
-      await systemApi.updateApprovalFlow(editFlow.id, data);
-    } else {
-      await systemApi.createApprovalFlow(data);
+    setSaving(true);
+    try {
+      if (editFlow) {
+        await systemApi.updateApprovalFlow(editFlow.id, data);
+      } else {
+        await systemApi.createApprovalFlow(data);
+      }
+      message.success('操作成功');
+      setModalOpen(false);
+      setEditFlow(null);
+      form.resetFields();
+      await load();
+    } finally {
+      setSaving(false);
     }
-    message.success('操作成功');
-    setModalOpen(false);
-    setEditFlow(null);
-    form.resetFields();
-    load();
   };
 
   const typeLabels: Record<string, string> = {
@@ -1101,12 +1349,14 @@ function ApprovalFlowTab() {
     {
       title: '审批步骤', key: 'steps', render: (_: any, r: ApprovalFlow) => (
         <Space direction="vertical" size={2}>
-          {(r.steps || []).sort((a, b) => a.stepOrder - b.stepOrder).map((s, i) => (
+          {[...(r.steps || [])].sort((a, b) => a.stepOrder - b.stepOrder).map((s, i) => (
             <div key={i}>
               <Text type="secondary">{i + 1}.</Text> {s.label}
               <Tag color="geekblue" style={{ marginLeft: 4, fontSize: 11 }}>{stepTypeMap[s.stepType]}</Tag>
               {s.stepType === 'custom' && s.customApproverId && (
-                <Tag style={{ fontSize: 11 }}>用户ID:{s.customApproverId}</Tag>
+                <Tag style={{ fontSize: 11 }}>
+                  {users.find(user => user.id === s.customApproverId)?.realName || `用户 #${s.customApproverId}`}
+                </Tag>
               )}
             </div>
           ))}
@@ -1122,21 +1372,30 @@ function ApprovalFlowTab() {
               setEditFlow(record);
               form.setFieldsValue({
                 name: record.name, type: record.type, description: record.description,
-                isDefault: record.isDefault,
-                steps: (record.steps || []).sort((a, b) => a.stepOrder - b.stepOrder).map(s => ({
-                  stepType: s.stepType, label: s.label, parentLevel: s.parentLevel, customApproverId: s.customApproverId,
+                isDefault: record.isDefault, enabled: record.enabled,
+                steps: [...(record.steps || [])].sort((a, b) => a.stepOrder - b.stepOrder).map(s => ({
+                  stepType: s.stepType,
+                  label: s.label,
+                  parentLevel: s.parentLevel,
+                  customApproverId: s.customApproverId,
+                  requireAllApprovers: !!s.requireAllApprovers,
                 })),
               });
               setModalOpen(true);
             }}>编辑</Button>
           </PermissionGuard>
           <PermissionGuard permission="system:approval_flow:manage">
-            <Popconfirm title="确定删除?" onConfirm={async () => {
-              await systemApi.deleteApprovalFlow(record.id);
-              message.success('删除成功');
-              load();
+            <Popconfirm title="删除该审批流程？" description="已有审批历史、或当前作为默认流程时不能删除，可改为停用。" onConfirm={async () => {
+              setDeletingFlowId(record.id);
+              try {
+                await systemApi.deleteApprovalFlow(record.id);
+                message.success('删除成功');
+                await load();
+              } finally {
+                setDeletingFlowId(undefined);
+              }
             }}>
-              <Button type="link" size="small" danger>删除</Button>
+              <Button type="link" size="small" danger loading={deletingFlowId === record.id}>删除</Button>
             </Popconfirm>
           </PermissionGuard>
         </Space>
@@ -1146,19 +1405,29 @@ function ApprovalFlowTab() {
 
   return (
     <>
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 16 }}
         onClick={() => {
           setEditFlow(null);
           form.resetFields();
-          form.setFieldsValue({ steps: [{ stepType: 'group_leader', label: '直属负责人审批' }] });
+          form.setFieldsValue({ enabled: true, isDefault: false, steps: [{ stepType: 'group_leader', label: '直属负责人审批', requireAllApprovers: false }] });
           setModalOpen(true);
         }}>
         新增审批流程
       </Button>
-      <Table rowKey="id" columns={columns} dataSource={flows} pagination={{ pageSize: 10 }} size="middle" />
+      <Table rowKey="id" columns={columns} dataSource={flows} loading={loading} pagination={{ pageSize: 10 }} size="middle" />
 
       <Modal title={editFlow ? '编辑审批流程' : '新增审批流程'} open={modalOpen} width={700} confirmLoading={saving}
-        onCancel={() => { setModalOpen(false); setEditFlow(null); }} onOk={() => form.submit()}>
+        closable={!saving} maskClosable={false} keyboard={!saving}
+        onCancel={() => { if (!saving) { setModalOpen(false); setEditFlow(null); } }} onOk={() => form.submit()}>
         <Form form={form} layout="vertical" onFinish={handleSave}>
           <Row gutter={16}>
             <Col span={12}>
@@ -1168,7 +1437,19 @@ function ApprovalFlowTab() {
             </Col>
             <Col span={12}>
               <Form.Item name="type" label="适用类型" rules={[{ required: true }]}>
-                <Select options={Object.entries(typeLabels).map(([k, v]) => ({ label: v, value: k }))} />
+                <Select
+                  disabled={!!editFlow}
+                  options={Object.entries(typeLabels).map(([k, v]) => ({ label: v, value: k }))}
+                  onChange={(type) => {
+                    if (type === 'timesheet' || type === 'overtime') return;
+                    const steps = form.getFieldValue('steps') || [];
+                    form.setFieldValue('steps', steps.map((step: any) => (
+                      ['module_se', 'project_manager'].includes(step?.stepType)
+                        ? { ...step, stepType: 'group_leader', label: '直属负责人审批', requireAllApprovers: false }
+                        : step
+                    )));
+                  }}
+                />
               </Form.Item>
             </Col>
           </Row>
@@ -1178,6 +1459,9 @@ function ApprovalFlowTab() {
           <Form.Item name="isDefault" label="设为该类型默认流程" valuePropName="checked">
             <Switch />
           </Form.Item>
+          <Form.Item name="enabled" label="启用流程" valuePropName="checked" extra="默认流程必须保持启用；停用非默认流程不会影响已经提交的审批。">
+            <Switch />
+          </Form.Item>
 
           <div style={{ marginBottom: 16, fontWeight: 600 }}>审批步骤（按顺序）</div>
           <Form.List name="steps">
@@ -1185,11 +1469,11 @@ function ApprovalFlowTab() {
               <>
                 {fields.map(({ key, name, ...rest }) => (
                   <Card key={key} size="small" style={{ marginBottom: 8 }}
-                    extra={<Button type="text" danger size="small" onClick={() => remove(name)}>删除</Button>}>
+                    extra={<Button type="text" danger size="small" disabled={fields.length <= 1} onClick={() => remove(name)}>删除</Button>}>
                     <Row gutter={8}>
                       <Col span={6}>
                         <Form.Item {...rest} name={[name, 'stepType']} label="步骤类型" rules={[{ required: true }]}>
-                          <Select options={Object.entries(stepTypeMap).map(([k, v]) => ({ label: v, value: k }))} />
+                          <Select options={stepTypeOptions} />
                         </Form.Item>
                       </Col>
                       <Col span={8}>
@@ -1198,8 +1482,14 @@ function ApprovalFlowTab() {
                         </Form.Item>
                       </Col>
                       <Col span={4}>
-                        <Form.Item {...rest} name={[name, 'parentLevel']} label="上级层级">
-                          <InputNumber min={1} max={10} placeholder="1" style={{ width: '100%' }} />
+                        <Form.Item noStyle shouldUpdate={(prev, cur) =>
+                          prev?.steps?.[name]?.stepType !== cur?.steps?.[name]?.stepType
+                        }>
+                          {({ getFieldValue }) => getFieldValue(['steps', name, 'stepType']) === 'parent_leader' ? (
+                            <Form.Item {...rest} name={[name, 'parentLevel']} label="上级层级" rules={[{ required: true }]}>
+                              <InputNumber min={1} max={5} placeholder="1" style={{ width: '100%' }} />
+                            </Form.Item>
+                          ) : <div style={{ height: 56 }} />}
                         </Form.Item>
                       </Col>
                       <Col span={6}>
@@ -1221,9 +1511,23 @@ function ApprovalFlowTab() {
                         </Form.Item>
                       </Col>
                     </Row>
+                    <Form.Item noStyle shouldUpdate={(prev, cur) =>
+                      prev?.steps?.[name]?.stepType !== cur?.steps?.[name]?.stepType
+                    }>
+                      {({ getFieldValue }) => ['module_se', 'project_manager'].includes(getFieldValue(['steps', name, 'stepType'])) ? (
+                        <Form.Item
+                          {...rest}
+                          name={[name, 'requireAllApprovers']}
+                          valuePropName="checked"
+                          style={{ marginBottom: 0 }}
+                        >
+                          <Checkbox>多人审批时要求所有人通过（会签）；关闭时任一人通过即可（或签）</Checkbox>
+                        </Form.Item>
+                      ) : null}
+                    </Form.Item>
                   </Card>
                 ))}
-                <Button type="dashed" block onClick={() => add({ stepType: 'group_leader', label: '', parentLevel: 1 })}>
+                <Button type="dashed" block disabled={fields.length >= 20} onClick={() => add({ stepType: 'group_leader', label: '', parentLevel: 1 })}>
                   + 添加审批步骤
                 </Button>
               </>
@@ -1242,8 +1546,11 @@ function AuditTab() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [userLoadError, setUserLoadError] = useState(false);
   const [detailItem, setDetailItem] = useState<AuditLogItem | null>(null);
   const [form] = Form.useForm();
+  const loadRequestId = useRef(0);
 
   const actionLabels: Record<string, string> = {
     login: '登录',
@@ -1259,6 +1566,27 @@ function AuditTab() {
     'role.update': '更新角色',
     'role.delete': '删除角色',
     'role.update_permissions': '更新角色权限',
+    'permission.sync_catalog': '同步权限目录',
+    'department.create': '创建部门',
+    'department.update': '更新部门',
+    'department.delete': '删除部门',
+    'group.create': '创建分组',
+    'group.update': '更新分组',
+    'group.delete': '删除分组',
+    'project.create': '创建项目',
+    'project.update': '更新项目',
+    'project.delete': '删除项目',
+    'project.assign_se': '配置模块 SE',
+    'project.remove_se': '移除模块 SE',
+    'project.update_allocation': '更新项目配额',
+    'project.remove_allocation': '移除项目配额',
+    'approval_flow.create': '创建审批流程',
+    'approval_flow.update': '更新审批流程',
+    'approval_flow.delete': '删除审批流程',
+    'announcement.create': '发布公告',
+    'announcement.update': '编辑公告',
+    'announcement.delete': '删除公告',
+    'settings.update': '更新系统设置',
   };
 
   const targetLabels: Record<string, string> = {
@@ -1270,10 +1598,19 @@ function AuditTab() {
     weekly_report: '周报',
     permission_request: '权限申请',
     pat: '访问令牌',
+    permission: '权限',
+    department: '部门',
+    group: '分组',
+    project: '项目',
+    approval_flow: '审批流程',
+    announcement: '公告',
+    system_setting: '系统设置',
   };
 
   const load = async (targetPage = page) => {
+    const requestId = ++loadRequestId.current;
     setLoading(true);
+    setLoadError(null);
     try {
       const values = form.getFieldsValue();
       const dateRange = values.dateRange;
@@ -1286,23 +1623,33 @@ function AuditTab() {
         startDate: dateRange?.[0]?.startOf('day').toISOString(),
         endDate: dateRange?.[1]?.endOf('day').toISOString(),
       });
+      if (requestId !== loadRequestId.current) return;
       if (res.data) {
         setData(res.data.list);
         setTotal(res.data.total);
         setPage(targetPage);
       }
     } catch (error: any) {
-      message.error(error?.response?.data?.message || '审计日志加载失败');
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '审计日志加载失败');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestId.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    load(1);
+    void load(1);
     systemApi.getAllUsers()
-      .then((res) => setUsers(res.data || []))
-      .catch(() => setUsers([]));
+      .then((res) => {
+        setUsers(res.data || []);
+        setUserLoadError(false);
+      })
+      .catch(() => {
+        setUsers([]);
+        setUserLoadError(true);
+      });
+    return () => { loadRequestId.current += 1; };
   }, []);
 
   const formatDetail = (detail: string | null) => {
@@ -1330,7 +1677,7 @@ function AuditTab() {
     {
       title: '对象', key: 'target', width: 150,
       render: (_: unknown, record: AuditLogItem) => (
-        <span>{targetLabels[record.target] || record.target}{record.targetId ? ` #${record.targetId}` : ''}</span>
+        <span>{targetLabels[record.target] || record.target}{record.targetId != null ? ` #${record.targetId}` : ''}</span>
       ),
     },
     { title: 'IP 地址', dataIndex: 'ip', width: 145, render: (value: string | null) => value || '-' },
@@ -1351,6 +1698,23 @@ function AuditTab() {
         message="审计日志用于追踪关键管理操作"
         description="日志仅供查询，不支持编辑或删除。筛选条件为空时按时间倒序显示全部记录。"
       />
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load(page)}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {userLoadError && (
+        <Alert
+          type="warning"
+          showIcon
+          message="操作人目录加载失败，仍可使用其他条件查询审计日志"
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Form form={form} layout="inline" style={{ marginBottom: 16, rowGap: 10 }} onFinish={() => load(1)}>
         <Form.Item name="userId" label="操作人">
           <Select
@@ -1408,7 +1772,7 @@ function AuditTab() {
               <Descriptions.Item label="时间">{new Date(detailItem.createdAt).toLocaleString()}</Descriptions.Item>
               <Descriptions.Item label="动作">{actionLabels[detailItem.action] || detailItem.action}</Descriptions.Item>
               <Descriptions.Item label="对象">{targetLabels[detailItem.target] || detailItem.target}</Descriptions.Item>
-              <Descriptions.Item label="对象 ID">{detailItem.targetId || '-'}</Descriptions.Item>
+              <Descriptions.Item label="对象 ID">{detailItem.targetId ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="IP 地址">{detailItem.ip || '-'}</Descriptions.Item>
             </Descriptions>
             <pre style={{
@@ -1434,6 +1798,8 @@ function AuditTab() {
 
 // ==================== 公告管理 ====================
 function AnnouncementTab() {
+  const { hasAnyPermission } = usePermission();
+  const canEditAudience = hasAnyPermission('system:announcement:create', 'system:announcement:update');
   const [data, setData] = useState<AnnouncementItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -1446,22 +1812,49 @@ function AnnouncementTab() {
   const [stats, setStats] = useState<AnnouncementStats | null>(null);
   const [statsTitle, setStatsTitle] = useState('');
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState<number>();
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [catalogWarning, setCatalogWarning] = useState(false);
+  const loadRequestId = useRef(0);
+  const statsRequestId = useRef(0);
   const [form] = Form.useForm();
 
   const load = async () => {
-    const [res, deptRes, groupRes, userRes] = await Promise.all([
-      announcementApi.getAdminList({ page, pageSize: 20 }),
-      systemApi.getDepartments(),
-      systemApi.getGroups(),
-      systemApi.getAllUsers(),
-    ]);
-    if (res.data) { setData(res.data.list); setTotal(res.data.total); }
-    if (deptRes.data) setDepartments(deptRes.data);
-    if (groupRes.data) setGroups(groupRes.data);
-    if (userRes.data) setUsers(userRes.data);
+    const requestId = ++loadRequestId.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [listResult, deptResult, groupResult, userResult] = await Promise.allSettled([
+        announcementApi.getAdminList({ page, pageSize: 20 }),
+        systemApi.getDepartments(),
+        systemApi.getGroups(),
+        canEditAudience ? systemApi.getAllUsers() : Promise.resolve({ code: 0, data: [] as SimpleUser[] }),
+      ]);
+      if (requestId !== loadRequestId.current) return;
+      if (listResult.status === 'rejected') throw listResult.reason;
+      if (listResult.value.data) {
+        setData(listResult.value.data.list);
+        setTotal(listResult.value.data.total);
+      }
+      if (deptResult.status === 'fulfilled' && deptResult.value.data) setDepartments(deptResult.value.data);
+      if (groupResult.status === 'fulfilled' && groupResult.value.data) setGroups(groupResult.value.data);
+      if (userResult.status === 'fulfilled' && userResult.value.data) setUsers(userResult.value.data);
+      setCatalogWarning([deptResult, groupResult, userResult].some(result => result.status === 'rejected'));
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '公告列表加载失败');
+      }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
+    }
   };
 
-  useEffect(() => { load(); }, [page]);
+  useEffect(() => {
+    void load();
+    return () => { loadRequestId.current += 1; };
+  }, [page]);
 
   const handleSave = async (values: any) => {
     setSaving(true);
@@ -1496,22 +1889,30 @@ function AnnouncementTab() {
       setModalOpen(false);
       setEditItem(null);
       form.resetFields();
-      load();
+      await load();
     } finally {
       setSaving(false);
     }
   };
 
   const handleViewStats = async (item: AnnouncementItem) => {
+    const requestId = ++statsRequestId.current;
+    setStats(null);
+    setStatsTitle(item.title);
+    setStatsOpen(true);
+    setStatsLoading(true);
     try {
       const res = await announcementApi.getStats(item.id);
-      if (res.data) {
+      if (requestId === statsRequestId.current && res.data) {
         setStats(res.data);
-        setStatsTitle(item.title);
-        setStatsOpen(true);
       }
     } catch {
-      message.error('获取统计失败');
+      if (requestId === statsRequestId.current) {
+        setStatsOpen(false);
+        message.error('获取统计失败');
+      }
+    } finally {
+      if (requestId === statsRequestId.current) setStatsLoading(false);
     }
   };
 
@@ -1576,11 +1977,16 @@ function AnnouncementTab() {
           </PermissionGuard>
           <PermissionGuard permission="system:announcement:delete">
             <Popconfirm title={'\u786e\u5b9a\u5220\u9664?'} onConfirm={async () => {
-              await announcementApi.delete(record.id);
-              message.success('\u5220\u9664\u6210\u529f');
-              load();
+              setDeletingId(record.id);
+              try {
+                await announcementApi.delete(record.id);
+                message.success('\u5220\u9664\u6210\u529f');
+                await load();
+              } finally {
+                setDeletingId(undefined);
+              }
             }}>
-              <Button type="link" size="small" danger icon={<DeleteOutlined />}>{'\u5220\u9664'}</Button>
+              <Button type="link" size="small" danger loading={deletingId === record.id} icon={<DeleteOutlined />}>{'\u5220\u9664'}</Button>
             </Popconfirm>
           </PermissionGuard>
         </Space>
@@ -1590,6 +1996,23 @@ function AnnouncementTab() {
 
   return (
     <>
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {catalogWarning && (
+        <Alert
+          type="warning"
+          showIcon
+          message="部分组织或用户目录加载失败；公告列表仍可查看，发布指定范围前请重试"
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <PermissionGuard permission="system:announcement:create">
         <Button type="primary" icon={<PlusOutlined />} style={{ marginBottom: 16 }}
           onClick={() => {
@@ -1602,12 +2025,14 @@ function AnnouncementTab() {
         </Button>
       </PermissionGuard>
       <Table rowKey="id" columns={columns} dataSource={data}
+        loading={loading}
         pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
         size="middle" />
 
       {/* 发布/编辑公告 Modal */}
       <Modal title={editItem ? '编辑公告' : '发布公告'} open={modalOpen} width={640} confirmLoading={saving}
-        onCancel={() => { setModalOpen(false); setEditItem(null); }}
+        closable={!saving} maskClosable={false} keyboard={!saving}
+        onCancel={() => { if (!saving) { setModalOpen(false); setEditItem(null); } }}
         onOk={() => form.submit()} okText={editItem ? '保存' : '发布'}>
         <Form form={form} layout="vertical" onFinish={handleSave}>
           <Form.Item name="title" label="标题" rules={[{ required: true, message: '请输入公告标题' }]}>
@@ -1680,7 +2105,8 @@ function AnnouncementTab() {
 
       {/* 已读统计 Modal */}
       <Modal title={`公告已读统计 - ${statsTitle}`} open={statsOpen}
-        onCancel={() => setStatsOpen(false)} footer={null} width={600}>
+        loading={statsLoading}
+        onCancel={() => { statsRequestId.current += 1; setStatsOpen(false); }} footer={null} width={600}>
         {stats && (
           <>
             <Row gutter={16} style={{ marginBottom: 20 }}>
@@ -1728,32 +2154,39 @@ function SettingsTab() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [users, setUsers] = useState<SimpleUser[]>([]);
   const [reminderConfig, setReminderConfig] = useState<TimesheetReminderConfig>({
-    enabled: false,
-    weekdays: [5],
-    time: '17:30',
-    targetScope: 'all',
-    message: '请及时填写并提交本周工时，谢谢。',
+    ...DEFAULT_TIMESHEET_REMINDER_CONFIG,
+    weekdays: [...DEFAULT_TIMESHEET_REMINDER_CONFIG.weekdays],
   });
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [savingKey, setSavingKey] = useState<string>();
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [catalogWarning, setCatalogWarning] = useState(false);
   const { setSystemName } = useAppStore();
+  const loadRequestId = useRef(0);
 
   useEffect(() => {
-    loadSettings();
+    void loadSettings();
+    return () => { loadRequestId.current += 1; };
   }, []);
 
   const loadSettings = async () => {
+    const requestId = ++loadRequestId.current;
     setLoading(true);
+    setLoadError(null);
     try {
-      const [res, deptRes, groupRes, userRes] = await Promise.all([
+      const [settingsResult, deptResult, groupResult, userResult] = await Promise.allSettled([
         systemApi.getSettings(),
         systemApi.getDepartments(),
         systemApi.getGroups(),
         systemApi.getAllUsers(),
       ]);
-      if (deptRes.data) setDepartments(deptRes.data);
-      if (groupRes.data) setGroups(groupRes.data);
-      if (userRes.data) setUsers(userRes.data);
+      if (requestId !== loadRequestId.current) return;
+      if (settingsResult.status === 'rejected') throw settingsResult.reason;
+      const res = settingsResult.value;
+      if (deptResult.status === 'fulfilled' && deptResult.value.data) setDepartments(deptResult.value.data);
+      if (groupResult.status === 'fulfilled' && groupResult.value.data) setGroups(groupResult.value.data);
+      if (userResult.status === 'fulfilled' && userResult.value.data) setUsers(userResult.value.data);
+      setCatalogWarning([deptResult, groupResult, userResult].some(result => result.status === 'rejected'));
       if (res.data?.settings?.timesheet_unit) {
         // 兼容老值 days/hours，统一归一为 0.5 天
         const raw = res.data.settings.timesheet_unit;
@@ -1768,51 +2201,65 @@ function SettingsTab() {
       }
       if (res.data?.settings?.timesheet_reminder_config) {
         try {
-          setReminderConfig(JSON.parse(res.data.settings.timesheet_reminder_config));
-        } catch {
-          message.warning('已保存的工时提醒配置格式异常，请重新保存');
+          setReminderConfig(parseStoredTimesheetReminderConfig(res.data.settings.timesheet_reminder_config));
+        } catch (error) {
+          setReminderConfig({
+            ...DEFAULT_TIMESHEET_REMINDER_CONFIG,
+            weekdays: [...DEFAULT_TIMESHEET_REMINDER_CONFIG.weekdays],
+          });
+          message.warning(`${error instanceof Error ? error.message : '已保存的工时提醒配置格式异常'}，已恢复为停用状态，请检查后重新保存`);
         }
       }
-    } catch {}
-    setLoading(false);
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '系统设置加载失败');
+      }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
+    }
   };
 
   const handleSave = async () => {
-    setSaving(true);
+    setSavingKey('timesheet_unit');
     try {
       await systemApi.updateSetting('timesheet_unit', timesheetUnit);
       message.success('设置已保存');
-    } catch {
-      message.error('保存失败');
+    } finally {
+      setSavingKey(undefined);
     }
-    setSaving(false);
   };
 
   const saveReminderConfig = async () => {
-    if (!reminderConfig.weekdays.length) {
-      message.warning('请至少选择一个提醒日');
-      return;
-    }
-    if (!reminderConfig.time) {
-      message.warning('请选择提醒时间');
-      return;
-    }
-    if (!reminderConfig.message.trim()) {
-      message.warning('请输入提醒内容');
-      return;
-    }
-    setSaving(true);
+    const validationError = validateTimesheetReminderConfig(reminderConfig);
+    if (validationError) return message.warning(validationError);
+    setSavingKey('timesheet_reminder_config');
     try {
       await systemApi.updateSetting('timesheet_reminder_config', JSON.stringify(reminderConfig));
       message.success(reminderConfig.enabled ? '定时提醒已保存并启用' : '定时提醒已保存并停用');
-    } catch {
-      message.error('保存失败');
+    } finally {
+      setSavingKey(undefined);
     }
-    setSaving(false);
   };
 
   return (
     <div>
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void loadSettings()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {catalogWarning && (
+        <Alert
+          type="warning"
+          showIcon
+          message="部分组织或用户目录加载失败；基础设置仍可维护，按范围配置提醒前请重试"
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Card title="品牌设置" style={{ marginBottom: 16 }} loading={loading}>
         <Row align="middle" gutter={16}>
           <Col>
@@ -1829,14 +2276,16 @@ function SettingsTab() {
           <PermissionGuard permission="system:settings:manage">
             <Col>
               <Button type="primary" onClick={async () => {
-                setSaving(true);
+                const nextName = localSystemName.trim();
+                if (!nextName) return message.warning('系统名称不能为空');
+                setSavingKey('system_name');
                 try {
-                  await systemApi.updateSetting('system_name', localSystemName);
-                  setSystemName(localSystemName);
+                  await systemApi.updateSetting('system_name', nextName);
+                  setLocalSystemName(nextName);
+                  setSystemName(nextName);
                   message.success('保存成功');
-                } catch { message.error('保存失败'); }
-                setSaving(false);
-              }} loading={saving}>
+                } finally { setSavingKey(undefined); }
+              }} loading={savingKey === 'system_name'} disabled={!!savingKey && savingKey !== 'system_name'}>
                 保存
               </Button>
             </Col>
@@ -1866,7 +2315,7 @@ function SettingsTab() {
             </Radio.Group>
           </Col>
           <Col>
-            <Button type="primary" onClick={handleSave} loading={saving}>
+            <Button type="primary" onClick={handleSave} loading={savingKey === 'timesheet_unit'} disabled={!!savingKey && savingKey !== 'timesheet_unit'}>
               保存
             </Button>
           </Col>
@@ -1885,7 +2334,8 @@ function SettingsTab() {
               min={1}
               max={28}
               style={{ width: 80, margin: '0 8px' }}
-              value={lockDay}
+              value={lockDay || null}
+              placeholder="未设置"
               onChange={(v) => setLockDay(v || 0)}
             />
             <span>号后不允许提交上月工时</span>
@@ -1893,13 +2343,12 @@ function SettingsTab() {
           <PermissionGuard permission="system:settings:manage">
             <Col>
               <Button type="primary" onClick={async () => {
-                setSaving(true);
+                setSavingKey('timesheet_lock_day');
                 try {
                   await systemApi.updateSetting('timesheet_lock_day', String(lockDay || ''));
                   message.success('保存成功');
-                } catch { message.error('保存失败'); }
-                setSaving(false);
-              }} loading={saving}>
+                } finally { setSavingKey(undefined); }
+              }} loading={savingKey === 'timesheet_lock_day'} disabled={!!savingKey && savingKey !== 'timesheet_lock_day'}>
                 保存
               </Button>
             </Col>
@@ -1919,6 +2368,7 @@ function SettingsTab() {
             <Text type="secondary">{reminderConfig.enabled ? '已启用' : '已停用'}</Text>
             <Switch
               checked={reminderConfig.enabled}
+              disabled={!!savingKey}
               onChange={(enabled) => setReminderConfig(current => ({ ...current, enabled }))}
             />
           </Space>
@@ -2047,7 +2497,7 @@ function SettingsTab() {
           {' '}{reminderConfig.time || '--:--'} 执行。
         </div>
         <PermissionGuard permission="system:settings:manage">
-          <Button type="primary" onClick={saveReminderConfig} loading={saving} style={{ marginTop: 16 }}>
+          <Button type="primary" onClick={saveReminderConfig} loading={savingKey === 'timesheet_reminder_config'} disabled={!!savingKey && savingKey !== 'timesheet_reminder_config'} style={{ marginTop: 16 }}>
             保存提醒设置
           </Button>
         </PermissionGuard>

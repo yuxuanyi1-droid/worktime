@@ -76,7 +76,7 @@ export class AnnouncementService {
     targetUserIds?: number[];
     createdById: number;
   }) {
-    const userIds = await this.audienceService.resolveUserIds(data);
+    const userIds = await this.audienceService.resolveUserIds(data, { strict: true });
     const announcement = this.announceRepo.create({
       ...data,
       targetDeptId: data.targetScope === 'department' ? data.targetDeptId : null,
@@ -117,7 +117,16 @@ export class AnnouncementService {
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
-    return { list, total, page, pageSize };
+    return {
+      list: list.map(announcement => ({
+        ...announcement,
+        createdBy: undefined,
+        createdByName: announcement.createdBy?.realName || '',
+      })),
+      total,
+      page,
+      pageSize,
+    };
   }
 
   /** 获取公告详情 */
@@ -129,6 +138,7 @@ export class AnnouncementService {
   async update(id: number, data: Partial<Announcement>) {
     const existing = await this.announceRepo.findOne({ where: { id } });
     if (!existing) throw new BusinessError('公告不存在');
+    await this.audienceService.resolveUserIds(data as Announcement, { strict: true });
     await this.announceRepo.update(id, {
       ...data,
       targetDeptId: data.targetScope === 'department' ? data.targetDeptId : null,
@@ -139,7 +149,13 @@ export class AnnouncementService {
   }
 
   /** 删除公告 */
-  async delete(id: number) {
+  async delete(id: number): Promise<void> {
+    if (!this.manager) {
+      await AppDataSource.transaction(manager => new AnnouncementService(manager).delete(id));
+      return;
+    }
+    const existing = await this.announceRepo.findOne({ where: { id } });
+    if (!existing) throw new BusinessError('公告不存在', 404);
     await this.readRepo.delete({ announcementId: id });
     await this.announceRepo.delete(id);
   }
@@ -202,7 +218,21 @@ export class AnnouncementService {
   }
 
   /** 标记公告已读 */
-  async markAsRead(userId: number, announcementId: number) {
+  async markAsRead(
+    userId: number,
+    announcementId: number,
+    userDeptId: number | null,
+    userGroupId: number | null,
+  ) {
+    const userGroupIds = await this.getUserGroupAncestorIds(userGroupId);
+    const { where, params } = this.buildVisibleWhere(userId, userDeptId, userGroupIds);
+    const visible = await this.announceRepo.createQueryBuilder('a')
+      .select(['a.id'])
+      .where(where, params)
+      .andWhere('a.id = :announcementId', { announcementId })
+      .getOne();
+    if (!visible) throw new BusinessError('公告不存在或不可见', 404);
+
     const existing = await this.readRepo.findOne({ where: { userId, announcementId } });
     if (!existing) {
       await this.readRepo.save(this.readRepo.create({ userId, announcementId }));
@@ -234,20 +264,23 @@ export class AnnouncementService {
     const announcement = await this.announceRepo.findOne({ where: { id: announcementId } });
     if (!announcement) throw new BusinessError('公告不存在');
 
-    const targetCount = (await this.audienceService.resolveUserIds(announcement)).length;
-
-    const readCount = await this.readRepo.count({ where: { announcementId } });
-    const readUsers = await this.readRepo.find({
-      where: { announcementId },
-      relations: ['user'],
-      order: { readAt: 'ASC' },
-    });
+    const targetUserIds = await this.audienceService.resolveUserIds(announcement);
+    const targetCount = targetUserIds.length;
+    // 公告范围被编辑后，旧范围用户留下的已读记录不能计入当前统计或继续暴露在名单中。
+    const readUsers = targetUserIds.length
+      ? await this.readRepo.find({
+        where: { announcementId, userId: In(targetUserIds) },
+        relations: ['user'],
+        order: { readAt: 'ASC' },
+      })
+      : [];
+    const readCount = readUsers.length;
 
     return {
       targetCount,
       readCount,
       unreadCount: Math.max(0, targetCount - readCount),
-      readRate: targetCount > 0 ? Math.round((readCount / targetCount) * 100) : 0,
+      readRate: targetCount > 0 ? Math.min(100, Math.round((readCount / targetCount) * 100)) : 0,
       readUsers: readUsers.map(r => ({
         userId: r.userId,
         realName: (r as any).user?.realName || '',

@@ -5,8 +5,9 @@ import { UserOutlined, LockOutlined } from '@ant-design/icons';
 import { authApi } from '../../api/auth';
 import { useAuthStore } from '../../stores/authStore';
 import { useAppStore } from '../../stores/appStore';
-import { setOidcIntent, getRedirectUriBase } from '../OidcCallback';
+import { clearOidcIntent, getRedirectUriBase, setOidcIntent } from '../../utils/oidcIntent';
 import type { OidcProviderInfo } from '../../types';
+import { safeInternalRedirect } from '../../utils/navigation';
 
 export default function Login() {
   const [loading, setLoading] = useState(false);
@@ -29,9 +30,10 @@ export default function Login() {
   }, [loadSettings]);
 
   const handleSsoLogin = async (provider: OidcProviderInfo) => {
+    if (loading || ssoLoading) return;
     setSsoLoading(provider.name);
     try {
-      const redirect = searchParams.get('redirect') || '/';
+      const redirect = safeInternalRedirect(searchParams.get('redirect'));
       // 把登录意图存 sessionStorage，回调页据此换 token
       setOidcIntent({ mode: 'login', provider: provider.name, redirect });
       const res = await authApi.oidcLogin(provider.name, {
@@ -42,8 +44,12 @@ export default function Login() {
       if (res.data?.url) {
         // 整页跳转到 IdP 授权页
         window.location.href = res.data.url;
+      } else {
+        clearOidcIntent();
+        message.error('未获取到第三方登录地址，请稍后重试');
       }
     } catch {
+      clearOidcIntent();
       // 响应拦截器已弹错误提示
     } finally {
       setSsoLoading(null);
@@ -57,7 +63,7 @@ export default function Login() {
       if (res.data) {
         setAuth(res.data.token, res.data.user);
         message.success('登录成功');
-        const redirect = searchParams.get('redirect') || '/';
+        const redirect = safeInternalRedirect(searchParams.get('redirect'));
         navigate(redirect);
       }
     } catch {
@@ -148,11 +154,14 @@ export default function Login() {
           </p>
         </div>
 
-        <Form onFinish={onFinish} size="large" autoComplete="off">
+        <Form onFinish={onFinish} size="large" autoComplete="on">
           <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
             <Input
               prefix={<UserOutlined style={{ color: '#9A9080' }} />}
               placeholder="用户名"
+              aria-label="用户名"
+              autoComplete="username"
+              disabled={ssoLoading !== null}
               style={{
                 borderRadius: 12,
                 background: '#F8F4ED',
@@ -165,6 +174,9 @@ export default function Login() {
             <Input.Password
               prefix={<LockOutlined style={{ color: '#9A9080' }} />}
               placeholder="密码"
+              aria-label="密码"
+              autoComplete="current-password"
+              disabled={ssoLoading !== null}
               style={{
                 borderRadius: 12,
                 background: '#F8F4ED',
@@ -178,6 +190,7 @@ export default function Login() {
               type="primary"
               htmlType="submit"
               loading={loading}
+              disabled={ssoLoading !== null}
               block
               style={{
                 height: 50,
@@ -204,6 +217,7 @@ export default function Login() {
                   key={p.name}
                   block
                   loading={ssoLoading === p.name}
+                  disabled={loading || (ssoLoading !== null && ssoLoading !== p.name)}
                   onClick={() => handleSsoLogin(p)}
                   style={{
                     height: 46,

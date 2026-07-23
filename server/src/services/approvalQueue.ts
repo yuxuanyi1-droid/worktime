@@ -5,8 +5,11 @@ import { logger } from '../utils/logger';
 
 const LEGACY_QUEUE_KEY = 'worktime:queue:timesheet-approval';
 const STREAM_KEY = 'worktime:stream:timesheet-approval';
+const DEAD_LETTER_STREAM_KEY = 'worktime:stream:timesheet-approval:dead';
+const RETRY_HASH_KEY = 'worktime:stream:timesheet-approval:retries';
 const CONSUMER_GROUP = 'timesheet-approval-workers';
 const CLAIM_IDLE_MS = Math.max(5_000, Number(process.env.APPROVAL_CLAIM_IDLE_MS || 30_000));
+const MAX_ATTEMPTS = Math.max(1, Math.min(100, Number(process.env.APPROVAL_MAX_ATTEMPTS || 5)));
 
 export type TimesheetApprovalJob = {
   targetId: number;
@@ -44,13 +47,26 @@ export async function approvalQueueLength(): Promise<number> {
   }
 }
 
+export async function approvalDeadLetterLength(): Promise<number> {
+  const client = getRedis();
+  if (!client?.isReady) return 0;
+  try {
+    return await client.xLen(DEAD_LETTER_STREAM_KEY);
+  } catch {
+    return 0;
+  }
+}
+
 export function approvalBatchSize(): number {
   const n = parseInt(process.env.APPROVAL_BATCH_SIZE || '20', 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : 20;
 }
 
 type BatchJobHandler = (jobs: TimesheetApprovalJob[]) => Promise<void>;
-type StreamEntry = { id: string; message: Record<string, string> };
+export type ApprovalQueueStreamEntry = { id: string; message: Record<string, string> };
+export type ParsedApprovalQueueEntry = { id: string; job: TimesheetApprovalJob; entry: ApprovalQueueStreamEntry };
+type StreamEntry = ApprovalQueueStreamEntry;
+type ParsedEntry = ParsedApprovalQueueEntry;
 
 let workerClient: RedisClientType | null = null;
 let workerStop = false;
@@ -76,27 +92,88 @@ async function migrateLegacyQueue(client: RedisClientType): Promise<void> {
   if (migrated) logger.info({ migrated }, '[approval-queue] 旧队列任务已迁移');
 }
 
-function parseEntries(entries: StreamEntry[]): { jobs: TimesheetApprovalJob[]; validIds: string[]; invalidIds: string[] } {
-  const jobs: TimesheetApprovalJob[] = [];
-  const validIds: string[] = [];
-  const invalidIds: string[] = [];
+export function parseApprovalQueueEntries(entries: StreamEntry[]): { items: ParsedEntry[]; invalidEntries: StreamEntry[] } {
+  const items: ParsedEntry[] = [];
+  const invalidEntries: StreamEntry[] = [];
   for (const entry of entries) {
     try {
       if (!entry.message?.payload) throw new Error('缺少 payload');
-      jobs.push(JSON.parse(entry.message.payload) as TimesheetApprovalJob);
-      validIds.push(entry.id);
+      const job = JSON.parse(entry.message.payload) as TimesheetApprovalJob;
+      if (!Number.isInteger(job.targetId) || job.targetId <= 0
+        || !Number.isInteger(job.userId) || job.userId <= 0
+        || !Number.isInteger(job.projectId) || job.projectId <= 0
+        || !Array.isArray(job.recordIds) || !job.recordIds.length
+        || job.recordIds.some((id) => !Number.isInteger(id) || id <= 0)) {
+        throw new Error('任务字段无效');
+      }
+      items.push({ id: entry.id, job, entry });
     } catch (err) {
-      invalidIds.push(entry.id);
-      logger.warn({ err, streamId: entry.id }, '[approval-queue] 任务 JSON 无效，确认并丢弃');
+      invalidEntries.push(entry);
+      logger.warn({ err, streamId: entry.id }, '[approval-queue] 任务内容无效，移入死信队列');
     }
   }
-  return { jobs, validIds, invalidIds };
+  return { items, invalidEntries };
 }
 
 async function ackAndDelete(client: RedisClientType, ids: string[]): Promise<void> {
   if (!ids.length) return;
   await client.xAck(STREAM_KEY, CONSUMER_GROUP, ids);
   await client.xDel(STREAM_KEY, ids);
+}
+
+function errorMessage(error: unknown): string {
+  return String((error as Error)?.message || error || '未知错误').slice(0, 1000);
+}
+
+async function moveToDeadLetter(
+  client: RedisClientType,
+  entry: StreamEntry,
+  reason: string,
+  attempts: number,
+): Promise<void> {
+  await client.xAdd(
+    DEAD_LETTER_STREAM_KEY,
+    '*',
+    {
+      sourceId: entry.id,
+      payload: entry.message?.payload || '',
+      reason: reason.slice(0, 1000),
+      attempts: String(attempts),
+      failedAt: new Date().toISOString(),
+    },
+    { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: 10_000 } },
+  );
+  await ackAndDelete(client, [entry.id]);
+  await client.hDel(RETRY_HASH_KEY, entry.id);
+}
+
+/**
+ * 先保留批处理吞吐；整批失败时逐条重试，以隔离单个坏任务，避免它拖住同批正常审批。
+ * handler 必须像 TimesheetService.processApprovalJobs 一样保证批次事务原子性。
+ */
+export async function isolateApprovalJobFailures(
+  items: ParsedEntry[],
+  handler: BatchJobHandler,
+): Promise<{ succeeded: ParsedEntry[]; failed: Array<ParsedEntry & { error: unknown }> }> {
+  if (!items.length) return { succeeded: [], failed: [] };
+  try {
+    await handler(items.map((item) => item.job));
+    return { succeeded: items, failed: [] };
+  } catch (batchError) {
+    logger.warn({ err: batchError, n: items.length }, '[approval-queue] 批处理失败，开始逐条隔离');
+  }
+
+  const succeeded: ParsedEntry[] = [];
+  const failed: Array<ParsedEntry & { error: unknown }> = [];
+  for (const item of items) {
+    try {
+      await handler([item.job]);
+      succeeded.push(item);
+    } catch (error) {
+      failed.push({ ...item, error });
+    }
+  }
+  return { succeeded, failed };
 }
 
 /**
@@ -151,16 +228,41 @@ export async function startApprovalQueueWorker(handler: BatchJobHandler): Promis
         }
         if (!entries.length) continue;
 
-        const { jobs, validIds, invalidIds } = parseEntries(entries);
-        await ackAndDelete(client, invalidIds);
-        if (!jobs.length) continue;
+        const { items, invalidEntries } = parseApprovalQueueEntries(entries);
+        for (const invalid of invalidEntries) {
+          await moveToDeadLetter(client, invalid, '任务 JSON 或必填字段无效', 0);
+        }
+        if (!items.length) continue;
 
-        try {
-          await handler(jobs);
-          await ackAndDelete(client, validIds);
-        } catch (err) {
-          // 不 ACK：任务留在 PEL，超过 idle 阈值后由任一健康实例重新认领。
-          logger.error({ err, n: jobs.length, targetIds: jobs.map((job) => job.targetId) }, '[approval-queue] 批处理失败，等待自动重试');
+        const outcome = await isolateApprovalJobFailures(items, handler);
+        const succeededIds = outcome.succeeded.map((item) => item.id);
+        if (succeededIds.length) {
+          await ackAndDelete(client, succeededIds);
+          await client.hDel(RETRY_HASH_KEY, succeededIds);
+        }
+
+        for (const failed of outcome.failed) {
+          const attempts = await client.hIncrBy(RETRY_HASH_KEY, failed.id, 1);
+          if (attempts >= MAX_ATTEMPTS) {
+            await moveToDeadLetter(client, failed.entry, errorMessage(failed.error), attempts);
+            logger.error({
+              err: failed.error,
+              streamId: failed.id,
+              targetId: failed.job.targetId,
+              attempts,
+            }, '[approval-queue] 任务达到最大重试次数，已移入死信队列');
+          } else {
+            // 不 ACK：任务保留在 PEL，超过 idle 阈值后由任一健康实例重新认领。
+            logger.error({
+              err: failed.error,
+              streamId: failed.id,
+              targetId: failed.job.targetId,
+              attempts,
+              maxAttempts: MAX_ATTEMPTS,
+            }, '[approval-queue] 单条任务失败，等待自动重试');
+          }
+        }
+        if (outcome.failed.length) {
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
       } catch (err) {

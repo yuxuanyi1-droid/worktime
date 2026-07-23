@@ -9,16 +9,16 @@
     "start": "node dist/app.js",
     "worker:approval": "tsx src/approvalWorker.ts",
     "worker:approval:prod": "node dist/approvalWorker.js",
-    "perf:inspect": "node scripts/inspect-perf-state.cjs",
-    "perf:drill-approval-recovery": "node scripts/drill-approval-recovery.cjs",
-    "perf:stress-reference-reads": "node scripts/stress-reference-reads.mjs",
+    "perf:inspect": "node ../tests/performance/inspect-perf-state.cjs",
+    "perf:drill-approval-recovery": "node ../tests/recovery/drill-approval-recovery.cjs",
+    "perf:stress-reference-reads": "node ../tests/performance/stress-reference-reads.mjs",
     "migration:run": "tsx -e \"import './src/config/env'; import { AppDataSource } from './src/config/database'; void (async () => { await AppDataSource.initialize(); await AppDataSource.runMigrations(); await AppDataSource.destroy(); })();\"",
     "migration:revert": "tsx -e \"import './src/config/env'; import { AppDataSource } from './src/config/database'; void (async () => { await AppDataSource.initialize(); await AppDataSource.undoLastMigration(); await AppDataSource.destroy(); })();\"",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "cd .. && npm run test:server",
+    "test:watch": "cd .. && npm run test:watch:server"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@earendil-works/pi-coding-agent": "^0.81.1",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.10.0",
     "cors": "^2.8.5",

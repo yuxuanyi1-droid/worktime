@@ -2,7 +2,14 @@ import { Router } from 'express';
 import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
-import { firstQueryValue, parseOptionalPositiveInt, parsePagination } from '../utils/validation';
+import { BusinessError } from '../utils/errors';
+import {
+  firstQueryValue,
+  parseOptionalDateTime,
+  parseOptionalPositiveInt,
+  parsePagination,
+  parseString,
+} from '../utils/validation';
 
 const router = Router();
 const auditService = new AuditService();
@@ -13,12 +20,17 @@ router.use(authMiddleware);
 router.get('/', requirePermission('system:audit:view'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
+    const startDate = parseOptionalDateTime(firstQueryValue(req.query.startDate), 'startDate');
+    const endDate = parseOptionalDateTime(firstQueryValue(req.query.endDate), 'endDate');
+    if (startDate && endDate && startDate > endDate) {
+      throw new BusinessError('startDate不能晚于endDate');
+    }
     const data = await auditService.getLogs({
       userId: parseOptionalPositiveInt(firstQueryValue(req.query.userId), 'userId'),
-      action: firstQueryValue(req.query.action),
-      target: firstQueryValue(req.query.target),
-      startDate: firstQueryValue(req.query.startDate),
-      endDate: firstQueryValue(req.query.endDate),
+      action: parseString(firstQueryValue(req.query.action), 'action', { max: 50 }),
+      target: parseString(firstQueryValue(req.query.target), 'target', { max: 50 }),
+      startDate,
+      endDate,
       page,
       pageSize,
     });

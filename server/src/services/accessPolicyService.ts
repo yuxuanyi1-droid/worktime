@@ -6,7 +6,7 @@ import { Group } from '../entities/Group';
 import { Project } from '../entities/Project';
 import { User } from '../entities/User';
 import { UserPermissionGrant } from '../entities/UserPermissionGrant';
-import { expandPermissionCodes } from '../config/permissionDefinitions';
+import { expandPermissionCodes, permissionDefinitionMap } from '../config/permissionDefinitions';
 
 export type AccessViewer = {
   id: number;
@@ -24,6 +24,13 @@ export type UserDataScopePermissions = {
   allPermissions?: string[];
   departmentPermissions?: string[];
   groupPermissions?: string[];
+};
+
+export type PermissionScopeSnapshot = {
+  unrestricted: boolean;
+  departmentIds: number[];
+  groupIds: number[];
+  projectIds: number[];
 };
 
 export class AccessPolicyService {
@@ -73,29 +80,58 @@ export class AccessPolicyService {
    * 仅补充查询 active grants。
    */
   async getPermissionCodesForLoadedUser(user: { id: number; roles?: { permissions?: { code: string }[] }[] } | null) {
+    return (await this.getPermissionSnapshotForLoadedUser(user)).permissions;
+  }
+
+  /**
+   * 同时返回下一次授权状态切换时间，供认证缓存精确失效。
+   * 否则即使授权已经到期，缓存中的权限集合仍可能继续生效到固定 TTL 结束。
+   */
+  async getPermissionSnapshotForLoadedUser(
+    user: { id: number; roles?: { permissions?: { code: string }[] }[] } | null,
+  ): Promise<{ permissions: Set<string>; refreshAt: number | null }> {
     const codes = new Set<string>();
     for (const role of user?.roles ?? []) {
       for (const permission of role.permissions ?? []) {
         codes.add(permission.code);
       }
     }
+    let refreshAt: number | null = null;
     if (user) {
       const now = new Date();
       const grants = await this.grantRepo.find({
         where: { userId: user.id, status: 'active' },
       });
       for (const grant of grants) {
-        if (grant.startsAt && grant.startsAt > now) continue;
+        if (grant.startsAt && grant.startsAt > now) {
+          const transition = grant.startsAt.getTime();
+          refreshAt = refreshAt === null ? transition : Math.min(refreshAt, transition);
+          continue;
+        }
         if (grant.expiresAt && grant.expiresAt <= now) continue;
         codes.add(grant.permissionCode);
+        if (grant.expiresAt) {
+          const transition = grant.expiresAt.getTime();
+          refreshAt = refreshAt === null ? transition : Math.min(refreshAt, transition);
+        }
       }
     }
-    return expandPermissionCodes(codes);
+    return { permissions: expandPermissionCodes(codes), refreshAt };
   }
 
   async hasPermission(viewer: AccessViewer, code: string) {
     if (this.isAdmin(viewer)) return true;
     return (await this.getPermissionCodes(viewer.id)).has(code);
+  }
+
+  /**
+   * 判断权限是否拥有不受限的数据范围。
+   * 角色直接赋权和 global 临时授权才代表全量数据；仅持有相同权限码的范围授权不能被放大。
+   */
+  async hasUnrestrictedPermission(viewer: AccessViewer, code: string) {
+    if (this.isAdmin(viewer)) return true;
+    if ((await this.getRolePermissionCodes(viewer.id)).has(code)) return true;
+    return this.hasGlobalGrant(viewer, [code]);
   }
 
   private async hasAnyPermission(viewer: AccessViewer, codes: string[] = []) {
@@ -122,6 +158,16 @@ export class AccessPolicyService {
     return false;
   }
 
+  private async hasExplicitUnrestrictedPermission(viewer: AccessViewer, codes: string[]) {
+    for (const code of codes) {
+      const definition = permissionDefinitionMap.get(code);
+      if (definition?.scopeTypes?.length === 1
+        && definition.scopeTypes[0] === 'global'
+        && await this.hasUnrestrictedPermission(viewer, code)) return true;
+    }
+    return false;
+  }
+
   async getActiveGrants(userId: number, permissionCode?: string) {
     const grants = await this.grantRepo.createQueryBuilder('grant')
       .where('grant.userId = :userId', { userId })
@@ -140,6 +186,46 @@ export class AccessPolicyService {
       if (grant.scopeType !== scopeType) return false;
       return scopeId == null || grant.scopeId === scopeId;
     });
+  }
+
+  /**
+   * 返回某个可申请权限的实际授权范围。
+   * 系统管理员、角色直接赋权或 global 授权视为不受范围限制；临时授权保留并展开分组子树。
+   */
+  async getPermissionScope(viewer: AccessViewer, permissionCode: string): Promise<PermissionScopeSnapshot> {
+    if (this.isAdmin(viewer) || (await this.getRolePermissionCodes(viewer.id)).has(permissionCode)) {
+      return { unrestricted: true, departmentIds: [], groupIds: [], projectIds: [] };
+    }
+    const grants = await this.getActiveGrants(viewer.id, permissionCode);
+    if (grants.some((grant) => grant.scopeType === 'global')) {
+      return { unrestricted: true, departmentIds: [], groupIds: [], projectIds: [] };
+    }
+    const departmentIds = Array.from(new Set(grants
+      .filter((grant) => grant.scopeType === 'department' && grant.scopeId)
+      .map((grant) => grant.scopeId!)));
+    const directGroupIds = Array.from(new Set(grants
+      .filter((grant) => grant.scopeType === 'group' && grant.scopeId)
+      .map((grant) => grant.scopeId!)));
+    const projectIds = Array.from(new Set(grants
+      .filter((grant) => grant.scopeType === 'project' && grant.scopeId)
+      .map((grant) => grant.scopeId!)));
+    const groupIds = directGroupIds.length
+      ? await this.getGroupAndDescendantIds(directGroupIds)
+      : [];
+    return { unrestricted: false, departmentIds, groupIds, projectIds };
+  }
+
+  async hasPermissionAtScope(
+    viewer: AccessViewer,
+    permissionCode: string,
+    scopeType: 'department' | 'group' | 'project',
+    scopeId: number,
+  ): Promise<boolean> {
+    const scope = await this.getPermissionScope(viewer, permissionCode);
+    if (scope.unrestricted) return true;
+    if (scopeType === 'department') return scope.departmentIds.includes(scopeId);
+    if (scopeType === 'group') return scope.groupIds.includes(scopeId);
+    return scope.projectIds.includes(scopeId);
   }
 
   private async getGrantScopeIds(userId: number, permissionCodes: string[], scopeType: 'department' | 'group' | 'project') {
@@ -196,6 +282,7 @@ export class AccessPolicyService {
   async getAccessibleDepartmentIds(viewer: AccessViewer, permissionCodes: string[]) {
     if (this.isAdmin(viewer)) return null;
     if (await this.hasGlobalGrant(viewer, permissionCodes)) return null;
+    if (await this.hasExplicitUnrestrictedPermission(viewer, permissionCodes)) return null;
 
     const departmentIds = new Set<number>();
     if (await this.hasAnyRolePermission(viewer, permissionCodes)) {
@@ -211,6 +298,7 @@ export class AccessPolicyService {
   async getAccessibleGroupIds(viewer: AccessViewer, permissionCodes: string[]) {
     if (this.isAdmin(viewer)) return null;
     if (await this.hasGlobalGrant(viewer, permissionCodes)) return null;
+    if (await this.hasExplicitUnrestrictedPermission(viewer, permissionCodes)) return null;
 
     const groupIds = new Set<number>();
     if (await this.hasAnyRolePermission(viewer, permissionCodes)) {
@@ -223,11 +311,38 @@ export class AccessPolicyService {
     return Array.from(groupIds);
   }
 
+  async getAccessibleProjectIds(viewer: AccessViewer, permissionCodes: string[]) {
+    if (this.isAdmin(viewer)) return null;
+    const grantedProjectIds = await this.getGrantScopeIds(viewer.id, permissionCodes, 'project');
+    if (grantedProjectIds === null) return null;
+    if (await this.hasExplicitUnrestrictedPermission(viewer, permissionCodes)) return null;
+
+    const projectIds = new Set(grantedProjectIds);
+    if (await this.hasAnyRolePermission(viewer, permissionCodes)) {
+      const managed = await this.projectRepo.createQueryBuilder('project')
+        .innerJoin('project.managers', 'manager', 'manager.id = :userId', { userId: viewer.id })
+        .select('project.id', 'id')
+        .getRawMany<{ id: number | string }>();
+      for (const project of managed) projectIds.add(Number(project.id));
+    }
+    return Array.from(projectIds);
+  }
+
+  async getVisibleProjectsForPermissions(viewer: AccessViewer, permissionCodes: string[]) {
+    const projectIds = await this.getAccessibleProjectIds(viewer, permissionCodes);
+    const qb = this.projectRepo.createQueryBuilder('project')
+      .select(['project.id', 'project.name', 'project.code', 'project.status'])
+      .orderBy('project.createdAt', 'DESC');
+    if (projectIds === null) return qb.getMany();
+    if (!projectIds.length) return [];
+    return qb.where('project.id IN (:...projectIds)', { projectIds }).getMany();
+  }
+
   async getVisibleDepartments(viewer: AccessViewer) {
     if (this.isAdmin(viewer)) {
       return this.departmentRepo.find({ relations: ['leader'], order: { sortOrder: 'ASC', createdAt: 'ASC' } });
     }
-    if (await this.hasPermission(viewer, 'report:view:all')) {
+    if (await this.hasUnrestrictedPermission(viewer, 'report:view:all')) {
       return this.departmentRepo.find({ relations: ['leader'], order: { sortOrder: 'ASC', createdAt: 'ASC' } });
     }
 
@@ -260,7 +375,7 @@ export class AccessPolicyService {
         order: { level: 'ASC', sortOrder: 'ASC' },
       });
     }
-    if (await this.hasPermission(viewer, 'report:view:all')) {
+    if (await this.hasUnrestrictedPermission(viewer, 'report:view:all')) {
       return this.groupRepo.find({
         relations: ['leader', 'parent', 'department'],
         order: { level: 'ASC', sortOrder: 'ASC' },
@@ -327,20 +442,30 @@ export class AccessPolicyService {
       .orderBy('project.createdAt', 'DESC');
 
     if (!this.isAdmin(viewer)) {
+      const rolePermissions = await this.getRolePermissionCodes(viewer.id);
+      const canSeeManagedProjects = [
+        'project:view:managed',
+        'project:update',
+        'project:assign_se',
+      ].some((code) => rolePermissions.has(code));
       const grantIds = await this.getGrantScopeIds(viewer.id, [
         'project:view:managed',
         'project:update',
         'project:assign_se',
       ], 'project');
-      if (grantIds === null || await this.hasPermission(viewer, 'project:view:all')) {
+      if (grantIds === null || await this.hasUnrestrictedPermission(viewer, 'project:view:all')) {
         return qb.getMany();
       }
 
       const projectIds = Array.from(grantIds);
-      if (projectIds.length) {
+      if (canSeeManagedProjects && projectIds.length) {
         qb.where('(manager.id = :userId OR project.id IN (:...projectIds))', { userId: viewer.id, projectIds });
-      } else {
+      } else if (canSeeManagedProjects) {
         qb.where('manager.id = :userId', { userId: viewer.id });
+      } else if (projectIds.length) {
+        qb.where('project.id IN (:...projectIds)', { projectIds });
+      } else {
+        return [];
       }
     }
 
@@ -348,7 +473,7 @@ export class AccessPolicyService {
   }
 
   async getVisibleReportProjects(viewer: AccessViewer) {
-    if (this.isAdmin(viewer) || await this.hasPermission(viewer, 'report:view:all')) {
+    if (await this.hasUnrestrictedPermission(viewer, 'report:view:all')) {
       return this.projectRepo.find({
         relations: ['managers', 'moduleSEs', 'moduleSEs.user', 'moduleSEs.group', 'moduleSEs.group.department'],
         order: { createdAt: 'DESC' },
@@ -385,7 +510,7 @@ export class AccessPolicyService {
 
   async canAccessDepartment(viewer: AccessViewer, departmentId: number) {
     if (this.isAdmin(viewer)) return true;
-    if (await this.hasPermission(viewer, 'report:view:all')) return true;
+    if (await this.hasUnrestrictedPermission(viewer, 'report:view:all')) return true;
     const department = await this.departmentRepo.findOne({ where: { id: departmentId } });
     return department?.leaderId === viewer.id
       || await this.hasScopedGrant(viewer, 'report:view:department', 'department', departmentId)
@@ -397,7 +522,7 @@ export class AccessPolicyService {
 
   async canAccessGroup(viewer: AccessViewer, groupId: number, options: { allowDepartmentLeader?: boolean } = {}) {
     if (this.isAdmin(viewer)) return true;
-    if (await this.hasPermission(viewer, 'report:view:all')) return true;
+    if (await this.hasUnrestrictedPermission(viewer, 'report:view:all')) return true;
 
     const group = await this.groupRepo.findOne({ where: { id: groupId } });
     if (!group) return false;
@@ -419,13 +544,20 @@ export class AccessPolicyService {
 
   async canAccessProject(viewer: AccessViewer, projectId: number) {
     if (this.isAdmin(viewer)) return true;
-    if (await this.hasPermission(viewer, 'project:view:all')) return true;
-    const project = await this.projectRepo.findOne({ where: { id: projectId }, relations: ['managers'] });
-    return project?.managers?.some((manager) => manager.id === viewer.id)
-      || await this.hasScopedGrant(viewer, 'project:view:managed', 'project', projectId)
+    if (await this.hasUnrestrictedPermission(viewer, 'project:view:all')) return true;
+    if (await this.hasScopedGrant(viewer, 'project:view:managed', 'project', projectId)
       || await this.hasScopedGrant(viewer, 'project:update', 'project', projectId)
-      || await this.hasScopedGrant(viewer, 'project:assign_se', 'project', projectId)
-      || false;
+      || await this.hasScopedGrant(viewer, 'project:assign_se', 'project', projectId)) return true;
+
+    const rolePermissions = await this.getRolePermissionCodes(viewer.id);
+    const canSeeManagedProject = [
+      'project:view:managed',
+      'project:update',
+      'project:assign_se',
+    ].some((code) => rolePermissions.has(code));
+    if (!canSeeManagedProject) return false;
+    const project = await this.projectRepo.findOne({ where: { id: projectId }, relations: ['managers'] });
+    return project?.managers?.some((manager) => manager.id === viewer.id) || false;
   }
 
   async canUpdateProject(viewer: AccessViewer, projectId: number) {
@@ -446,7 +578,7 @@ export class AccessPolicyService {
 
   async canAccessProjectReport(viewer: AccessViewer, projectId: number) {
     if (this.isAdmin(viewer)) return true;
-    if (await this.hasPermission(viewer, 'report:view:all')) return true;
+    if (await this.hasUnrestrictedPermission(viewer, 'report:view:all')) return true;
     if (await this.hasScopedGrant(viewer, 'report:view:project', 'project', projectId)) return true;
     return this.canAccessProject(viewer, projectId);
   }

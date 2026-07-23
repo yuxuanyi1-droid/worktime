@@ -9,16 +9,35 @@ http://:3000 {
 
 	encode zstd gzip
 
-	reverse_proxy 127.0.0.1:3011 127.0.0.1:3012 127.0.0.1:3013 {
-		lb_policy least_conn
+	route {
+		# AI 会话与 SSE 回调驻留在单个 API 实例内。首次访问由 Caddy 写入亲和 Cookie，
+		# 后续创建、流式聊天、排队和停止请求必须回到同一实例。
+		@agent path /worktime/api/v1/agent/*
+		reverse_proxy @agent 127.0.0.1:3011 127.0.0.1:3012 127.0.0.1:3013 {
+			lb_policy cookie worktime_ai_upstream {$CADDY_LB_COOKIE_SECRET}
 
-		health_uri /worktime/api/health
-		health_interval 10s
-		health_timeout 2s
-		health_status 200
-		fail_duration 30s
-		max_fails 2
-		lb_try_duration 2s
-		lb_try_interval 100ms
+			health_uri /worktime/api/health
+			health_interval 10s
+			health_timeout 2s
+			health_status 200
+			fail_duration 30s
+			max_fails 2
+			lb_try_duration 2s
+			lb_try_interval 100ms
+		}
+
+		# 其他短请求继续按当前连接数均衡，避免 AI 长连接影响普通 API 分配。
+		reverse_proxy 127.0.0.1:3011 127.0.0.1:3012 127.0.0.1:3013 {
+			lb_policy least_conn
+
+			health_uri /worktime/api/health
+			health_interval 10s
+			health_timeout 2s
+			health_status 200
+			fail_duration 30s
+			max_fails 2
+			lb_try_duration 2s
+			lb_try_interval 100ms
+		}
 	}
 }

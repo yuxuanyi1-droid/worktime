@@ -46,30 +46,38 @@ export function useRequest<T, P extends any[] = []>(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+    };
   }, []);
 
   const run = useCallback(async (...args: P): Promise<T | undefined> => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
       const result = await service(...args);
-      if (mountedRef.current) setData(result);
+      if (mountedRef.current && requestId === requestIdRef.current) setData(result);
       return result;
     } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.message || errorMessage || '请求失败';
-      if (mountedRef.current) setError(msg);
-      if (showError) message.error(msg);
+      const msg = e?.response?.data?.message || errorMessage || e?.message || '请求失败';
+      if (mountedRef.current && requestId === requestIdRef.current) {
+        setError(msg);
+        if (showError) message.error(msg);
+      }
       return undefined;
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
     }
   }, [service, showError, errorMessage]);
 
   const reset = useCallback(() => {
+    requestIdRef.current += 1;
     setData(initialData);
     setLoading(false);
     setError(null);

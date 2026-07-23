@@ -11,6 +11,9 @@ export const authApi = {
   getProfile: () =>
     request.get<any, { code: number; data: UserInfo }>('/auth/profile'),
 
+  updateProfile: (data: { realName: string; email?: string; phone?: string }) =>
+    request.put<any, { code: number; data: UserInfo }>('/auth/profile', data),
+
   changePassword: (data: { oldPassword: string; newPassword: string }) =>
     request.put<any, { code: number }>('/auth/change-password', data),
 

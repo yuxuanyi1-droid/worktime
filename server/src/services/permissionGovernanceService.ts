@@ -1,4 +1,4 @@
-import { EntityManager, In, IsNull } from 'typeorm';
+import { EntityManager, In, IsNull, LessThanOrEqual } from 'typeorm';
 import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { permissionDefinitionMap, permissionDefinitions } from '../config/permissionDefinitions';
@@ -12,6 +12,7 @@ import { User } from '../entities/User';
 import { PermissionScopeType, UserPermissionGrant } from '../entities/UserPermissionGrant';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationPublisher } from './notifications';
+import { invalidateAuthUser, invalidateAuthUsers } from '../config/cache';
 
 export type PermissionRequestPayload = {
   permissionCode: string;
@@ -23,6 +24,10 @@ export type PermissionRequestPayload = {
 
 export class PermissionGovernanceService {
   constructor(private manager?: EntityManager) {}
+
+  private transaction<T>(work: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return this.manager ? work(this.manager) : AppDataSource.transaction(work);
+  }
 
   private get permissionRepo() { return (this.manager ?? AppDataSource).getRepository(Permission); }
   private get requestRepo() { return (this.manager ?? AppDataSource).getRepository(PermissionRequest); }
@@ -70,6 +75,7 @@ export class PermissionGovernanceService {
     if (scopeType === 'project') {
       const project = await this.projectRepo.findOneBy({ id: scopeId });
       if (!project) throw new BusinessError('项目不存在');
+      if (project.status !== 'active') throw new BusinessError('只能申请进行中项目的权限');
       return project.name;
     }
     throw new BusinessError('不支持的权限范围');
@@ -78,8 +84,12 @@ export class PermissionGovernanceService {
   private async normalizePayload(payload: PermissionRequestPayload) {
     const definition = permissionDefinitionMap.get(payload.permissionCode);
     if (!definition || !definition.grantable) throw new BusinessError('该权限不支持申请开通');
-    if (definition.scopeTypes?.length && !definition.scopeTypes.includes(payload.scopeType)) {
+    if (!definition.scopeTypes?.length || !definition.scopeTypes.includes(payload.scopeType)) {
       throw new BusinessError('权限范围与申请权限不匹配');
+    }
+
+    if (payload.expiresAt && payload.expiresAt.getTime() <= Date.now()) {
+      throw new BusinessError('权限有效期必须晚于当前时间');
     }
 
     const permission = await this.permissionRepo.findOne({ where: { code: payload.permissionCode } });
@@ -90,75 +100,125 @@ export class PermissionGovernanceService {
     return { definition, permission, scopeId, scopeName };
   }
 
+  /**
+   * 把已经超过有效期、但仍保留 active 状态的历史授权转为 expired。
+   * 权限判断本身仍会实时检查 expiresAt；这里用于保证管理列表与唯一约束状态一致。
+   */
+  private async expireElapsedGrants(userIds?: number[]): Promise<number[]> {
+    const where: any = {
+      status: 'active',
+      expiresAt: LessThanOrEqual(new Date()),
+    };
+    if (userIds?.length) where.userId = In(userIds);
+
+    const elapsed = await this.grantRepo.find({ where, select: ['id', 'userId'] });
+    if (!elapsed.length) return [];
+    await this.grantRepo.update(
+      { id: In(elapsed.map((grant) => grant.id)) },
+      { status: 'expired' },
+    );
+    return [...new Set(elapsed.map((grant) => grant.userId))];
+  }
+
+  private isUniqueViolation(error: unknown, constraint: string): boolean {
+    const candidate = error as { driverError?: { code?: string; constraint?: string }; code?: string; constraint?: string };
+    const code = candidate.driverError?.code ?? candidate.code;
+    const name = candidate.driverError?.constraint ?? candidate.constraint;
+    return code === '23505' && name === constraint;
+  }
+
   async createAndSubmit(applicantId: number, payload: PermissionRequestPayload) {
     type PendingNotify = { approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string };
     const notifications: PendingNotify[] = [];
     let requestId: number;
 
-    await AppDataSource.transaction(async (manager) => {
-      const txService = new PermissionGovernanceService(manager);
-      const { definition, permission, scopeId, scopeName } = await txService.normalizePayload(payload);
-      const applicant = await txService.userRepo.findOneBy({ id: applicantId });
-      if (!applicant) throw new BusinessError('申请人不存在');
+    try {
+      await this.transaction(async (manager) => {
+        const txService = new PermissionGovernanceService(manager);
+        const { definition, permission, scopeId, scopeName } = await txService.normalizePayload(payload);
+        const applicant = await txService.userRepo.findOneBy({ id: applicantId });
+        if (!applicant || applicant.status !== 1) throw new BusinessError('申请人不存在或已被禁用');
 
-      const existingGrant = await txService.grantRepo.findOne({
-        where: {
+        await txService.expireElapsedGrants([applicantId]);
+
+        const grantScope = {
           userId: applicantId,
           permissionCode: payload.permissionCode,
           scopeType: payload.scopeType,
           scopeId: scopeId === null ? IsNull() : scopeId,
-          status: 'active',
-        },
-      });
-      if (existingGrant) throw new BusinessError('该权限已经开通');
-
-      const request = await txService.requestRepo.save(txService.requestRepo.create({
-        applicantId,
-        permissionId: permission.id,
-        permissionCode: payload.permissionCode,
-        permissionName: definition.requestName || definition.name,
-        scopeType: payload.scopeType,
-        scopeId,
-        scopeName,
-        reason: payload.reason,
-        expiresAt: payload.expiresAt ?? null,
-        status: 'submitted',
-      }));
-      requestId = request.id;
-
-      const resolved = await txService.approvalInstanceService.start({
-        targetType: 'permission_request',
-        targetId: request.id,
-        applicantId,
-      });
-
-      if (resolved.status === 'submitted' && resolved.instance) {
-        await txService.requestRepo.update(request.id, {
-          currentStep: resolved.instance.currentStepOrder || 1,
-          approvalFlowId: resolved.instance.flowId,
-          approvalInstanceId: resolved.instance.id,
-          totalSteps: resolved.instance.totalSteps,
+        };
+        const existingGrant = await txService.grantRepo.findOne({
+          where: { ...grantScope, status: 'active' },
         });
-        if (resolved.firstApproverIds.length) {
-          notifications.push({
-            approverIds: resolved.firstApproverIds,
-            targetType: 'permission_request',
-            targetId: request.id,
-            applicantName: applicant.realName,
-            title: `权限申请 ${definition.requestName || definition.name}`,
+        if (existingGrant) throw new BusinessError('该范围的权限已经开通');
+
+        const existingRequest = await txService.requestRepo.findOne({
+          where: {
+            applicantId,
+            permissionCode: payload.permissionCode,
+            scopeType: payload.scopeType,
+            scopeId: scopeId === null ? IsNull() : scopeId,
+            status: 'submitted',
+          },
+        });
+        if (existingRequest) throw new BusinessError('同一范围已有审批中的权限申请，请勿重复提交');
+
+        const request = await txService.requestRepo.save(txService.requestRepo.create({
+          applicantId,
+          permissionId: permission.id,
+          permissionCode: payload.permissionCode,
+          permissionName: definition.requestName || definition.name,
+          scopeType: payload.scopeType,
+          scopeId,
+          scopeName,
+          reason: payload.reason,
+          expiresAt: payload.expiresAt ?? null,
+          status: 'submitted',
+        }));
+        requestId = request.id;
+
+        const resolved = await txService.approvalInstanceService.start({
+          targetType: 'permission_request',
+          targetId: request.id,
+          applicantId,
+        });
+
+        if (resolved.status === 'submitted' && resolved.instance) {
+          await txService.requestRepo.update(request.id, {
+            currentStep: resolved.instance.currentStepOrder || 1,
+            approvalFlowId: resolved.instance.flowId,
+            approvalInstanceId: resolved.instance.id,
+            totalSteps: resolved.instance.totalSteps,
+          });
+          if (resolved.firstApproverIds.length) {
+            notifications.push({
+              approverIds: resolved.firstApproverIds,
+              targetType: 'permission_request',
+              targetId: request.id,
+              applicantName: applicant.realName,
+              title: `权限申请 ${definition.requestName || definition.name}`,
+            });
+          }
+        } else {
+          // 保留 SDK 返回类型兼容；当前审批实例服务不允许无流程自动通过。
+          const grant = await txService.activateGrant(request.id, null, null);
+          await txService.requestRepo.update(request.id, {
+            status: 'approved',
+            currentStep: 0,
+            totalSteps: 0,
+            approvalInstanceId: resolved.instance?.id ?? null,
+            grantId: grant.id,
           });
         }
-      } else {
-        const grant = await txService.activateGrant(request.id, null, null);
-        await txService.requestRepo.update(request.id, {
-          status: 'approved',
-          currentStep: 0,
-          totalSteps: 0,
-          approvalInstanceId: resolved.instance?.id ?? null,
-          grantId: grant.id,
-        });
+      });
+    } catch (error) {
+      if (this.isUniqueViolation(error, 'uq_permission_requests_submitted_scope')) {
+        throw new BusinessError('同一范围已有审批中的权限申请，请勿重复提交');
       }
-    });
+      throw error;
+    }
+
+    await invalidateAuthUser(applicantId);
 
     const notifier = new NotificationPublisher();
     for (const n of notifications) {
@@ -171,7 +231,16 @@ export class PermissionGovernanceService {
   async activateGrant(requestId: number, approvalInstanceId: number | null, grantedBy: { id: number; name: string } | null) {
     const request = await this.requestRepo.findOne({ where: { id: requestId } });
     if (!request) throw new BusinessError('权限申请不存在');
+    if (request.status !== 'submitted' && request.status !== 'approved') {
+      throw new BusinessError('当前权限申请状态不允许授权');
+    }
+    if (request.expiresAt && request.expiresAt.getTime() <= Date.now()) {
+      throw new BusinessError('权限申请的有效期已过，请驳回后重新申请');
+    }
     const permission = await this.permissionRepo.findOne({ where: { code: request.permissionCode } });
+    if (!permission) throw new BusinessError('申请对应的权限已不存在');
+
+    await this.expireElapsedGrants([request.applicantId]);
 
     let grant = await this.grantRepo.findOne({
       where: {
@@ -183,10 +252,14 @@ export class PermissionGovernanceService {
       },
     });
 
+    if (grant && grant.requestId !== request.id) {
+      throw new BusinessError('该范围的权限已通过其他申请开通');
+    }
+
     if (!grant) {
       grant = this.grantRepo.create({
         userId: request.applicantId,
-        permissionId: permission?.id ?? null,
+        permissionId: permission.id,
         permissionCode: request.permissionCode,
         scopeType: request.scopeType,
         scopeId: request.scopeId,
@@ -201,7 +274,14 @@ export class PermissionGovernanceService {
         grantedByName: grantedBy?.name ?? null,
         reason: request.reason,
       });
-      grant = await this.grantRepo.save(grant);
+      try {
+        grant = await this.grantRepo.save(grant);
+      } catch (error) {
+        if (this.isUniqueViolation(error, 'uq_user_permission_grants_active_scope')) {
+          throw new BusinessError('该范围的权限已通过其他申请开通');
+        }
+        throw error;
+      }
     }
 
     request.status = 'approved';
@@ -222,7 +302,7 @@ export class PermissionGovernanceService {
   }
 
   async withdraw(requestId: number, applicantId: number) {
-    return AppDataSource.transaction(async (manager) => {
+    return this.transaction(async (manager) => {
       const txService = new PermissionGovernanceService(manager);
       const request = await txService.requestRepo.findOne({ where: { id: requestId } });
       if (!request) throw new BusinessError('权限申请不存在');
@@ -251,17 +331,26 @@ export class PermissionGovernanceService {
   }
 
   async revokeGrant(grantId: number, operatorId: number, reason?: string) {
-    return AppDataSource.transaction(async (manager) => {
+    const normalizedReason = reason?.trim();
+    if (!normalizedReason) throw new BusinessError('请填写撤销原因');
+
+    let affectedUserId = 0;
+    const result = await this.transaction(async (manager) => {
       const txService = new PermissionGovernanceService(manager);
+      const operator = await txService.userRepo.findOneBy({ id: operatorId, status: 1 });
+      if (!operator) throw new BusinessError('操作人不存在或已被禁用');
       const grant = await txService.grantRepo.findOne({ where: { id: grantId } });
       if (!grant) throw new BusinessError('授权记录不存在');
-      if (grant.status !== 'active') return grant;
+      if (grant.status !== 'active') throw new BusinessError('该授权已失效，无需重复撤销');
+      affectedUserId = grant.userId;
       grant.status = 'revoked';
       grant.revokedAt = new Date();
       grant.revokedById = operatorId;
-      grant.revokeReason = reason || null;
+      grant.revokeReason = normalizedReason;
       return txService.grantRepo.save(grant);
     });
+    if (!this.manager && affectedUserId) await invalidateAuthUser(affectedUserId);
+    return result;
   }
 
   async getRequestById(id: number) {
@@ -291,6 +380,9 @@ export class PermissionGovernanceService {
     const where: any = {};
     if (userId) where.userId = userId;
     if (status) where.status = status;
+    const expiredUserIds = await this.expireElapsedGrants(userId ? [userId] : undefined);
+    if (!this.manager) await invalidateAuthUsers(expiredUserIds);
+
     const [list, total] = await this.grantRepo.findAndCount({
       where,
       relations: ['user'],
@@ -303,14 +395,20 @@ export class PermissionGovernanceService {
 
   async getGrantsByUserIds(userIds: number[]) {
     if (!userIds.length) return [];
-    return this.grantRepo.find({
-      where: { userId: In(userIds), status: 'active' },
-      order: { updatedAt: 'DESC' },
-    });
+    const expiredUserIds = await this.expireElapsedGrants(userIds);
+    if (!this.manager) await invalidateAuthUsers(expiredUserIds);
+    return this.grantRepo.createQueryBuilder('grant')
+      .where('grant.userId IN (:...userIds)', { userIds })
+      .andWhere('grant.status = :status', { status: 'active' })
+      .andWhere('(grant.startsAt IS NULL OR grant.startsAt <= :now)', { now: new Date() })
+      .andWhere('(grant.expiresAt IS NULL OR grant.expiresAt > :now)', { now: new Date() })
+      .orderBy('grant.updatedAt', 'DESC')
+      .getMany();
   }
 
   async getUserOptions() {
     const users = await this.userRepo.find({
+      where: { status: 1 },
       relations: ['department'],
       order: { realName: 'ASC' },
     });

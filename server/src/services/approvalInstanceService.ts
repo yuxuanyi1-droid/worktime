@@ -3,8 +3,7 @@ import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { ApprovalInstance, ApprovalInstanceStepSnapshot } from '../entities/ApprovalInstance';
 import { ApprovalTask } from '../entities/ApprovalTask';
-import { ApprovalRecord } from '../entities/ApprovalRecord';
-import { ApprovalTargetType } from '../entities/ApprovalFlowVersion';
+import { ApprovalFlowVersion, ApprovalTargetType } from '../entities/ApprovalFlowVersion';
 import { ApprovalFlowEngine } from './approvalFlowService';
 import { Timesheet } from '../entities/Timesheet';
 
@@ -13,7 +12,6 @@ export class ApprovalInstanceService {
 
   private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
   private get taskRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalTask); }
-  private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
   private get flowEngine() { return new ApprovalFlowEngine(this.manager); }
   private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
 
@@ -25,6 +23,67 @@ export class ApprovalInstanceService {
   }) {
     const [result] = await this.startMany([params]);
     return result;
+  }
+
+  private async resolveStepSnapshots(
+    version: ApprovalFlowVersion,
+    applicantId: number,
+    projectId?: number | null,
+  ): Promise<ApprovalInstanceStepSnapshot[]> {
+    const steps: ApprovalInstanceStepSnapshot[] = [];
+    const seenApprovers = new Set<number>();
+    for (const sourceStep of [...version.steps].sort((a, b) => a.stepOrder - b.stepOrder)) {
+      const approvers = await this.flowEngine.resolveApprovers(
+        sourceStep,
+        applicantId,
+        projectId ?? undefined,
+      );
+      const uniqueApprovers = new Map<number, string>();
+      for (const approver of approvers) {
+        if (approver.userId !== applicantId && !seenApprovers.has(approver.userId)) {
+          uniqueApprovers.set(approver.userId, approver.userName);
+        }
+      }
+      if (uniqueApprovers.size > 0) {
+        uniqueApprovers.forEach((_, id) => seenApprovers.add(id));
+        steps.push({
+          stepOrder: steps.length + 1,
+          sourceStepOrder: sourceStep.stepOrder,
+          stepType: sourceStep.stepType,
+          label: sourceStep.label,
+          approvers: Array.from(uniqueApprovers.entries()).map(([id, name]) => ({ id, name })),
+          requireAllApprovers: !!sourceStep.requireAllApprovers,
+        });
+      }
+    }
+    return steps;
+  }
+
+  /**
+   * 提交前只读预检审批流程和审批人。工时审批实例仍可异步批量创建，
+   * 但配置错误会在业务记录改成 submitted 之前直接反馈给用户。
+   */
+  async validateStartMany(paramsList: Array<{
+    targetType: ApprovalTargetType;
+    applicantId: number;
+    projectId?: number | null;
+  }>): Promise<void> {
+    const cache = new Map<string, ApprovalInstanceStepSnapshot[]>();
+    for (const params of paramsList) {
+      const version = await this.flowEngine.getDefaultFlowVersion(params.targetType);
+      if (!version?.steps?.length) {
+        throw new BusinessError('当前业务未配置可用的默认审批流程，请联系管理员');
+      }
+      const key = `${version.id}:${params.applicantId}:${params.projectId ?? ''}`;
+      let steps = cache.get(key);
+      if (!steps) {
+        steps = await this.resolveStepSnapshots(version, params.applicantId, params.projectId);
+        cache.set(key, steps);
+      }
+      if (!steps.length) {
+        throw new BusinessError('审批流程未找到有效审批人，请检查组织负责人或项目审批配置');
+      }
+    }
   }
 
   /**
@@ -59,6 +118,9 @@ export class ApprovalInstanceService {
 
     for (const [targetType, group] of byType) {
       const version = await this.flowEngine.getDefaultFlowVersion(targetType);
+      if (!version?.steps?.length) {
+        throw new BusinessError('当前业务未配置可用的默认审批流程，请联系管理员');
+      }
       const now = new Date();
       const stepsCache = new Map<string, ApprovalInstanceStepSnapshot[]>();
 
@@ -67,37 +129,7 @@ export class ApprovalInstanceService {
         const hit = stepsCache.get(cacheKey);
         if (hit) return hit;
 
-        if (!version || !version.steps?.length) {
-          stepsCache.set(cacheKey, []);
-          return [];
-        }
-
-        const steps: ApprovalInstanceStepSnapshot[] = [];
-        const seenApprovers = new Set<number>();
-        for (const sourceStep of [...version.steps].sort((a, b) => a.stepOrder - b.stepOrder)) {
-          const approvers = await this.flowEngine.resolveApprovers(
-            sourceStep,
-            applicantId,
-            projectId ?? undefined,
-          );
-          const uniqueApprovers = new Map<number, string>();
-          for (const approver of approvers) {
-            if (approver.userId !== applicantId && !seenApprovers.has(approver.userId)) {
-              uniqueApprovers.set(approver.userId, approver.userName);
-            }
-          }
-          if (uniqueApprovers.size > 0) {
-            uniqueApprovers.forEach((_, id) => seenApprovers.add(id));
-            steps.push({
-              stepOrder: steps.length + 1,
-              sourceStepOrder: sourceStep.stepOrder,
-              stepType: sourceStep.stepType,
-              label: sourceStep.label,
-              approvers: Array.from(uniqueApprovers.entries()).map(([id, name]) => ({ id, name })),
-              requireAllApprovers: !!(sourceStep as any).requireAllApprovers,
-            });
-          }
-        }
+        const steps = await this.resolveStepSnapshots(version, applicantId, projectId);
         stepsCache.set(cacheKey, steps);
         return steps;
       };
@@ -116,105 +148,65 @@ export class ApprovalInstanceService {
 
       for (let gi = 0; gi < group.length; gi++) {
         const p = group[gi];
+        const steps = await buildSteps(p.applicantId, p.projectId);
+        if (!steps.length) {
+          throw new BusinessError('审批流程未找到有效审批人，请检查组织负责人或项目审批配置');
+        }
         prepared.push({
           globalIdx: typeIndices[gi],
           params: p,
-          steps: await buildSteps(p.applicantId, p.projectId),
+          steps,
         });
       }
 
       const instanceEntities = prepared.map(({ params: p, steps }) => {
-        const noFlow = !version || !version.steps?.length;
-        if (noFlow) {
-          return this.instanceRepo.create({
-            targetType: p.targetType,
-            targetId: p.targetId,
-            applicantId: p.applicantId,
-            status: 'approved',
-            currentStepOrder: null,
-            totalSteps: 0,
-            flowId: version?.flowId ?? null,
-            flowVersionId: version?.id ?? null,
-            flowName: version?.flowName ?? '无审批流程',
-            flowVersionNumber: version?.version ?? 0,
-            stepsSnapshot: [],
-            submittedAt: now,
-            finishedAt: now,
-          });
-        }
         return this.instanceRepo.create({
           targetType: p.targetType,
           targetId: p.targetId,
           applicantId: p.applicantId,
-          status: steps.length ? 'pending' : 'approved',
-          currentStepOrder: steps.length ? 1 : null,
+          status: 'pending',
+          currentStepOrder: 1,
           totalSteps: steps.length,
-          flowId: version!.flowId,
-          flowVersionId: version!.id,
-          flowName: version!.flowName,
-          flowVersionNumber: version!.version,
+          flowId: version.flowId,
+          flowVersionId: version.id,
+          flowName: version.flowName,
+          flowVersionNumber: version.version,
           stepsSnapshot: steps,
           submittedAt: now,
-          finishedAt: steps.length ? null : now,
+          finishedAt: null,
         });
       });
 
       const savedInstances = await this.instanceRepo.save(instanceEntities);
 
-      const autoRecords: ApprovalRecord[] = [];
       const tasks: ApprovalTask[] = [];
 
       prepared.forEach((row, i) => {
         const instance = savedInstances[i];
         const steps = row.steps;
-        const noFlow = !version || !version.steps?.length;
-        const autoApproved = noFlow || steps.length === 0;
-
-        if (autoApproved) {
-          autoRecords.push(this.recordRepo.create({
-            targetType: row.params.targetType as any,
-            targetId: row.params.targetId,
-            instanceId: instance.id,
-            taskId: null,
-            approverId: row.params.applicantId,
-            approverName: '系统',
-            action: 'approve',
-            comment: noFlow ? '无审批流程，系统自动通过' : '无审批人，系统自动通过',
-            stepOrder: 0,
-            stepType: 'auto' as any,
-            stepLabel: '自动通过',
-          }));
-          results[row.globalIdx] = {
-            status: 'approved',
-            instance,
-            firstApproverIds: [],
-          };
-        } else {
-          for (const step of steps) {
-            for (const approver of step.approvers) {
-              tasks.push(this.taskRepo.create({
-                instanceId: instance.id,
-                targetType: row.params.targetType,
-                targetId: row.params.targetId,
-                stepOrder: step.stepOrder,
-                sourceStepOrder: step.sourceStepOrder,
-                stepType: step.stepType,
-                stepLabel: step.label,
-                approverId: approver.id,
-                approverName: approver.name,
-                status: step.stepOrder === 1 ? 'pending' : 'waiting',
-              }));
-            }
+        for (const step of steps) {
+          for (const approver of step.approvers) {
+            tasks.push(this.taskRepo.create({
+              instanceId: instance.id,
+              targetType: row.params.targetType,
+              targetId: row.params.targetId,
+              stepOrder: step.stepOrder,
+              sourceStepOrder: step.sourceStepOrder,
+              stepType: step.stepType,
+              stepLabel: step.label,
+              approverId: approver.id,
+              approverName: approver.name,
+              status: step.stepOrder === 1 ? 'pending' : 'waiting',
+            }));
           }
-          results[row.globalIdx] = {
-            status: 'submitted',
-            instance,
-            firstApproverIds: steps[0].approvers.map((a) => a.id),
-          };
         }
+        results[row.globalIdx] = {
+          status: 'submitted',
+          instance,
+          firstApproverIds: steps[0].approvers.map((a) => a.id),
+        };
       });
 
-      if (autoRecords.length) await this.recordRepo.save(autoRecords);
       if (tasks.length) await this.taskRepo.save(tasks);
     }
 
@@ -348,8 +340,18 @@ export class ApprovalInstanceService {
     comment?: string;
     isAdmin?: boolean;
   }) {
-    const instance = await this.getPendingInstance(params.targetType, params.targetId);
-    if (!instance) throw new BusinessError('审批实例不存在或已结束');
+    const candidate = await this.getPendingInstance(params.targetType, params.targetId);
+    if (!candidate) throw new BusinessError('审批实例不存在或已结束');
+    // 审批动作由 ApprovalService 放在事务中执行。对实例行加写锁，使同一审批单的
+    // 会签/或签并发操作串行化，避免双方都基于旧 task 快照判断而永久卡在当前步骤。
+    const instance = this.manager
+      ? await this.instanceRepo.findOne({
+          where: { id: candidate.id, status: 'pending' },
+          relations: ['tasks'],
+          lock: { mode: 'pessimistic_write' },
+        })
+      : candidate;
+    if (!instance) throw new BusinessError('审批实例状态已变更，请刷新');
     if (instance.applicantId === params.approverId) throw new BusinessError('不能审批自己的申请');
     if (!instance.currentStepOrder) throw new BusinessError('审批实例当前步骤异常');
 
@@ -418,10 +420,14 @@ export class ApprovalInstanceService {
 
     // approve 分支
     if (isCountersign) {
-      // 会签：跳过当前步骤其余 task（标记 skipped 不合适——他们没操作）。
-      // 会签语义：只有所有人都 approved 才推进。其余 task 仍保持 pending，等待各自处理。
-      const remainingPending = currentTasks.filter(t => t.id !== actingTask.id && t.status === 'pending');
-      if (remainingPending.length > 0) {
+      // 会签必须以更新后的数据库状态判断；不能使用 act 开始时加载的 currentTasks，
+      // 否则并发审批时双方都可能认为“还有另一人未处理”，最终无人推进。
+      const remainingPending = await this.taskRepo.countBy({
+        instanceId: instance.id,
+        stepOrder: instance.currentStepOrder,
+        status: 'pending',
+      });
+      if (remainingPending > 0) {
         // 还有人没审批，停留在当前步骤，不推进
         await this.instanceRepo.save(instance);
         return { status: 'submitted' as const, instance, task: actingTask, nextApproverIds: [] as number[] };

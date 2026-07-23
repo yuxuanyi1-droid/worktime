@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, Index } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, Index, JoinColumn } from 'typeorm';
 import { User } from './User';
 
 /**
@@ -12,6 +12,7 @@ import { User } from './User';
  */
 @Entity('user_external_identities')
 @Index('idx_ext_identity_unique', ['provider', 'subject'], { unique: true })
+@Index('uq_ext_identity_user_provider', ['userId', 'provider'], { unique: true })
 export class UserExternalIdentity {
   @PrimaryGeneratedColumn()
   id!: number;
@@ -33,7 +34,11 @@ export class UserExternalIdentity {
   employeeId!: string | null;
 
   @ManyToOne(() => User, user => user.externalIdentities, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'userId' })
   user!: User;
+
+  @Column({ type: 'integer' })
+  userId!: number;
 
   @CreateDateColumn()
   boundAt!: Date;

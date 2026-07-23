@@ -58,7 +58,7 @@ export class NotificationService {
 
   /** 标记已读 */
   async markAsRead(userId: number, ids: number[]) {
-    if (ids.length === 0) return;
+    if (!ids.length) return;
     await this.repo.update({ userId, id: In(ids) }, { isRead: true });
   }
 
@@ -69,10 +69,8 @@ export class NotificationService {
 
   /** 删除通知 */
   async delete(userId: number, id: number) {
-    const notification = await this.repo.findOne({ where: { id } });
-    if (!notification) throw new BusinessError('通知不存在');
-    if (notification.userId !== userId) throw new BusinessError('只能删除自己的通知');
-    await this.repo.delete(id);
+    const result = await this.repo.delete({ id, userId });
+    if (!result.affected) throw new BusinessError('通知不存在', 404);
   }
 
 }

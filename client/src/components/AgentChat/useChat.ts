@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { agentApi, type AgentSessionSummary } from '../../api/agent';
 import { startChat } from './sseClient';
 
@@ -86,6 +86,18 @@ export function useChat() {
   const sendingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const initializedRef = useRef(false);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const sessionLoadRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => () => {
+    sessionLoadRequestIdRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
 
   const setSessionId = useCallback((sessionId?: string) => {
     sessionIdRef.current = sessionId;
@@ -113,14 +125,16 @@ export function useChat() {
 
   const switchSession = useCallback(async (sessionId: string) => {
     if (sendingRef.current || sessionId === sessionIdRef.current) return;
+    const requestId = ++sessionLoadRequestIdRef.current;
     setLoadingSession(true);
     try {
       const response = await agentApi.getHistory(sessionId);
+      if (requestId !== sessionLoadRequestIdRef.current) return;
       setMessages(response.data);
       setQueuedMessages([]);
       setSessionId(sessionId);
     } finally {
-      setLoadingSession(false);
+      if (requestId === sessionLoadRequestIdRef.current) setLoadingSession(false);
     }
   }, [setSessionId]);
 
@@ -137,6 +151,8 @@ export function useChat() {
 
   const newSession = useCallback(async () => {
     if (sendingRef.current) return;
+    sessionLoadRequestIdRef.current += 1;
+    setLoadingSession(false);
     setSessionId(undefined);
     setMessages([]);
     setQueuedMessages([]);
@@ -174,14 +190,26 @@ export function useChat() {
     if (!trimmed) return false;
     if (sendingRef.current) {
       if (options?.regenerate) return false;
-      return queueMessage(trimmed);
+      const queued = await queueMessage(trimmed);
+      if (!queued) throw new Error('正在创建会话，请稍后再发送');
+      return true;
     }
 
+    // 必须在首次 createSession 的 await 之前占用发送状态，否则快速连续点击会并发
+    // 创建多个服务端会话，并让后返回的 sessionId 覆盖先返回的会话。
+    sendingRef.current = true;
+    setSending(true);
     let sessionId = sessionIdRef.current;
-    if (!sessionId) {
-      const response = await agentApi.createSession();
-      sessionId = response.data.id;
-      setSessionId(sessionId);
+    try {
+      if (!sessionId) {
+        const response = await agentApi.createSession();
+        sessionId = response.data.id;
+        setSessionId(sessionId);
+      }
+    } catch (error) {
+      sendingRef.current = false;
+      setSending(false);
+      throw error;
     }
 
     const userMessage: ChatMessage = {
@@ -197,8 +225,6 @@ export function useChat() {
       startTime: Date.now(),
     };
     setMessages((previous) => [...previous, userMessage, assistantMessage]);
-    sendingRef.current = true;
-    setSending(true);
     const assistantId = assistantMessage.id;
 
     abortRef.current = startChat(
@@ -226,7 +252,6 @@ export function useChat() {
                   { id: genId(), type, text: content, contentIndex },
                 ]);
               } else {
-                if (!content) break;
                 updateParts(assistantId, (parts) => {
                   let index = -1;
                   for (let i = parts.length - 1; i >= 0; i -= 1) {
@@ -239,7 +264,7 @@ export function useChat() {
                   if (index < 0) return parts;
                   const updated = {
                     ...parts[index],
-                    text: content,
+                    text: content || parts[index].text,
                     done: subtype.endsWith('_end') || undefined,
                   };
                   return [...parts.slice(0, index), updated, ...parts.slice(index + 1)];
@@ -313,6 +338,7 @@ export function useChat() {
                 : message,
             ),
           );
+          abortRef.current = null;
           sendingRef.current = false;
           setSending(false);
           setQueuedMessages([]);
@@ -367,15 +393,15 @@ export function useChat() {
 
   const regenerate = useCallback(() => {
     if (sendingRef.current) return;
-    setMessages((previous) => {
-      if (previous.length < 2) return previous;
-      const assistantMessage = previous[previous.length - 1];
-      const userMessage = previous[previous.length - 2];
-      if (assistantMessage.role !== 'assistant' || userMessage.role !== 'user') return previous;
-      const userText = userMessage.parts.find((part) => part.type === 'text')?.text;
-      if (userText) queueMicrotask(() => void send(userText, { regenerate: true }));
-      return previous.slice(0, -2);
-    });
+    const snapshot = messagesRef.current;
+    if (snapshot.length < 2) return;
+    const assistantMessage = snapshot[snapshot.length - 1];
+    const userMessage = snapshot[snapshot.length - 2];
+    if (assistantMessage.role !== 'assistant' || userMessage.role !== 'user') return;
+    const userText = userMessage.parts.find((part) => part.type === 'text')?.text;
+    if (!userText) return;
+    setMessages((previous) => previous[previous.length - 1]?.id === assistantMessage.id ? previous.slice(0, -2) : previous);
+    void send(userText, { regenerate: true });
   }, [send]);
 
   return {

@@ -12,5 +12,6 @@ export const reportApi = {
     request.get<any, { code: number; data: DepartmentReport }>('/reports/department', { params: { departmentId, startDate, endDate, groupId } }),
   getProject: (projectId: number, startDate: string, endDate: string, params?: { departmentId?: number; groupId?: number }) =>
     request.get<any, { code: number; data: ProjectReport }>('/reports/project', { params: { projectId, startDate, endDate, ...params } }),
-  getOvertime: (params: any) => request.get<any, { code: number; data: OvertimeReport }>('/reports/overtime', { params }),
+  getOvertime: (params: { startDate: string; endDate: string; departmentId?: number; groupId?: number; projectId?: number; userId?: number }) =>
+    request.get<any, { code: number; data: OvertimeReport }>('/reports/overtime', { params }),
 };

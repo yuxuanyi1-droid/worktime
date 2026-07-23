@@ -7,6 +7,22 @@ import { ApprovalInstanceService } from './approvalInstanceService';
 import { NotificationPublisher } from './notifications';
 import { User } from '../entities/User';
 import { AccessPolicyService } from './accessPolicyService';
+import { Project } from '../entities/Project';
+
+export function getOvertimeStatsDateRange(year: number, month?: number) {
+  if (month) {
+    const start = new Date(Date.UTC(year, month - 1, 1));
+    const end = new Date(Date.UTC(year, month, 1));
+    return {
+      startDate: start.toISOString().slice(0, 10),
+      endDate: end.toISOString().slice(0, 10),
+    };
+  }
+  return {
+    startDate: `${String(year).padStart(4, '0')}-01-01`,
+    endDate: `${String(year + 1).padStart(4, '0')}-01-01`,
+  };
+}
 
 export class OvertimeService {
   constructor(private manager?: EntityManager) {}
@@ -15,8 +31,20 @@ export class OvertimeService {
   private get approvalInstanceService() { return new ApprovalInstanceService(this.manager); }
   private get accessPolicy() { return new AccessPolicyService(this.manager); }
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
+  private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
+
+  private transaction<T>(callback: (manager: EntityManager) => Promise<T>) {
+    return this.manager ? callback(this.manager) : AppDataSource.transaction(callback);
+  }
+
+  private async ensureActiveProject(projectId?: number | null) {
+    if (!projectId) throw new BusinessError('请选择加班项目');
+    const project = await this.projectRepo.findOneBy({ id: projectId });
+    if (!project || project.status !== 'active') throw new BusinessError('加班项目不存在或已停用');
+  }
 
   async create(data: { userId: number; date?: string; overtimeType?: string; days?: number; reason?: string; projectId?: number }) {
+    await this.ensureActiveProject(data.projectId);
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
     const record = this.repo.create({
       userId: data.userId,
@@ -35,8 +63,9 @@ export class OvertimeService {
     const notifications: { approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string }[] = [];
     let createdId: number;
 
-    await AppDataSource.transaction(async (manager) => {
+    await this.transaction(async (manager) => {
       const txService = new OvertimeService(manager);
+      await txService.ensureActiveProject(data.projectId);
       // 1. 创建草稿
       const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(data.userId);
       const record = txService.repo.create({
@@ -103,13 +132,24 @@ export class OvertimeService {
     const record = await this.repo.findOne({ where: { id } });
     if (!record) throw new BusinessError('记录不存在');
     if (record.userId !== userId) throw new BusinessError('只能修改自己的加班记录');
-    if (record.status !== 'draft') throw new BusinessError('仅草稿状态可修改');
+    if (!['draft', 'rejected', 'withdrawn'].includes(record.status)) {
+      throw new BusinessError('审批中或已通过的加班记录不可修改');
+    }
+
+    if (data.projectId !== undefined) await this.ensureActiveProject(data.projectId);
 
     if (data.date !== undefined) record.date = data.date;
     if (data.overtimeType !== undefined) record.overtimeType = data.overtimeType as OvertimeType;
     if (data.days !== undefined) record.days = data.days;
     if (data.reason !== undefined) record.reason = data.reason;
     if (data.projectId !== undefined) record.projectId = data.projectId ?? null;
+    if (record.status === 'rejected' || record.status === 'withdrawn') {
+      record.status = 'draft';
+      record.currentStep = 0;
+      record.approvalFlowId = null;
+      record.approvalInstanceId = null;
+      record.totalSteps = 0;
+    }
     return this.repo.save(record);
   }
 
@@ -128,9 +168,8 @@ export class OvertimeService {
       .leftJoinAndSelect('o.project', 'project')
       .where('o.userId = :userId', { userId });
 
-    if (startDate && endDate) {
-      qb.andWhere('o.date BETWEEN :startDate AND :endDate', { startDate, endDate });
-    }
+    if (startDate) qb.andWhere('o.date >= :startDate', { startDate });
+    if (endDate) qb.andWhere('o.date <= :endDate', { endDate });
     if (status) {
       qb.andWhere('o.status = :status', { status });
     }
@@ -149,9 +188,11 @@ export class OvertimeService {
     type PendingNotify = { approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string };
     const notifications: PendingNotify[] = [];
 
-    await AppDataSource.transaction(async (manager) => {
+    await this.transaction(async (manager) => {
       const txService = new OvertimeService(manager);
-      const records = await txService.repo.findBy({ id: In(ids) });
+      const uniqueIds = [...new Set(ids)];
+      const records = await txService.repo.findBy({ id: In(uniqueIds) });
+      if (records.length !== uniqueIds.length) throw new BusinessError('部分加班记录不存在，请刷新列表后重试');
       const orgSnapshot = await txService.accessPolicy.getOrgSnapshot(userId);
       for (const r of records) {
         if (r.userId !== userId) throw new BusinessError('只能提交自己的加班记录');
@@ -204,20 +245,14 @@ export class OvertimeService {
   }
 
   async getStats(userId: number, year: number, month?: number) {
+    const { startDate, endDate } = getOvertimeStatsDateRange(year, month);
     const qb = this.repo.createQueryBuilder('o')
       .select('o.overtimeType', 'type')
       .addSelect('SUM(o.days)', 'totalDays')
       .addSelect('COUNT(o.id)', 'count')
       .where('o.userId = :userId', { userId })
-      .andWhere('o.status = :status', { status: 'approved' });
-
-    if (month) {
-      qb.andWhere("strftime('%Y', o.date) = :year AND strftime('%m', o.date) = :month", {
-        year: String(year), month: String(month).padStart(2, '0'),
-      });
-    } else {
-      qb.andWhere("strftime('%Y', o.date) = :year", { year: String(year) });
-    }
+      .andWhere('o.status = :status', { status: 'approved' })
+      .andWhere('o.date >= :startDate AND o.date < :endDate', { startDate, endDate });
 
     qb.groupBy('o.overtimeType');
     return qb.getRawMany();

@@ -27,7 +27,7 @@ function createLimiter(opts: LimiterOpts): RateLimitRequestHandler {
 }
 
 /** 登录后的请求按令牌隔离额度，避免公司 NAT 出口下所有员工共享同一个 IP 桶。 */
-function authenticatedRateKey(req: Request): string {
+export function authenticatedRateKey(req: Request): string {
   const authorization = req.headers.authorization || '';
   if (authorization.startsWith('Bearer ')) {
     return `token:${crypto.createHash('sha256').update(authorization.slice(7)).digest('hex').slice(0, 32)}`;
@@ -79,6 +79,7 @@ export function activateRateLimiters(): void {
     windowMs: 60 * 1000,
     max: 30,
     prefix: 'rl:agent:',
+    keyGenerator: authenticatedRateKey,
     message: { code: 429, message: '对话请求过于频繁，请稍后再试' },
   }));
 }

@@ -113,7 +113,7 @@ router.get('/users', requirePermission('permission_grant:manage'), async (_req, 
 router.post('/grants/:id/revoke', requirePermission('permission_grant:manage'), async (req: AuthRequest, res, next) => {
   try {
     const grantId = parsePositiveInt(req.params.id, 'id');
-    const reason = parseString((req.body as Record<string, unknown>).reason, 'reason', { max: 255 });
+    const reason = parseString((req.body as Record<string, unknown>).reason, 'reason', { required: true, max: 255 });
     const data = await service.revokeGrant(grantId, req.user!.id, reason);
     auditService.log({
       userId: req.user!.id,

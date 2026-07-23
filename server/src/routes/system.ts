@@ -13,6 +13,7 @@ import {
   normalizeTimesheetReminderConfig,
   TIMESHEET_REMINDER_SETTING_KEY,
 } from '../services/timesheetReminderService';
+import { UserAudienceService } from '../services/notifications/userAudienceService';
 import {
   firstQueryValue,
   parseArray,
@@ -21,6 +22,8 @@ import {
   parseNonNegativeNumber,
   parseOptionalEnum,
   parseOptionalPositiveInt,
+  parseOptionalEmail,
+  parseOptionalPhone,
   parsePagination,
   parsePositiveInt,
   parseString,
@@ -36,12 +39,13 @@ const projectStatuses = ['active', 'completed', 'suspended', 'cancelled'] as con
 const flowTypes = ['timesheet', 'overtime', 'weekly_report', 'permission_request'] as const;
 const stepTypes = ['group_leader', 'parent_leader', 'dept_leader', 'module_se', 'project_manager', 'custom'] as const;
 const settingKeys = ['system_name', 'timesheet_unit', 'timesheet_lock_day', TIMESHEET_REMINDER_SETTING_KEY] as const;
+const publicSettingKeys = new Set<string>(['system_name', 'timesheet_unit', 'timesheet_lock_day']);
 type DepartmentCreatePayload = { name: string; description?: string; leaderId?: number };
-type DepartmentUpdatePayload = { name?: string; description?: string; leaderId?: number };
+type DepartmentUpdatePayload = { name?: string; description?: string; leaderId?: number | null };
 type GroupCreatePayload = { name: string; description?: string; departmentId?: number; parentId?: number; leaderId?: number };
-type GroupUpdatePayload = { name?: string; description?: string; departmentId?: number; parentId?: number; leaderId?: number };
+type GroupUpdatePayload = { name?: string; description?: string; departmentId?: number | null; parentId?: number | null; leaderId?: number | null };
 type UserCreatePayload = { username: string; password: string; realName: string; email?: string; phone?: string; departmentId?: number; groupId?: number; roleIds?: number[] };
-type UserUpdatePayload = { username?: string; password?: string; realName?: string; email?: string; phone?: string; status?: number; departmentId?: number; groupId?: number; roleIds?: number[] };
+type UserUpdatePayload = { realName?: string; email?: string; phone?: string; status?: number; departmentId?: number | null; groupId?: number | null; roleIds?: number[] };
 type RoleCreatePayload = { name: string; label: string; description?: string; permissionIds: number[] };
 type RoleUpdatePayload = { label?: string; description?: string };
 type ProjectCreatePayload = { name: string; code: string; description?: string; managerIds?: number[] };
@@ -49,8 +53,33 @@ type ProjectUpdatePayload = { name?: string; code?: string; description?: string
 type ApprovalFlowCreatePayload = { name: string; type: string; description?: string; isDefault?: boolean; enabled?: boolean; steps: any[] };
 type ApprovalFlowUpdatePayload = { name?: string; type?: string; description?: string; isDefault?: boolean; enabled?: boolean; steps?: any[] };
 
-async function mapProjectForViewer(project: any, viewer: AuthRequest['user']) {
-  const user = viewer!;
+function presentDepartment(department: any) {
+  const { users: _users, groups: _groups, ...safe } = department;
+  return {
+    ...safe,
+    leader: department.leader ? { id: department.leader.id, realName: department.leader.realName } : null,
+  };
+}
+
+function presentGroup(group: any) {
+  const { users: _users, children: _children, ...safe } = group;
+  return {
+    ...safe,
+    leader: group.leader ? { id: group.leader.id, realName: group.leader.realName } : null,
+    parent: group.parent ? { id: group.parent.id, name: group.parent.name } : null,
+    department: group.department ? { id: group.department.id, name: group.department.name } : undefined,
+  };
+}
+
+function presentProjectSe(se: any) {
+  return {
+    ...se,
+    user: se.user ? { id: se.user.id, realName: se.user.realName } : null,
+    group: se.group ? { id: se.group.id, name: se.group.name } : null,
+  };
+}
+
+function presentProject(project: any) {
   return {
     ...project,
     managers: (project.managers || []).map((m: any) => ({ id: m.id, realName: m.realName })),
@@ -65,6 +94,13 @@ async function mapProjectForViewer(project: any, viewer: AuthRequest['user']) {
       groupName: a.group?.name || a.groupName || '',
       allocation: Number(a.allocation),
     })),
+  };
+}
+
+async function mapProjectForViewer(project: any, viewer: AuthRequest['user']) {
+  const user = viewer!;
+  return {
+    ...presentProject(project),
     canUpdate: await accessPolicy.canUpdateProject(user, project.id),
     canAssignSE: await accessPolicy.canAssignProjectSE(user, project.id),
     canAssignManager: await accessPolicy.hasPermission(user, 'project:assign_manager'),
@@ -102,6 +138,16 @@ function uniqueIds(ids: number[]) {
   return Array.from(new Set(ids));
 }
 
+/**
+ * 更新接口需要区分“没有传字段”和“显式清空关系”。
+ * parseOptionalPositiveInt 会把 null 转为 undefined，不适合关系清空场景。
+ */
+function parseNullableId(value: unknown, field: string): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  return parsePositiveInt(value, field);
+}
+
 function parseRolePayload(body: Record<string, unknown>, partial: true): RoleUpdatePayload;
 function parseRolePayload(body: Record<string, unknown>, partial?: false): RoleCreatePayload;
 function parseRolePayload(body: Record<string, unknown>, partial = false): RoleCreatePayload | RoleUpdatePayload {
@@ -127,64 +173,94 @@ function parseRolePayload(body: Record<string, unknown>, partial = false): RoleC
 function parseDepartmentPayload(body: Record<string, unknown>, partial: true): DepartmentUpdatePayload;
 function parseDepartmentPayload(body: Record<string, unknown>, partial?: false): DepartmentCreatePayload;
 function parseDepartmentPayload(body: Record<string, unknown>, partial = false): DepartmentCreatePayload | DepartmentUpdatePayload {
-  const parsed = {
-    name: partial && body.name === undefined ? undefined : parseString(body.name, 'name', { required: !partial, max: 100 }),
-    description: parseString(body.description, 'description', { max: 255 }),
-    leaderId: parseOptionalPositiveInt(body.leaderId, 'leaderId'),
-  };
-  if (!partial) return { ...parsed, name: parsed.name! } satisfies DepartmentCreatePayload;
-  return parsed;
+  const name = partial && body.name === undefined
+    ? undefined
+    : parseString(body.name, 'name', { required: !partial, max: 100 });
+  const description = parseString(body.description, 'description', { max: 255 });
+  if (!partial) {
+    return {
+      name: name!,
+      description,
+      leaderId: parseOptionalPositiveInt(body.leaderId, 'leaderId'),
+    };
+  }
+  return { name, description, leaderId: parseNullableId(body.leaderId, 'leaderId') };
 }
 
 function parseGroupPayload(body: Record<string, unknown>, partial: true): GroupUpdatePayload;
 function parseGroupPayload(body: Record<string, unknown>, partial?: false): GroupCreatePayload;
 function parseGroupPayload(body: Record<string, unknown>, partial = false): GroupCreatePayload | GroupUpdatePayload {
-  const parsed = {
-    name: partial && body.name === undefined ? undefined : parseString(body.name, 'name', { required: !partial, max: 100 }),
-    description: parseString(body.description, 'description', { max: 255 }),
-    departmentId: parseOptionalPositiveInt(body.departmentId, 'departmentId'),
-    parentId: parseOptionalPositiveInt(body.parentId, 'parentId'),
-    leaderId: parseOptionalPositiveInt(body.leaderId, 'leaderId'),
+  const name = partial && body.name === undefined
+    ? undefined
+    : parseString(body.name, 'name', { required: !partial, max: 100 });
+  const description = parseString(body.description, 'description', { max: 255 });
+  if (!partial) {
+    return {
+      name: name!,
+      description,
+      departmentId: parseOptionalPositiveInt(body.departmentId, 'departmentId'),
+      parentId: parseOptionalPositiveInt(body.parentId, 'parentId'),
+      leaderId: parseOptionalPositiveInt(body.leaderId, 'leaderId'),
+    };
+  }
+  return {
+    name,
+    description,
+    departmentId: parseNullableId(body.departmentId, 'departmentId'),
+    parentId: parseNullableId(body.parentId, 'parentId'),
+    leaderId: parseNullableId(body.leaderId, 'leaderId'),
   };
-  if (!partial) return { ...parsed, name: parsed.name! } satisfies GroupCreatePayload;
-  return parsed;
 }
 
 function parseUserPayload(body: Record<string, unknown>, partial: true): UserUpdatePayload;
 function parseUserPayload(body: Record<string, unknown>, partial?: false): UserCreatePayload;
 function parseUserPayload(body: Record<string, unknown>, partial = false): UserCreatePayload | UserUpdatePayload {
   const statusValue = body.status === undefined ? undefined : Number(parseEnum(String(body.status), 'status', ['0', '1']));
-  const parsed = {
-    username: partial && body.username === undefined ? undefined : parseString(body.username, 'username', { required: !partial, max: 50 }),
-    password: partial || body.password === undefined ? undefined : parseString(body.password, 'password', { required: true, min: 8, max: 128, trim: false }),
-    realName: partial && body.realName === undefined ? undefined : parseString(body.realName, 'realName', { required: !partial, max: 50 }),
-    email: parseString(body.email, 'email', { max: 100 }),
-    phone: parseString(body.phone, 'phone', { max: 20 }),
-    status: statusValue,
-    departmentId: parseOptionalPositiveInt(body.departmentId, 'departmentId'),
-    groupId: parseOptionalPositiveInt(body.groupId, 'groupId'),
-    roleIds: parseOptionalIdArray(body.roleIds, 'roleIds'),
-  };
+  const realName = partial && body.realName === undefined
+    ? undefined
+    : parseString(body.realName, 'realName', { required: !partial, max: 50 });
+  const email = parseOptionalEmail(body.email, '邮箱');
+  const phone = parseOptionalPhone(body.phone, '手机号');
+  const parsedRoleIds = parseOptionalIdArray(body.roleIds, 'roleIds');
+  const roleIds = parsedRoleIds === undefined ? undefined : uniqueIds(parsedRoleIds);
   if (!partial) {
     return {
-      ...parsed,
-      username: parsed.username!,
-      password: parsed.password!,
-      realName: parsed.realName!,
-    } satisfies UserCreatePayload;
+      username: parseString(body.username, 'username', { required: true, max: 50 })!,
+      password: parseString(body.password, 'password', { required: true, min: 8, max: 128, trim: false })!,
+      realName: realName!,
+      email,
+      phone,
+      departmentId: parseOptionalPositiveInt(body.departmentId, 'departmentId'),
+      groupId: parseOptionalPositiveInt(body.groupId, 'groupId'),
+      roleIds,
+    };
   }
-  return parsed;
+  return {
+    realName,
+    email,
+    phone,
+    status: statusValue,
+    departmentId: parseNullableId(body.departmentId, 'departmentId'),
+    groupId: parseNullableId(body.groupId, 'groupId'),
+    roleIds,
+  };
 }
 
 function parseProjectPayload(body: Record<string, unknown>, partial: true): ProjectUpdatePayload;
 function parseProjectPayload(body: Record<string, unknown>, partial?: false): ProjectCreatePayload;
 function parseProjectPayload(body: Record<string, unknown>, partial = false): ProjectCreatePayload | ProjectUpdatePayload {
-  const managerIds = parseOptionalIdArray(body.managerIds, 'managerIds') ?? [];
+  if (partial && body.code !== undefined) throw new BusinessError('项目编码创建后不可修改');
+  const explicitManagerIds = parseOptionalIdArray(body.managerIds, 'managerIds');
+  const managerIds = explicitManagerIds ?? [];
   const pmId = parseOptionalPositiveInt(body.pmId, 'pmId');
   const spmId = parseOptionalPositiveInt(body.spmId, 'spmId');
+  const managerFieldProvided = body.managerIds !== undefined || body.pmId !== undefined || body.spmId !== undefined;
   const normalizedManagerIds = managerIds.length || pmId || spmId
     ? uniqueIds([...managerIds, ...(pmId ? [pmId] : []), ...(spmId ? [spmId] : [])])
     : undefined;
+  if ((!partial || managerFieldProvided) && !normalizedManagerIds?.length) {
+    throw new BusinessError('请至少指定一名项目管理员');
+  }
 
   const parsed = {
     name: partial && body.name === undefined ? undefined : parseString(body.name, 'name', { required: !partial, max: 100 }),
@@ -212,11 +288,11 @@ function parseApprovalFlowPayload(body: Record<string, unknown>, partial = false
       return {
         stepType,
         label: parseString(step.label, `steps[${index}].label`, { required: true, max: 100 }),
-        parentLevel: parseOptionalPositiveInt(step.parentLevel, `steps[${index}].parentLevel`, { max: 20 }) || 1,
+        parentLevel: parseOptionalPositiveInt(step.parentLevel, `steps[${index}].parentLevel`, { max: 5 }) || 1,
         customApproverId: customApproverId ?? null,
         requireAllApprovers: parseBooleanQuery(step.requireAllApprovers),
       };
-    }, { min: partial ? 0 : 1, max: 20 });
+    }, { min: 1, max: 20 });
 
   const parsed = {
     name: partial && body.name === undefined ? undefined : parseString(body.name, 'name', { required: !partial, max: 100 }),
@@ -247,7 +323,7 @@ function parseProjectSEPayload(body: Record<string, unknown>) {
 function parseProjectAllocationPayload(body: Record<string, unknown>) {
   return {
     groupId: parsePositiveInt(body.groupId, 'groupId'),
-    allocation: parseNonNegativeNumber(body.allocation, 'allocation'),
+    allocation: parseNonNegativeNumber(body.allocation, 'allocation', { max: 1_000_000 }),
   };
 }
 
@@ -258,36 +334,40 @@ router.use(authMiddleware);
 router.get('/departments', async (req, res, next) => {
   try {
     const data = await systemService.getDepartments();
-    res.json({ code: 0, data: data.map(d => ({
-      ...d,
-      leader: d.leader ? { id: d.leader.id, realName: d.leader.realName } : null,
-    })) });
+    res.json({ code: 0, data: data.map(presentDepartment) });
   } catch (error) {
     next(error);
   }
 });
 
-router.post('/departments', requirePermission('system:org:manage'), async (req, res, next) => {
+router.post('/departments', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await systemService.createDepartment(parseDepartmentPayload(req.body as Record<string, unknown>));
-    res.json({ code: 0, data, message: '创建成功' });
+    const payload = parseDepartmentPayload(req.body as Record<string, unknown>);
+    const data = await systemService.createDepartment(payload);
+    auditService.log({ userId: req.user!.id, action: 'department.create', target: 'department', targetId: data.id, detail: JSON.stringify(payload), ip: req.ip });
+    res.json({ code: 0, data: presentDepartment(data), message: '创建成功' });
   } catch (error) {
     next(error);
   }
 });
 
-router.put('/departments/:id', requirePermission('system:org:manage'), async (req, res, next) => {
+router.put('/departments/:id', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await systemService.updateDepartment(parsePositiveInt(req.params.id, 'id'), parseDepartmentPayload(req.body as Record<string, unknown>, true));
-    res.json({ code: 0, data, message: '更新成功' });
+    const id = parsePositiveInt(req.params.id, 'id');
+    const payload = parseDepartmentPayload(req.body as Record<string, unknown>, true);
+    const data = await systemService.updateDepartment(id, payload);
+    auditService.log({ userId: req.user!.id, action: 'department.update', target: 'department', targetId: id, detail: JSON.stringify(payload), ip: req.ip });
+    res.json({ code: 0, data: presentDepartment(data), message: '更新成功' });
   } catch (error) {
     next(error);
   }
 });
 
-router.delete('/departments/:id', requirePermission('system:org:manage'), async (req, res, next) => {
+router.delete('/departments/:id', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
   try {
-    await systemService.deleteDepartment(parsePositiveInt(req.params.id, 'id'));
+    const id = parsePositiveInt(req.params.id, 'id');
+    await systemService.deleteDepartment(id);
+    auditService.log({ userId: req.user!.id, action: 'department.delete', target: 'department', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -295,7 +375,7 @@ router.delete('/departments/:id', requirePermission('system:org:manage'), async 
 });
 
 // ========== 分组（树形） ==========
-router.get('/groups/tree', async (req, res, next) => {
+router.get('/groups/tree', requirePermission('system:org:manage', 'system:user:manage'), async (req, res, next) => {
   try {
     const data = await systemService.getGroupTree(parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId'));
     res.json({ code: 0, data });
@@ -310,37 +390,40 @@ router.get('/groups', async (req: AuthRequest, res, next) => {
       parseOptionalPositiveInt(firstQueryValue(req.query.departmentId), 'departmentId'),
       parseOptionalPositiveInt(firstQueryValue(req.query.parentId), 'parentId'),
     );
-    res.json({ code: 0, data: data.map(g => ({
-      ...g,
-      leader: g.leader ? { id: g.leader.id, realName: g.leader.realName } : null,
-      parent: g.parent ? { id: g.parent.id, name: g.parent.name } : null,
-    })) });
+    res.json({ code: 0, data: data.map(presentGroup) });
   } catch (error) {
     next(error);
   }
 });
 
-router.post('/groups', requirePermission('system:org:manage'), async (req, res, next) => {
+router.post('/groups', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await systemService.createGroup(parseGroupPayload(req.body as Record<string, unknown>));
-    res.json({ code: 0, data, message: '创建成功' });
+    const payload = parseGroupPayload(req.body as Record<string, unknown>);
+    const data = await systemService.createGroup(payload);
+    auditService.log({ userId: req.user!.id, action: 'group.create', target: 'group', targetId: data.id, detail: JSON.stringify(payload), ip: req.ip });
+    res.json({ code: 0, data: presentGroup(data), message: '创建成功' });
   } catch (error) {
     next(error);
   }
 });
 
-router.put('/groups/:id', requirePermission('system:org:manage'), async (req, res, next) => {
+router.put('/groups/:id', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await systemService.updateGroup(parsePositiveInt(req.params.id, 'id'), parseGroupPayload(req.body as Record<string, unknown>, true));
-    res.json({ code: 0, data, message: '更新成功' });
+    const id = parsePositiveInt(req.params.id, 'id');
+    const payload = parseGroupPayload(req.body as Record<string, unknown>, true);
+    const data = await systemService.updateGroup(id, payload);
+    auditService.log({ userId: req.user!.id, action: 'group.update', target: 'group', targetId: id, detail: JSON.stringify(payload), ip: req.ip });
+    res.json({ code: 0, data: presentGroup(data), message: '更新成功' });
   } catch (error) {
     next(error);
   }
 });
 
-router.delete('/groups/:id', requirePermission('system:org:manage'), async (req, res, next) => {
+router.delete('/groups/:id', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
   try {
-    await systemService.deleteGroup(parsePositiveInt(req.params.id, 'id'));
+    const id = parsePositiveInt(req.params.id, 'id');
+    await systemService.deleteGroup(id);
+    auditService.log({ userId: req.user!.id, action: 'group.delete', target: 'group', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -372,7 +455,6 @@ router.get('/users/all', async (req: AuthRequest, res, next) => {
       'system:user:manage',
       'system:org:manage',
       'project:create',
-      'project:update',
       'project:assign_manager',
       'project:assign_se',
       'system:announcement:create',
@@ -381,7 +463,7 @@ router.get('/users/all', async (req: AuthRequest, res, next) => {
       'system:audit:view',
       'permission_grant:manage',
     )) {
-      return res.status(403).json({ code: 403, message: 'Forbidden' });
+      return res.status(403).json({ code: 403, message: '无此操作权限' });
     }
     const data = await systemService.getAllUsers();
     res.json({ code: 0, data });
@@ -390,9 +472,18 @@ router.get('/users/all', async (req: AuthRequest, res, next) => {
   }
 });
 
-router.post('/users', requirePermission('system:user:manage'), async (req, res, next) => {
+router.post('/users', requirePermission('system:user:manage'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await systemService.createUser(parseUserPayload(req.body as Record<string, unknown>));
+    const payload = parseUserPayload(req.body as Record<string, unknown>);
+    const data = await systemService.createUser(payload);
+    auditService.log({
+      userId: req.user!.id,
+      action: 'user.create',
+      target: 'user',
+      targetId: data.id,
+      detail: JSON.stringify({ username: payload.username, realName: payload.realName, roleIds: payload.roleIds || [] }),
+      ip: req.ip,
+    });
     res.json({ code: 0, data, message: '创建成功' });
   } catch (error) {
     next(error);
@@ -402,8 +493,8 @@ router.post('/users', requirePermission('system:user:manage'), async (req, res, 
 router.put('/users/:id', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, 'id');
-    const data = await systemService.updateUser(id, parseUserPayload(req.body as Record<string, unknown>, true));
     const actor = (req as AuthRequest).user!;
+    const data = await systemService.updateUser(id, parseUserPayload(req.body as Record<string, unknown>, true), actor.id);
     const statusChanged = (req.body as Record<string, unknown>).status !== undefined;
     auditService.log({
       userId: actor.id,
@@ -421,8 +512,8 @@ router.put('/users/:id', requirePermission('system:user:manage'), async (req, re
 router.delete('/users/:id', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, 'id');
-    await systemService.deleteUser(id);
     const actor = (req as AuthRequest).user!;
+    await systemService.deleteUser(id, actor.id);
     auditService.log({ userId: actor.id, action: 'user.delete', target: 'user', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
@@ -433,6 +524,8 @@ router.delete('/users/:id', requirePermission('system:user:manage'), async (req,
 router.put('/users/:id/reset-password', requirePermission('system:user:manage'), async (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, 'id');
+    const actor = (req as AuthRequest).user!;
+    if (id === actor.id) throw new BusinessError('请在个人中心修改当前账号密码');
     const body = req.body as Record<string, unknown>;
     // 未指定密码时生成随机密码（不再默认弱密码 123456）
     let password = parseString(body.password, 'password', { min: 8, max: 128, trim: false });
@@ -442,7 +535,6 @@ router.put('/users/:id/reset-password', requirePermission('system:user:manage'),
       generated = true;
     }
     await systemService.resetPassword(id, password);
-    const actor = (req as AuthRequest).user!;
     auditService.log({ userId: actor.id, action: 'user.reset_password', target: 'user', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '密码重置成功', data: generated ? { password } : undefined });
   } catch (error) {
@@ -511,7 +603,7 @@ router.delete('/roles/:id', requirePermission('system:role:manage'), async (req:
 router.put('/roles/:id/permissions', requirePermission('system:role:manage'), async (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, 'id');
-    const permissionIds = parseArray(req.body.permissionIds, 'permissionIds', (pid, index) => parsePositiveInt(pid, `permissionIds[${index}]`), { max: 500 });
+    const permissionIds = uniqueIds(parseArray(req.body.permissionIds, 'permissionIds', (pid, index) => parsePositiveInt(pid, `permissionIds[${index}]`), { max: 500 }));
     const data = await systemService.updateRolePermissions(id, permissionIds);
     const actor = (req as AuthRequest).user!;
     auditService.log({
@@ -538,17 +630,24 @@ router.get('/permissions', requirePermission('system:role:manage', 'system:permi
   }
 });
 
-router.post('/permissions/init', requirePermission('system:permission:manage'), async (req, res, next) => {
+router.post('/permissions/init', requirePermission('system:permission:manage'), async (req: AuthRequest, res, next) => {
   try {
     const data = await systemService.initPermissions();
-    res.json({ code: 0, data, message: '权限初始化成功' });
+    auditService.log({
+      userId: req.user!.id,
+      action: 'permission.sync_catalog',
+      target: 'permission',
+      detail: JSON.stringify({ permissionCount: data.length }),
+      ip: req.ip,
+    });
+    res.json({ code: 0, data, message: '权限目录同步成功' });
   } catch (error) {
     next(error);
   }
 });
 
 // ========== 项目 ==========
-router.get('/projects', async (req, res, next) => {
+router.get('/projects', requirePermission('project:access'), async (req, res, next) => {
   try {
     const viewer = (req as AuthRequest).user!;
     const visibleProjects = await accessPolicy.getVisibleProjects(viewer);
@@ -573,7 +672,7 @@ router.get('/projects/active', async (req, res, next) => {
 });
 
 // 管理员获取自己负责的项目
-router.get('/projects/my', async (req: AuthRequest, res, next) => {
+router.get('/projects/my', requirePermission('project:access'), async (req: AuthRequest, res, next) => {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ code: 401, message: '未登录' });
@@ -585,7 +684,7 @@ router.get('/projects/my', async (req: AuthRequest, res, next) => {
 });
 
 // 检查当前用户是否可看项目管理
-router.get('/projects/can-view', async (req: AuthRequest, res, next) => {
+router.get('/projects/can-view', requirePermission('project:access'), async (req: AuthRequest, res, next) => {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ code: 401, message: '未登录' });
@@ -599,10 +698,12 @@ router.get('/projects/can-view', async (req: AuthRequest, res, next) => {
 });
 
 // 创建项目 - 仅系统管理员
-router.post('/projects', requirePermission('project:create'), async (req, res, next) => {
+router.post('/projects', requirePermission('project:create'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await systemService.createProject(parseProjectPayload(req.body as Record<string, unknown>));
-    res.json({ code: 0, data, message: '创建成功' });
+    const payload = parseProjectPayload(req.body as Record<string, unknown>);
+    const data = await systemService.createProject(payload);
+    auditService.log({ userId: req.user!.id, action: 'project.create', target: 'project', targetId: data.id, detail: JSON.stringify(payload), ip: req.ip });
+    res.json({ code: 0, data: presentProject(data), message: '创建成功' });
   } catch (error) {
     next(error);
   }
@@ -617,19 +718,22 @@ router.put('/projects/:id', async (req: AuthRequest, res, next) => {
     }
     const payload = parseProjectPayload(req.body as Record<string, unknown>, true);
     if (payload.managerIds !== undefined && !await hasAnyPermission(req, 'project:assign_manager')) {
-      return res.status(403).json({ code: 403, message: 'Forbidden' });
+      return res.status(403).json({ code: 403, message: '无此操作权限' });
     }
     const data = await systemService.updateProject(projectId, payload);
-    res.json({ code: 0, data, message: '更新成功' });
+    auditService.log({ userId: req.user!.id, action: 'project.update', target: 'project', targetId: projectId, detail: JSON.stringify(payload), ip: req.ip });
+    res.json({ code: 0, data: presentProject(data), message: '更新成功' });
   } catch (error) {
     next(error);
   }
 });
 
 // 删除项目 - 仅系统管理员
-router.delete('/projects/:id', requirePermission('project:delete'), async (req, res, next) => {
+router.delete('/projects/:id', requirePermission('project:delete'), async (req: AuthRequest, res, next) => {
   try {
-    await systemService.deleteProject(parsePositiveInt(req.params.id, 'id'));
+    const id = parsePositiveInt(req.params.id, 'id');
+    await systemService.deleteProject(id);
+    auditService.log({ userId: req.user!.id, action: 'project.delete', target: 'project', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -644,11 +748,7 @@ router.get('/projects/:projectId/ses', async (req: AuthRequest, res, next) => {
       return res.status(403).json({ code: 403, message: '无此操作权限' });
     }
     const data = await systemService.getProjectSEs(projectId);
-    res.json({ code: 0, data: data.map(se => ({
-      ...se,
-      user: se.user ? { id: se.user.id, realName: se.user.realName } : null,
-      group: se.group ? { id: se.group.id, name: se.group.name } : null,
-    })) });
+    res.json({ code: 0, data: data.map(presentProjectSe) });
   } catch (error) {
     next(error);
   }
@@ -664,7 +764,15 @@ router.post('/projects/:projectId/ses', async (req: AuthRequest, res, next) => {
       projectId,
       ...parseProjectSEPayload(req.body as Record<string, unknown>),
     });
-    res.json({ code: 0, data, message: '添加成功' });
+    auditService.log({
+      userId: req.user!.id,
+      action: 'project.assign_se',
+      target: 'project',
+      targetId: projectId,
+      detail: JSON.stringify({ projectSeId: data.id, userId: data.userId, groupId: data.groupId }),
+      ip: req.ip,
+    });
+    res.json({ code: 0, data: presentProjectSe(data), message: '添加成功' });
   } catch (error) {
     next(error);
   }
@@ -681,6 +789,7 @@ router.delete('/projects/ses/:id', async (req: AuthRequest, res, next) => {
       return res.status(403).json({ code: 403, message: '无此操作权限' });
     }
     await systemService.removeProjectSE(id);
+    auditService.log({ userId: req.user!.id, action: 'project.remove_se', target: 'project', targetId: se.projectId, detail: JSON.stringify({ projectSeId: id }), ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -717,6 +826,14 @@ router.post('/projects/:projectId/allocations', async (req: AuthRequest, res, ne
       projectId,
       ...parseProjectAllocationPayload(req.body as Record<string, unknown>),
     });
+    auditService.log({
+      userId: req.user!.id,
+      action: 'project.update_allocation',
+      target: 'project',
+      targetId: projectId,
+      detail: JSON.stringify({ allocationId: data.id, groupId: data.groupId, allocation: Number(data.allocation) }),
+      ip: req.ip,
+    });
     res.json({ code: 0, data, message: '保存成功' });
   } catch (error) {
     next(error);
@@ -732,6 +849,7 @@ router.delete('/projects/allocations/:id', async (req: AuthRequest, res, next) =
       return res.status(403).json({ code: 403, message: '无此操作权限' });
     }
     await systemService.removeProjectAllocation(id);
+    auditService.log({ userId: req.user!.id, action: 'project.remove_allocation', target: 'project', targetId: allocation.projectId, detail: JSON.stringify({ allocationId: id }), ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -745,7 +863,7 @@ router.get('/approval-flows', requirePermission('system:approval_flow:manage'), 
     const data = await flowEngine.getFlows(type);
     res.json({ code: 0, data: data.map(f => ({
       ...f,
-      steps: (f.steps || []).sort((a: any, b: any) => a.stepOrder - b.stepOrder),
+      steps: [...(f.steps || [])].sort((a: any, b: any) => a.stepOrder - b.stepOrder),
     })) });
   } catch (error) {
     next(error);
@@ -756,33 +874,41 @@ router.get('/approval-flows/:id', requirePermission('system:approval_flow:manage
   try {
     const data = await flowEngine.getFlow(parsePositiveInt(req.params.id, 'id'));
     if (!data) return res.status(404).json({ code: 404, message: '审批流程不存在' });
-    res.json({ code: 0, data: { ...data, steps: (data.steps || []).sort((a: any, b: any) => a.stepOrder - b.stepOrder) } });
+    res.json({ code: 0, data: { ...data, steps: [...(data.steps || [])].sort((a: any, b: any) => a.stepOrder - b.stepOrder) } });
   } catch (error) {
     next(error);
   }
 });
 
-router.post('/approval-flows', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
+router.post('/approval-flows', requirePermission('system:approval_flow:manage'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await flowEngine.createFlow(parseApprovalFlowPayload(req.body as Record<string, unknown>));
+    const payload = parseApprovalFlowPayload(req.body as Record<string, unknown>);
+    const data = await flowEngine.createFlow(payload);
+    if (!data) throw new BusinessError('审批流程创建后读取失败');
+    auditService.log({ userId: req.user!.id, action: 'approval_flow.create', target: 'approval_flow', targetId: data.id, detail: JSON.stringify({ name: payload.name, type: payload.type, stepCount: payload.steps.length }), ip: req.ip });
     res.json({ code: 0, data, message: '创建成功' });
   } catch (error) {
     next(error);
   }
 });
 
-router.put('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
+router.put('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req: AuthRequest, res, next) => {
   try {
-    const data = await flowEngine.updateFlow(parsePositiveInt(req.params.id, 'id'), parseApprovalFlowPayload(req.body as Record<string, unknown>, true));
+    const id = parsePositiveInt(req.params.id, 'id');
+    const payload = parseApprovalFlowPayload(req.body as Record<string, unknown>, true);
+    const data = await flowEngine.updateFlow(id, payload);
+    auditService.log({ userId: req.user!.id, action: 'approval_flow.update', target: 'approval_flow', targetId: id, detail: JSON.stringify({ ...payload, steps: payload.steps ? `${payload.steps.length} steps` : undefined }), ip: req.ip });
     res.json({ code: 0, data, message: '更新成功' });
   } catch (error) {
     next(error);
   }
 });
 
-router.delete('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req, res, next) => {
+router.delete('/approval-flows/:id', requirePermission('system:approval_flow:manage'), async (req: AuthRequest, res, next) => {
   try {
-    await flowEngine.deleteFlow(parsePositiveInt(req.params.id, 'id'));
+    const id = parsePositiveInt(req.params.id, 'id');
+    await flowEngine.deleteFlow(id);
+    auditService.log({ userId: req.user!.id, action: 'approval_flow.delete', target: 'approval_flow', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -792,8 +918,8 @@ router.delete('/approval-flows/:id', requirePermission('system:approval_flow:man
 export const systemRoutes = router;
 
 // ========== 系统设置 ==========
-// 所有登录用户可读设置
-router.get('/settings', async (_req, res, next) => {
+// 普通登录用户仅可读取界面运行所需的公开设置；管理配置和内部幂等标记不得顺带暴露。
+router.get('/settings', async (req: AuthRequest, res, next) => {
   try {
     const { CacheKeys, CacheTtl, cacheGetOrLoad } = await import('../config/cache');
     const cacheKey = CacheKeys.allSettings();
@@ -804,7 +930,13 @@ router.get('/settings', async (_req, res, next) => {
       list.forEach(s => { settings[s.key] = s.value; });
       return { list, settings };
     });
-    res.json({ code: 0, data });
+    const canManage = await hasAnyPermission(req, 'system:settings:manage');
+    const allowedKeys = canManage ? new Set<string>(settingKeys) : publicSettingKeys;
+    const list = data.list.filter((setting: SystemSetting) => allowedKeys.has(setting.key));
+    const settings = Object.fromEntries(
+      Object.entries(data.settings).filter(([key]) => allowedKeys.has(key)),
+    );
+    res.json({ code: 0, data: { list, settings } });
   } catch (error) {
     next(error);
   }
@@ -818,6 +950,9 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
     let value = parseString(rawValue, 'value', {
       max: key === TIMESHEET_REMINDER_SETTING_KEY ? 5000 : 200,
     }) ?? '';
+    if (key === 'system_name' && !value) {
+      throw new BusinessError('系统名称不能为空');
+    }
     if (key === 'timesheet_unit') {
       // 工时填报单位（天步长）：兼容老值 days(=0.5) / hours(=0.5)
       if (value === 'days' || value === 'hours') value = '0.5';
@@ -833,7 +968,11 @@ router.put('/settings/:key', requirePermission('system:settings:manage'), async 
       } catch {
         throw new BusinessError('工时提醒配置不是有效 JSON');
       }
-      value = JSON.stringify(normalizeTimesheetReminderConfig(parsed));
+      const normalized = normalizeTimesheetReminderConfig(parsed);
+      if (normalized.targetScope !== 'all') {
+        await new UserAudienceService().resolveUserIds(normalized, { strict: true });
+      }
+      value = JSON.stringify(normalized);
     }
     let setting = await settingRepo.findOne({ where: { key } });
     if (setting) {

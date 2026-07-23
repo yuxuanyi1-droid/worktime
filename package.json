@@ -8,12 +8,42 @@
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
     "install:all": "npm install && cd server && npm install && cd ../client && npm install",
-    "build": "cd client && npm run build"
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "cd server && npm run build",
+    "build:client": "cd client && npm run build",
+    "test": "npm run test:server && npm run test:client",
+    "test:server": "vitest run --config tests/config/vitest.server.config.ts",
+    "test:client": "node tests/run-client-tests.mjs",
+    "test:watch:server": "vitest --config tests/config/vitest.server.config.ts",
+    "test:watch:client": "vitest --config tests/config/vitest.client.config.ts",
+    "test:coverage": "npm run test:coverage:server && npm run test:coverage:client",
+    "test:coverage:server": "vitest run --coverage --config tests/config/vitest.server.config.ts",
+    "test:coverage:client": "node tests/run-client-tests.mjs --coverage-batched",
+    "test:smoke:ai": "node tests/smoke/ai-api-smoke.mjs",
+    "test:perf:reads": "node tests/performance/stress-reference-reads.mjs",
+    "test:perf:submit": "node tests/performance/stress-timesheet-submit.mjs",
+    "test:perf:inspect": "node tests/performance/inspect-perf-state.cjs"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^18.3.28",
+    "@types/react-dom": "^18.3.7",
+    "@types/supertest": "^6.0.3",
+    "@vitest/coverage-v8": "^4.1.10",
+    "concurrently": "^8.2.2",
+    "jsdom": "^26.1.0",
+    "pg": "^8.22.0",
+    "pg-mem": "^3.0.5",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "reflect-metadata": "^0.2.2",
+    "supertest": "^7.1.4",
+    "typeorm": "^0.3.30",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.6"
+    "@earendil-works/pi-coding-agent": "^0.81.1"
   }
 }

@@ -6,10 +6,11 @@ import { requirePermission } from '../middleware/permission';
 import { AppDataSource } from '../config/database';
 import { User } from '../entities/User';
 import { BusinessError } from '../utils/errors';
+import { Not } from 'typeorm';
 import {
+  assertDateRange,
   firstQueryValue,
   parseArray,
-  parseBooleanQuery,
   parseEnum,
   parseOptionalDateString,
   parseOptionalEnum,
@@ -22,7 +23,7 @@ import {
 const router = Router();
 const approvalService = new ApprovalService();
 const auditService = new AuditService();
-const userRepo = AppDataSource.getRepository(User);
+const getUserRepo = () => AppDataSource.getRepository(User);
 const targetTypes = ['timesheet', 'overtime', 'weekly_report', 'permission_request'] as const;
 const approvalStatuses = ['draft', 'submitted', 'approved', 'rejected', 'deprecated', 'withdrawn'] as const;
 const approvalActions = ['approve', 'reject'] as const;
@@ -33,9 +34,11 @@ router.use(authMiddleware);
 router.get('/users', async (req: AuthRequest, res, next) => {
 
   try {
-    const users = await userRepo.find({
+    const users = await getUserRepo().find({
+      where: { status: 1, id: Not(req.user!.id) },
       relations: ['department'],
       select: ['id', 'realName', 'department'],
+      order: { realName: 'ASC' },
     });
     res.json({ code: 0, data: users.map((u: any) => ({
       id: u.id,
@@ -52,11 +55,14 @@ router.get('/users', async (req: AuthRequest, res, next) => {
 router.get('/my-submissions', async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query, 20);
+    const startDate = parseOptionalDateString(firstQueryValue(req.query.startDate), 'startDate');
+    const endDate = parseOptionalDateString(firstQueryValue(req.query.endDate), 'endDate');
+    assertDateRange(startDate, endDate);
     const data = await approvalService.getMySubmissions(req.user!.id, {
       targetType: parseOptionalEnum(firstQueryValue(req.query.targetType), 'targetType', targetTypes),
       status: parseOptionalEnum(firstQueryValue(req.query.status), 'status', approvalStatuses),
-      startDate: parseOptionalDateString(firstQueryValue(req.query.startDate), 'startDate'),
-      endDate: parseOptionalDateString(firstQueryValue(req.query.endDate), 'endDate'),
+      startDate,
+      endDate,
       page,
       pageSize,
     });
@@ -122,7 +128,6 @@ router.get('/history', requirePermission('approval:view:done'), async (req: Auth
       page,
       pageSize,
       viewerId: req.user!.id,
-      mine: parseBooleanQuery(firstQueryValue(req.query.mine)),
     });
     res.json({ code: 0, data });
   } catch (error) {

@@ -14,17 +14,21 @@ import { logger } from '../utils/logger';
 
 // 用户不存在时仍执行同成本的 bcrypt，避免通过响应耗时枚举有效用户名。
 const DUMMY_PASSWORD_HASH = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
-import type { ProviderUserInfo } from './oidc/provider';
+import { normalizeProviderUserInfo, type ProviderUserInfo } from './oidc/provider';
 import { CacheKeys, CacheTtl, cacheSet, invalidateAuthUser, invalidateOrgSnapshot } from '../config/cache';
 import { PERMISSION_MODEL_VERSION } from '../config/permissionDefinitions';
+import { EntityManager } from 'typeorm';
 
 export class AuthService {
-  private userRepo = AppDataSource.getRepository(User);
-  private roleRepo = AppDataSource.getRepository(Role);
-  private deptRepo = AppDataSource.getRepository(Department);
-  private groupRepo = AppDataSource.getRepository(Group);
-  private identityRepo = AppDataSource.getRepository(UserExternalIdentity);
-  private accessPolicy = new AccessPolicyService();
+  constructor(private manager?: EntityManager) {}
+
+  private get source() { return this.manager ?? AppDataSource; }
+  private get userRepo() { return this.source.getRepository(User); }
+  private get roleRepo() { return this.source.getRepository(Role); }
+  private get deptRepo() { return this.source.getRepository(Department); }
+  private get groupRepo() { return this.source.getRepository(Group); }
+  private get identityRepo() { return this.source.getRepository(UserExternalIdentity); }
+  private get accessPolicy() { return new AccessPolicyService(this.manager); }
 
   /**
    * 签发本地 JWT（保留 tokenVersion，使 authMiddleware 的版本校验生效）。
@@ -32,7 +36,7 @@ export class AuthService {
    */
   private signLocalJwt(user: User): string {
     return jwt.sign(
-      { id: user.id, username: user.username, realName: user.realName, v: user.tokenVersion },
+      { id: user.id, username: user.username, realName: user.realName, v: Number(user.tokenVersion) },
       authConfig.jwtSecret,
       { expiresIn: authConfig.jwtExpiresIn } as jwt.SignOptions
     );
@@ -42,18 +46,22 @@ export class AuthService {
    * 组装登录响应（token + 含 permissions 的 user 对象）。
    * 供密码登录与 SSO 登录共用，避免重复代码。
    */
-  private async buildLoginResponse(user: User) {
+  private async buildLoginResponse(user: User, writeCache = true) {
     const token = this.signLocalJwt(user);
-    const permissions = Array.from(await this.accessPolicy.getPermissionCodes(user.id));
-    await cacheSet(CacheKeys.authUser(user.id), {
-      id: user.id,
-      username: user.username,
-      realName: user.realName,
-      roles: user.roles.map((role) => role.name),
-      permissions,
-      tokenVersion: user.tokenVersion,
-      permissionModelVersion: PERMISSION_MODEL_VERSION,
-    }, CacheTtl.auth);
+    const permissionSnapshot = await this.accessPolicy.getPermissionSnapshotForLoadedUser(user);
+    const permissions = Array.from(permissionSnapshot.permissions);
+    if (writeCache) {
+      await cacheSet(CacheKeys.authUser(user.id), {
+        id: user.id,
+        username: user.username,
+        realName: user.realName,
+        roles: user.roles.map((role) => role.name),
+        permissions,
+        tokenVersion: Number(user.tokenVersion),
+        permissionModelVersion: PERMISSION_MODEL_VERSION,
+        permissionsRefreshAt: permissionSnapshot.refreshAt,
+      }, CacheTtl.auth);
+    }
     const idpManaged = await this.isIdpManaged(user.id);
     return {
       token,
@@ -78,7 +86,7 @@ export class AuthService {
     const user = await this.userRepo.findOne({ where: { id: userId, status: 1 } });
     if (!user) throw new BusinessError('用户不存在或已禁用', 401);
     return jwt.sign(
-      { id: user.id, username: user.username, realName: user.realName, v: user.tokenVersion, purpose: 'agent' },
+      { id: user.id, username: user.username, realName: user.realName, v: Number(user.tokenVersion), purpose: 'agent' },
       authConfig.jwtSecret,
       { expiresIn: '2h' } as jwt.SignOptions,
     );
@@ -89,9 +97,10 @@ export class AuthService {
    * 本地不允许修改密码或编辑信息（避免本地改了又被下次 SSO 登录同步覆盖）。
    */
   private async isIdpManaged(userId: number): Promise<boolean> {
-    // 仅当存在任一 JIT provider 且该用户有对应绑定时才为 true
+    // 只要绑定属于 JIT provider 就保持托管；enabled 仅控制是否允许发起新登录。
     const jitProviders = Object.entries(oidcConfig.providers)
-      .filter(([, c]) => c.enabled && c.jit)
+      // 临时关闭登录入口不能把既有主身份源账号降级成本地可编辑账号。
+      .filter(([, c]) => c.jit)
       .map(([name]) => name);
     if (jitProviders.length === 0) return false;
     const count = await this.identityRepo.count({
@@ -130,6 +139,43 @@ export class AuthService {
    * 角色不在登录时自动同步——角色由本地管理员手动分配（IdP 的 groups 仅表示组织归属，不等同权限角色）。
    */
   async oidcLogin(provider: string, info: ProviderUserInfo) {
+    const normalizedInfo = normalizeProviderUserInfo(info);
+    if (this.manager) {
+      const user = await this.resolveOidcUser(provider, normalizedInfo);
+      // 事务内不提前写共享缓存；提交后的首次鉴权会按正常缓存未命中路径回源。
+      return this.buildLoginResponse(user, false);
+    }
+
+    let userId: number;
+    try {
+      userId = await AppDataSource.transaction(async (manager) => {
+        const user = await new AuthService(manager).resolveOidcUser(provider, normalizedInfo);
+        return user.id;
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      // 两个首次回调并发时，其中一个可能已经完成 JIT 建号；唯一约束失败的一方重新查绑定即可。
+      const concurrentIdentity = await this.identityRepo.findOne({
+        where: { provider, subject: normalizedInfo.subject },
+        relations: ['user'],
+      });
+      if (!concurrentIdentity?.user) {
+        throw new BusinessError('第三方账号建号发生冲突，请稍后重试', 409);
+      }
+      userId = concurrentIdentity.user.id;
+    }
+
+    // 缓存和 JWT 必须在事务提交后生成，不能暴露尚未提交的用户/权限快照。
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      relations: ['roles', 'roles.permissions', 'department', 'group'],
+    });
+    if (!user) throw new BusinessError('第三方登录用户查询失败', 500);
+    return this.buildLoginResponse(user);
+  }
+
+  /** 在事务内完成建号、档案同步和身份展示字段更新。 */
+  private async resolveOidcUser(provider: string, info: ProviderUserInfo): Promise<User> {
     const providerConfig = oidcConfig.providers[provider];
     const providerLabel = providerConfig?.label || provider;
 
@@ -158,7 +204,7 @@ export class AuthService {
         relations: ['roles', 'roles.permissions', 'department', 'group'],
       });
       if (!freshUser) throw new BusinessError('JIT 建号后用户查询失败', 500);
-      return this.buildLoginResponse(freshUser);
+      return freshUser;
     }
 
     const user = identity.user;
@@ -185,7 +231,7 @@ export class AuthService {
       await this.identityRepo.save(identity);
     }
 
-    return this.buildLoginResponse(user);
+    return user;
   }
 
   /**
@@ -195,17 +241,32 @@ export class AuthService {
    * 角色统一用 defaultRole（默认 employee），由本地管理员后续手动调整。
    */
   private async provisionUser(provider: string, info: ProviderUserInfo): Promise<User> {
+    if (!this.manager) {
+      return AppDataSource.transaction((manager) => new AuthService(manager).provisionUser(provider, info));
+    }
     const providerConfig = oidcConfig.providers[provider]!;
     // 角色：JIT 统一用 defaultRole（默认 employee）。IdP groups 仅表示组织归属，不等同权限角色。
     const defaultRoleName = providerConfig.defaultRole || 'employee';
     const defaultRole = await this.roleRepo.findOne({ where: { name: defaultRoleName } });
-    const roles = defaultRole ? [defaultRole] : [];
+    if (!defaultRole) {
+      throw new BusinessError(`JIT 默认角色【${defaultRoleName}】不存在，请先在系统中创建`, 500);
+    }
+    const roles = [defaultRole];
 
     // 用户名：优先用 IdP preferred_username，冲突则追加 provider 前缀
-    let username = info.username || `sso_${info.subject.slice(0, 8)}`;
+    const fallbackUsername = `sso_${info.subject.slice(0, 8)}`;
+    const usernameBase = (info.username?.trim() || fallbackUsername).slice(0, 50);
+    let username = usernameBase;
     const existing = await this.userRepo.findOne({ where: { username } });
     if (existing) {
-      username = `${provider}_${username}`.slice(0, 50);
+      const suffix = crypto.createHash('sha256')
+        .update(`${provider}\0${info.subject}`)
+        .digest('hex')
+        .slice(0, 8);
+      const prefixed = `${provider}_${usernameBase}`;
+      username = `${prefixed.slice(0, 41)}_${suffix}`;
+      const collision = await this.userRepo.findOne({ where: { username } });
+      if (collision) throw new BusinessError('无法为第三方账号分配唯一用户名，请联系管理员', 409);
     }
 
     // 部门/组归属：按 IdP department 路径自动创建/复用 Department + Group 层级树
@@ -257,12 +318,12 @@ export class AuthService {
       }
       // IdP 无组层级时清空 group（员工从子组调到无子组的部门）
       if (!placement.group && user.group) {
-        user.group = undefined as any; changed = true;
+        user.group = null; changed = true;
       }
-    } else if (info.department === '' || info.department === undefined) {
-      // IdP 明确无部门时清空（员工离职/移出部门）
-      if (user.department) { user.department = undefined as any; changed = true; }
-      if (user.group) { user.group = undefined as any; changed = true; }
+    } else if (info.department === '') {
+      // 只有 IdP 明确返回空字符串时才清空；缺少 claim（undefined）可能是映射故障，不能破坏现有组织关系。
+      if (user.department) { user.department = null; changed = true; }
+      if (user.group) { user.group = null; changed = true; }
     }
     if (changed) await this.userRepo.save(user);
   }
@@ -306,18 +367,16 @@ export class AuthService {
       const gname = groupNames[i];
       const level = i; // 0=顶级组, 1=二级组...
       // 按名称 + 父级查找（同名组可能在不同层级下存在，需按父级区分）
-      let existing: Group | null = parent
-        ? await this.groupRepo.findOne({ where: { name: gname, parentId: parent.id } })
-        : await this.groupRepo.findOne({ where: { name: gname, parentId: undefined as any } });
-      // findOne(undefined) 不等价于 IS NULL，用单独查询兜底
-      if (!existing && !parent) {
-        // 顶级组：查 parentId IS NULL 的同名组
-        existing = await this.groupRepo
-          .createQueryBuilder('g')
-          .where('g.name = :name', { name: gname })
-          .andWhere('g.parentId IS NULL')
-          .getOne();
-      }
+      const existing: Group | null = parent
+        ? await this.groupRepo.findOne({
+            where: { name: gname, departmentId: department.id, parentId: parent.id },
+          })
+        : await this.groupRepo
+            .createQueryBuilder('g')
+            .where('g.name = :name', { name: gname })
+            .andWhere('g.departmentId = :departmentId', { departmentId: department.id })
+            .andWhere('g.parentId IS NULL')
+            .getOne();
       if (existing) {
         group = existing;
         parent = existing;
@@ -374,7 +433,7 @@ export class AuthService {
 
   async changePassword(userId: number, oldPassword: string, newPassword: string) {
     if (await this.isIdpManaged(userId)) {
-      throw new BusinessError('该账号由第三方身份源（SSO）管控，密码请在 Authentik 中修改', 403);
+      throw new BusinessError('该账号由第三方身份源（SSO）管控，请在对应身份源中修改密码', 403);
     }
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new BusinessError('用户不存在');
@@ -384,7 +443,7 @@ export class AuthService {
 
     user.password = await bcrypt.hash(newPassword, 10);
     // tokenVersion+1：使改密前签发的所有 token 失效，强制重新登录
-    user.tokenVersion += 1;
+    user.tokenVersion = Number(user.tokenVersion) + 1;
     await this.userRepo.save(user);
     await invalidateAuthUser(userId);
     return true;
@@ -394,14 +453,14 @@ export class AuthService {
   async logout(userId: number) {
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new BusinessError('用户不存在');
-    user.tokenVersion += 1;
+    user.tokenVersion = Number(user.tokenVersion) + 1;
     await this.userRepo.save(user);
     await invalidateAuthUser(userId);
   }
 
   async updateProfile(userId: number, data: { realName?: string; email?: string; phone?: string }) {
     if (await this.isIdpManaged(userId)) {
-      throw new BusinessError('该账号由第三方身份源（SSO）管控，个人信息请在 Authentik 中修改', 403);
+      throw new BusinessError('该账号由第三方身份源（SSO）管控，请在对应身份源中修改个人信息', 403);
     }
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new BusinessError('用户不存在');
@@ -414,4 +473,9 @@ export class AuthService {
     await Promise.all([invalidateAuthUser(userId), invalidateOrgSnapshot(userId)]);
     return this.getProfile(userId);
   }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  const candidate = error as { driverError?: { code?: string }; code?: string };
+  return (candidate?.driverError?.code ?? candidate?.code) === '23505';
 }

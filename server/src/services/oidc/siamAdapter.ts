@@ -48,6 +48,28 @@ export class SiamAdapter implements OidcProvider {
     return { clientId, clientSecret };
   }
 
+  private async request(url: URL, operation: string): Promise<Response> {
+    const configuredTimeout = Number(process.env.OIDC_REQUEST_TIMEOUT_MS);
+    const timeoutMs = Number.isInteger(configuredTimeout) && configuredTimeout >= 1000
+      ? Math.min(configuredTimeout, 60_000)
+      : 10_000;
+    try {
+      return await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    } catch (error) {
+      logger.error({ err: error, provider: this.name, operation }, 'OPPO SIAM 请求异常');
+      throw new BusinessError(`OPPO SIAM 登录失败：${operation}请求异常，请稍后重试`, 502);
+    }
+  }
+
+  private async responseJson(res: Response, operation: string): Promise<any> {
+    try {
+      return await res.json();
+    } catch (error) {
+      logger.error({ err: error, status: res.status, provider: this.name, operation }, 'OPPO SIAM 响应解析失败');
+      throw new BusinessError(`OPPO SIAM 登录失败：${operation}返回了无效数据`, 502);
+    }
+  }
+
   /** SIAM 无 nonce 概念，返回空；state 由本系统 HMAC 层提供防 CSRF */
   async prepareAuth(): Promise<AuthPreparation> {
     return {};
@@ -83,13 +105,13 @@ export class SiamAdapter implements OidcProvider {
     tokenUrl.searchParams.set('client_secret', clientSecret);
     tokenUrl.searchParams.set('redirect_uri', params.redirectUri);
 
-    const tokenRes = await fetch(tokenUrl);
+    const tokenRes = await this.request(tokenUrl, '换取 access_token');
     if (!tokenRes.ok) {
-      const detail = await safeText(tokenRes);
-      logger.error({ status: tokenRes.status, detail, provider: this.name }, 'OPPO SIAM accessToken 请求失败');
+      // 不记录响应正文或请求 URL，避免身份源错误页回显 client_secret/code 后进入日志。
+      logger.error({ status: tokenRes.status, provider: this.name }, 'OPPO SIAM accessToken 请求失败');
       throw new BusinessError(`OPPO SIAM 登录失败：换取 access_token 失败（HTTP ${tokenRes.status}）`, 502);
     }
-    const tokenBody = (await tokenRes.json()) as any;
+    const tokenBody = await this.responseJson(tokenRes, '换取 access_token');
     // SIAM 私有格式 { status: true, access_token }；standard 模式下为标准 { access_token, expires_in }
     if (tokenBody?.status === false || !tokenBody?.access_token) {
       const err = tokenBody?.error || tokenBody?.errorMsg || '未返回 access_token';
@@ -101,13 +123,12 @@ export class SiamAdapter implements OidcProvider {
     const profileUrl = new URL(`${this.ssoBaseUrl}/siam/oauth2.0/profileByJson`);
     profileUrl.searchParams.set('access_token', accessToken);
 
-    const profileRes = await fetch(profileUrl);
+    const profileRes = await this.request(profileUrl, '获取用户信息');
     if (!profileRes.ok) {
-      const detail = await safeText(profileRes);
-      logger.error({ status: profileRes.status, detail, provider: this.name }, 'OPPO SIAM profile 请求失败');
+      logger.error({ status: profileRes.status, provider: this.name }, 'OPPO SIAM profile 请求失败');
       throw new BusinessError(`OPPO SIAM 登录失败：获取用户信息失败（HTTP ${profileRes.status}）`, 502);
     }
-    const profileBody = (await profileRes.json()) as any;
+    const profileBody = await this.responseJson(profileRes, '获取用户信息');
     // SIAM 私有格式同样可能包 { status: true, attributes: {...}, id: '...' }
     if (profileBody?.status === false) {
       const err = profileBody?.error || profileBody?.errorMsg || '未知错误';
@@ -150,12 +171,4 @@ function pickStr(attrs: Record<string, any>, ...keys: string[]): string | undefi
     if (typeof v === 'number' && Number.isFinite(v)) return String(v);
   }
   return undefined;
-}
-
-async function safeText(res: Response): Promise<string> {
-  try {
-    return await res.text();
-  } catch {
-    return '<unreadable>';
-  }
 }

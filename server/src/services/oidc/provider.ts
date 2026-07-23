@@ -1,4 +1,5 @@
 import type { OidcProviderConfig } from '../../config/auth';
+import { BusinessError } from '../../utils/errors';
 
 /** 从 IdP 换取到的标准化用户信息（适配器统一产出） */
 export interface ProviderUserInfo {
@@ -17,6 +18,48 @@ export interface ProviderUserInfo {
   employeeId?: string;
   /** IdP 侧分组列表（标准 OIDC 的 groups claim，用于角色映射；钉钉无此概念） */
   groups?: string[];
+}
+
+function optionalClaim(value: unknown, label: string, max: number, preserveEmpty = false): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new BusinessError(`第三方身份源返回的${label}格式无效`, 502);
+  }
+  const normalized = String(value).trim();
+  if (!normalized && !preserveEmpty) return undefined;
+  if (normalized.length > max) {
+    throw new BusinessError(`第三方身份源返回的${label}超过${max}个字符`, 502);
+  }
+  return normalized;
+}
+
+/** 在身份数据写库前统一约束长度和空白，避免异常 claim 触发数据库错误或产生不可匹配绑定。 */
+export function normalizeProviderUserInfo(info: ProviderUserInfo): ProviderUserInfo {
+  if (!info || typeof info !== 'object') {
+    throw new BusinessError('第三方身份源未返回有效用户信息', 502);
+  }
+  const subject = optionalClaim(info?.subject, '唯一标识', 255);
+  if (!subject) throw new BusinessError('第三方账号缺少唯一标识', 502);
+  const department = optionalClaim(info.department, '部门路径', 2000, true);
+  if (department) {
+    const segments = department.split('/').map((segment) => segment.trim()).filter(Boolean);
+    if (segments.length > 20 || segments.some((segment) => segment.length > 100)) {
+      throw new BusinessError('第三方身份源返回的部门层级过深或名称过长', 502);
+    }
+  }
+  return {
+    ...info,
+    subject,
+    username: optionalClaim(info.username, '用户名', 255),
+    displayName: optionalClaim(info.displayName, '姓名', 50),
+    email: optionalClaim(info.email, '邮箱', 100),
+    phone: optionalClaim(info.phone, '手机号', 20),
+    department,
+    employeeId: optionalClaim(info.employeeId, '工号', 100),
+    groups: Array.isArray(info.groups)
+      ? info.groups.filter((group): group is string => typeof group === 'string').map((group) => group.trim()).filter(Boolean)
+      : undefined,
+  };
 }
 
 /**

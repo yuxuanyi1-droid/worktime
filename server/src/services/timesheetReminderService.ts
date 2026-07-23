@@ -54,9 +54,12 @@ export function normalizeTimesheetReminderConfig(value: unknown): TimesheetRemin
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new BusinessError('提醒时间格式无效');
 
   const scopes: UserAudienceScope[] = ['all', 'department', 'group', 'user'];
-  const targetScope = scopes.includes(value.targetScope as UserAudienceScope)
-    ? value.targetScope as UserAudienceScope
-    : 'all';
+  // 兼容早期未保存 targetScope 的配置（视为全员）；但显式错误值必须拒绝，
+  // 否则一个拼写错误就可能把部门提醒扩大成全员提醒。
+  if (value.targetScope !== undefined && !scopes.includes(value.targetScope as UserAudienceScope)) {
+    throw new BusinessError('提醒范围无效');
+  }
+  const targetScope = (value.targetScope ?? 'all') as UserAudienceScope;
   const message = typeof value.message === 'string' ? value.message.trim() : '';
   if (!message) throw new BusinessError('提醒内容不能为空');
   if (message.length > 1000) throw new BusinessError('提醒内容不能超过1000个字符');

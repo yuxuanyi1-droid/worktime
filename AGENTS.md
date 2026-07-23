@@ -16,7 +16,10 @@ Run from the relevant package dir unless noted.
 | Dev client only | `cd client && npm run dev` (vite) |
 | Seed DB | `cd server && npm run seed` (`tsx src/seed.ts`) |
 | Run migrations (optional) | `cd server && npm run migration:run` / `migration:revert` |
-| Server unit tests | `cd server && npm test` (vitest run) |
+| All tests | `npm test` (root; server + client) |
+| Server tests | `npm run test:server` |
+| Client tests | `npm run test:client` |
+| Coverage | `npm run test:coverage` |
 | Client build | `npm run build` (root) → `cd client && tsc -b && vite build` |
 | Reset DB | delete `server/data/worktime.db*`, then `cd server && npm run seed` |
 
@@ -51,9 +54,12 @@ No lint/format/typecheck scripts exist. No CI. Client `tsc -b` runs only inside 
 - `src/migrations/` 现有 migration 已启用，按时间戳顺序执行，**不得删除或重排已应用的 migration**。
 - Money/hours 使用 `numeric(10,2)`。`SubmissionSequence` 分配提交分组序号（替代 `MAX+1`）。
 
-## Backend tests
+## Tests
 
-- vitest, `include: ['src/**/*.test.ts']`, tests **live alongside source** (e.g. `services/reportService.test.ts`, `utils/validation.test.ts`). In-memory DB helper in `src/test/setup.ts` (`setupTestDb`) exists for future integration tests.
+- 所有测试、测试辅助代码、恢复演练和压力测试脚本统一位于仓库根目录 `tests/`，禁止再放回 `server/src`、`client/src` 或 `server/scripts`。
+- `tests/server/` 使用 Node 环境；`tests/client/` 使用 jsdom + Testing Library；配置位于 `tests/config/`。
+- 内存数据库辅助代码位于 `tests/server/helpers/database.ts`。
+- 根目录运行 `npm test` 执行前后端全部测试；`npm run test:coverage` 生成 `tests/coverage/` 报告。
 
 ## Frontend (`client/src/`)
 

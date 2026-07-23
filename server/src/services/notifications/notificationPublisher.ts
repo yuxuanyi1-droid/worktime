@@ -145,6 +145,23 @@ export class NotificationPublisher {
     });
   }
 
+  /** 发送审批抄送通知（站内 + 可选 TT）。 */
+  async notifyApprovalCc(
+    recipientIds: number[],
+    targetType: string,
+    targetId: number,
+    senderName: string,
+  ) {
+    const typeLabel = this.getApprovalTypeLabel(targetType);
+    return this.publishToUsers(recipientIds, {
+      type: 'approval_cc',
+      title: `审批抄送：${typeLabel}申请`,
+      content: `${senderName}向您抄送了一份${typeLabel}申请，请查看详情`,
+      targetType,
+      targetId,
+    });
+  }
+
   private getApprovalTypeLabel(targetType: string): string {
     const labels: Record<string, string> = {
       timesheet: '工时',

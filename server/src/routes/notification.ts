@@ -1,7 +1,13 @@
 import { Router } from 'express';
 import { NotificationService } from '../services/notificationService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { parsePagination } from '../utils/validation';
+import {
+  firstQueryValue,
+  parseArray,
+  parseOptionalBooleanQuery,
+  parsePagination,
+  parsePositiveInt,
+} from '../utils/validation';
 
 const router = Router();
 const notificationService = new NotificationService();
@@ -13,7 +19,7 @@ router.get('/', async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
     const data = await notificationService.getByUser(req.user!.id, {
-      isRead: req.query.isRead !== undefined ? req.query.isRead === 'true' : undefined,
+      isRead: parseOptionalBooleanQuery(firstQueryValue(req.query.isRead), 'isRead'),
       page,
       pageSize,
     });
@@ -36,8 +42,13 @@ router.get('/unread-count', async (req: AuthRequest, res, next) => {
 // 标记已读
 router.put('/read', async (req: AuthRequest, res, next) => {
   try {
-    const { ids } = req.body;
-    await notificationService.markAsRead(req.user!.id, ids);
+    const ids = parseArray(
+      req.body?.ids,
+      'ids',
+      (id, index) => parsePositiveInt(id, `ids[${index}]`),
+      { min: 1, max: 200 },
+    );
+    await notificationService.markAsRead(req.user!.id, [...new Set(ids)]);
     res.json({ code: 0, message: '已标记已读' });
   } catch (error) {
     next(error);
@@ -57,7 +68,7 @@ router.put('/read-all', async (req: AuthRequest, res, next) => {
 // 删除通知
 router.delete('/:id', async (req: AuthRequest, res, next) => {
   try {
-    await notificationService.delete(req.user!.id, Number(req.params.id));
+    await notificationService.delete(req.user!.id, parsePositiveInt(req.params.id, 'id'));
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);

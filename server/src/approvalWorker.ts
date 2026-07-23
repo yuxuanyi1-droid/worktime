@@ -7,6 +7,7 @@
  *   npm run worker:approval                   # 独立消费
  */
 import './config/env';
+import path from 'node:path';
 import { AppDataSource } from './config/database';
 import { initRedis, closeRedis } from './config/redis';
 import {
@@ -17,12 +18,15 @@ import {
 import { TimesheetService } from './services/timesheetService';
 import { logger } from './utils/logger';
 
-async function main() {
+let shuttingDown = false;
+
+export async function startApprovalWorker() {
+  shuttingDown = false;
   await AppDataSource.initialize();
   const redisOk = await initRedis();
   if (!redisOk) {
-    logger.error('[approval-worker] Redis 不可用，退出');
-    process.exit(1);
+    await AppDataSource.destroy().catch(() => undefined);
+    throw new Error('[approval-worker] Redis 不可用');
   }
 
   await startApprovalQueueWorker(async (jobs) => {
@@ -30,19 +34,28 @@ async function main() {
   });
 
   logger.info({ batchSize: approvalBatchSize() }, '[approval-worker] 就绪');
-
-  const shutdown = async () => {
-    logger.info('[approval-worker] 正在退出…');
-    await stopApprovalQueueWorker();
-    await closeRedis();
-    await AppDataSource.destroy();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
 }
 
-main().catch((err) => {
-  logger.error({ err }, '[approval-worker] 启动失败');
-  process.exit(1);
-});
+export async function stopApprovalWorker(exitProcess = true) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info('[approval-worker] 正在退出…');
+  await stopApprovalQueueWorker().catch(() => undefined);
+  await closeRedis().catch(() => undefined);
+  if (AppDataSource.isInitialized) await AppDataSource.destroy().catch(() => undefined);
+  if (exitProcess) process.exit(0);
+}
+
+export function registerApprovalWorkerSignals(target: Pick<NodeJS.Process, 'once'> = process) {
+  target.once('SIGINT', () => { void stopApprovalWorker(); });
+  target.once('SIGTERM', () => { void stopApprovalWorker(); });
+}
+
+if (process.env.WORKTIME_DISABLE_AUTO_START !== '1'
+  && path.resolve(process.argv[1] || '') === path.resolve(__filename)) {
+  registerApprovalWorkerSignals();
+  void startApprovalWorker().catch((err) => {
+    logger.error({ err }, '[approval-worker] 启动失败');
+    process.exit(1);
+  });
+}

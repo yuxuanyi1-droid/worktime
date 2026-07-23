@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react';
-import { Card, Form, Input, Button, message, Typography, Divider, Descriptions, Modal, Tag, Space, Spin } from 'antd';
+import { Alert, Card, Form, Input, Button, message, Typography, Descriptions, Modal, Tag, Space, Spin } from 'antd';
 import { UserOutlined, LockOutlined, LinkOutlined, DisconnectOutlined } from '@ant-design/icons';
 import { useAuthStore } from '../../stores/authStore';
-import request from '../../utils/request';
 import { authApi } from '../../api/auth';
-import { setOidcIntent, getRedirectUriBase } from '../OidcCallback';
+import { clearOidcIntent, getRedirectUriBase, setOidcIntent } from '../../utils/oidcIntent';
 import type { OidcProviderInfo, OidcBinding } from '../../types';
+import { useNavigate } from 'react-router-dom';
 
 const { Title } = Typography;
 
 export default function ProfilePage() {
-  const { user, setAuth } = useAuthStore();
+  const navigate = useNavigate();
+  const { user, setAuth, clearAuth } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [pwdModalOpen, setPwdModalOpen] = useState(false);
   const [form] = Form.useForm();
@@ -19,6 +20,7 @@ export default function ProfilePage() {
   const [providers, setProviders] = useState<OidcProviderInfo[]>([]);
   const [bindings, setBindings] = useState<OidcBinding[]>([]);
   const [bindingsLoading, setBindingsLoading] = useState(false);
+  const [bindingsError, setBindingsError] = useState<string | null>(null);
   const [bindLoading, setBindLoading] = useState<string | null>(null);
 
   useEffect(() => {
@@ -34,15 +36,33 @@ export default function ProfilePage() {
   // 拉取可见 provider + 当前用户绑定列表
   const loadBindings = async () => {
     setBindingsLoading(true);
+    setBindingsError(null);
     try {
       const [provRes, bindRes] = await Promise.all([
-        authApi.oidcVisibleProviders().catch(() => ({ code: 0, data: [] as OidcProviderInfo[] })),
-        authApi.oidcBindings().catch(() => ({ code: 0, data: [] as OidcBinding[] })),
+        authApi.oidcVisibleProviders(),
+        authApi.oidcBindings(),
       ]);
-      // 绑定区只显示非 JIT 的 provider（JIT provider 是主登录方式，自动建号无需手动绑定）
       const allProviders = Array.isArray(provRes.data) ? provRes.data : [];
-      setProviders(allProviders.filter((p) => !p.jit));
-      setBindings(Array.isArray(bindRes.data) ? bindRes.data : []);
+      const allBindings = Array.isArray(bindRes.data) ? bindRes.data : [];
+      const boundNames = new Set(allBindings.map((binding) => binding.provider));
+      const visibleProviders = allProviders.filter((provider) => !provider.jit || boundNames.has(provider.name));
+      const visibleNames = new Set(visibleProviders.map((provider) => provider.name));
+
+      // 已有绑定即使后来被管理员关闭，也应继续展示，用户才能理解当前登录方式并处理补充绑定。
+      for (const binding of allBindings) {
+        if (!visibleNames.has(binding.provider)) {
+          visibleProviders.push({
+            name: binding.provider,
+            label: binding.providerLabel,
+            type: 'oidc',
+            jit: binding.jit,
+          });
+        }
+      }
+      setProviders(visibleProviders);
+      setBindings(allBindings);
+    } catch (e: any) {
+      setBindingsError(e?.response?.data?.message || '第三方账号信息加载失败');
     } finally {
       setBindingsLoading(false);
     }
@@ -53,6 +73,7 @@ export default function ProfilePage() {
   }, []);
 
   const handleBind = async (provider: OidcProviderInfo) => {
+    if (bindLoading) return;
     setBindLoading(provider.name);
     try {
       // 绑定意图存 sessionStorage，回调页据此走绑定分支
@@ -63,8 +84,12 @@ export default function ProfilePage() {
       });
       if (res.data?.url) {
         window.location.href = res.data.url;
+      } else {
+        clearOidcIntent();
+        message.error('未获取到第三方绑定地址，请稍后重试');
       }
     } catch {
+      clearOidcIntent();
       // 响应拦截器已弹错误
     } finally {
       setBindLoading(null);
@@ -94,9 +119,7 @@ export default function ProfilePage() {
     const values = await form.validateFields();
     setLoading(true);
     try {
-      await request.put('/auth/profile', values);
-      // 更新本地用户信息
-      const profileRes = await request.get<any, { code: number; data: any }>('/auth/profile');
+      const profileRes = await authApi.updateProfile(values);
       if (profileRes.data) {
         const token = localStorage.getItem('token')!;
         setAuth(token, profileRes.data);
@@ -113,13 +136,15 @@ export default function ProfilePage() {
     try {
       // validateFields 触发表单校验（required/min length/两次一致），不通过则抛出
       const values = await pwdForm.validateFields();
-      await request.put('/auth/change-password', {
+      await authApi.changePassword({
         oldPassword: values.oldPassword,
         newPassword: values.newPassword,
       });
-      message.success('密码修改成功');
+      message.success('密码修改成功，请重新登录');
       setPwdModalOpen(false);
       pwdForm.resetFields();
+      clearAuth();
+      navigate('/login', { replace: true });
     } catch (e: any) {
       // validateFields 失败时 error.errorFields 存在，是表单校验错误，不弹 message
       if (!e?.errorFields) {
@@ -179,7 +204,14 @@ export default function ProfilePage() {
 
       <Card title="第三方账号绑定" style={{ borderRadius: 12, marginBottom: 16 }}>
         <Spin spinning={bindingsLoading}>
-          {providers.length === 0 ? (
+          {bindingsError ? (
+            <Alert
+              type="warning"
+              showIcon
+              message={bindingsError}
+              action={<Button size="small" onClick={() => void loadBindings()}>重试</Button>}
+            />
+          ) : providers.length === 0 ? (
             <div style={{ color: '#888', fontSize: 13 }}>
               暂无可绑定的第三方账号。如需启用，请联系管理员在「管理 → 系统设置 → OIDC 认证」中开启。
             </div>
@@ -201,13 +233,16 @@ export default function ProfilePage() {
                       <Tag color={bound ? 'green' : 'default'}>{p.label}</Tag>
                       {bound ? (
                         <span style={{ color: '#666', fontSize: 13 }}>
-                          已绑定{bound.externalUsername ? ` · ${bound.externalUsername}` : ''}
+                          {p.jit ? '主登录方式' : '已绑定'}
+                          {bound.externalUsername ? ` · ${bound.externalUsername}` : ''}
                         </span>
                       ) : (
                         <span style={{ color: '#aaa', fontSize: 13 }}>未绑定</span>
                       )}
                     </Space>
-                    {bound ? (
+                    {bound && p.jit ? (
+                      <Tag color="blue">由身份源维护</Tag>
+                    ) : bound ? (
                       <Button
                         size="small"
                         danger
@@ -222,6 +257,7 @@ export default function ProfilePage() {
                         type="primary"
                         icon={<LinkOutlined />}
                         loading={bindLoading === p.name}
+                        disabled={bindLoading !== null && bindLoading !== p.name}
                         onClick={() => handleBind(p)}
                       >
                         绑定
@@ -244,10 +280,10 @@ export default function ProfilePage() {
       >
         <Form form={pwdForm} layout="vertical">
           <Form.Item label="原密码" name="oldPassword" rules={[{ required: true }]}>
-            <Input.Password />
+            <Input.Password autoComplete="current-password" />
           </Form.Item>
-          <Form.Item label="新密码" name="newPassword" rules={[{ required: true, min: 6, message: '密码至少6位' }]}>
-            <Input.Password />
+          <Form.Item label="新密码" name="newPassword" rules={[{ required: true, min: 8, message: '密码至少8位' }]}>
+            <Input.Password autoComplete="new-password" />
           </Form.Item>
           <Form.Item label="确认新密码" name="confirmPassword" dependencies={['newPassword']} rules={[
             { required: true, message: '请确认新密码' },
@@ -258,7 +294,7 @@ export default function ProfilePage() {
               },
             }),
           ]}>
-            <Input.Password />
+            <Input.Password autoComplete="new-password" />
           </Form.Item>
         </Form>
       </Modal>

@@ -1,4 +1,5 @@
 import { useAuthStore } from '../stores/authStore';
+import type { UserInfo } from '../types';
 
 const permissionImplications: Record<string, string[]> = {
   'report:view:all': ['report:view:self', 'report:view:group', 'report:view:department', 'report:view:project', 'report:view:overtime'],
@@ -31,10 +32,9 @@ function expandHeldPermissions(permissions: string[]) {
 }
 
 /**
- * 权限判断 hook
+ * 根据用户快照构造权限判断器。保持为纯函数，便于在路由、组件和测试中复用同一套语义。
  */
-export function usePermission() {
-  const user = useAuthStore((s) => s.user);
+export function createPermissionChecker(user: UserInfo | null) {
   const permissions = expandHeldPermissions(user?.permissions || []);
   const roleNames = user?.roles?.map((r) => r.name) || [];
 
@@ -79,4 +79,10 @@ export function usePermission() {
     hasAllPermissions,
     hasRole,
   };
+}
+
+/** 权限判断 hook */
+export function usePermission() {
+  const user = useAuthStore((s) => s.user);
+  return createPermissionChecker(user);
 }

@@ -38,9 +38,8 @@ export class AuditService {
     if (userId) qb.andWhere('l.userId = :userId', { userId });
     if (action) qb.andWhere('l.action = :action', { action });
     if (target) qb.andWhere('l.target = :target', { target });
-    if (startDate && endDate) {
-      qb.andWhere('l.createdAt BETWEEN :startDate AND :endDate', { startDate, endDate });
-    }
+    if (startDate) qb.andWhere('l.createdAt >= :startDate', { startDate });
+    if (endDate) qb.andWhere('l.createdAt <= :endDate', { endDate });
 
     qb.orderBy('l.createdAt', 'DESC');
     const total = await qb.getCount();

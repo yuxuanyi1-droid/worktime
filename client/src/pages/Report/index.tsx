@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -22,6 +22,7 @@ import { reportApi } from '../../api/report';
 import { DepartmentReport, GroupReport, OvertimeReport, PersonalReport, ProjectReport, ReportScope } from '../../types';
 import request from '../../utils/request';
 import LazyEChart from '../../components/Charts/LazyEChart';
+import { usePermission } from '../../hooks/usePermission';
 
 const { Title, Text } = Typography;
 type ReportTabKey = 'personal' | 'group' | 'department' | 'project' | 'overtime';
@@ -280,10 +281,10 @@ function OvertimeView({ data }: { data: OvertimeReport | null }) {
         </Card>
       </Col>
       <Col xs={24} xl={8}>
-        <DataChart title="加班类型占比" option={makePieOption(typeData, '小时')} />
+        <DataChart title="加班类型占比" option={makePieOption(typeData, '天')} />
       </Col>
       <Col xs={24} xl={8}>
-        <DataChart title="人员加班排行" option={makeBarOption(data?.byUser, '小时', palette[2])} />
+        <DataChart title="人员加班排行" option={makeBarOption(data?.byUser, '天', palette[2])} />
       </Col>
     </Row>
   );
@@ -302,6 +303,7 @@ export default function Report() {
   const [selectedProj, setSelectedProj] = useState<number>();
   const [selectedProjDept, setSelectedProjDept] = useState<number>();
   const [selectedProjGroup, setSelectedProjGroup] = useState<number>();
+  const [selectedOvertimeProject, setSelectedOvertimeProject] = useState<number>();
   const [personalData, setPersonalData] = useState<PersonalReport | null>(null);
   const [groupData, setGroupData] = useState<GroupReport | null>(null);
   const [deptData, setDeptData] = useState<DepartmentReport | null>(null);
@@ -310,8 +312,15 @@ export default function Report() {
   const [scopeLoading, setScopeLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scopeError, setScopeError] = useState<string | null>(null);
   // 记录已加载过的 Tab，切 Tab 时若未加载则自动加载一次
   const [loadedTabs, setLoadedTabs] = useState<Set<ReportTabKey>>(new Set());
+  const [exporting, setExporting] = useState(false);
+  const queryRequestId = useRef(0);
+  const scopeRequestId = useRef(0);
+  const initialQueryStarted = useRef(false);
+  const { hasPermission } = usePermission();
+  const canExport = hasPermission('report:export');
 
   const startDate = dateRange[0].format('YYYY-MM-DD');
   const endDate = dateRange[1].format('YYYY-MM-DD');
@@ -339,6 +348,26 @@ export default function Report() {
   ])
     .filter((group) => !selectedProjDept || group.departmentId === selectedProjDept);
 
+  const exportScope = scope?.exportScope;
+  const canExportCurrent = (() => {
+    if (!canExport || !exportScope) return false;
+    if (exportScope.unrestricted) return true;
+    if (tabKey === 'personal') return false;
+    if (tabKey === 'group') return !!selectedGroup && exportScope.groupIds.includes(selectedGroup);
+    if (tabKey === 'department') {
+      return (!!selectedDeptGroup && exportScope.groupIds.includes(selectedDeptGroup))
+        || (!!selectedDept && exportScope.departmentIds.includes(selectedDept));
+    }
+    if (tabKey === 'project') {
+      return (!!selectedProjGroup && exportScope.groupIds.includes(selectedProjGroup))
+        || (!!selectedProjDept && exportScope.departmentIds.includes(selectedProjDept))
+        || (!!selectedProj && exportScope.projectIds.includes(selectedProj));
+    }
+    return (!!selectedDeptGroup && exportScope.groupIds.includes(selectedDeptGroup))
+      || (!!selectedDept && exportScope.departmentIds.includes(selectedDept))
+      || (!!selectedOvertimeProject && exportScope.projectIds.includes(selectedOvertimeProject));
+  })();
+
   const tabItems = useMemo(() => [
     ...(scope?.canViewPersonal ? [{ key: 'personal', label: '个人报表' }] : []),
     ...(scope?.canViewGroup ? [{ key: 'group', label: '组别报表' }] : []),
@@ -349,20 +378,65 @@ export default function Report() {
 
   const getErrorMessage = (err: any, fallback: string) => err?.response?.data?.message || err?.message || fallback;
 
-  useEffect(() => {
+  const cancelActiveQuery = () => {
+    queryRequestId.current += 1;
+    setLoading(false);
+  };
+
+  const loadScope = async () => {
+    const requestId = ++scopeRequestId.current;
     setScopeLoading(true);
-    reportApi.getScope()
-      .then((res) => {
-        const nextScope = res.data || null;
-        setScope(nextScope);
-        setSelectedGroup(nextScope?.groups?.[0]?.id);
-        setSelectedDept(nextScope?.departments?.[0]?.id);
-        setSelectedProj(nextScope?.projects?.[0]?.id);
-      })
-      .catch((err: any) => {
-        setError(getErrorMessage(err, '报表范围加载失败'));
-      })
-      .finally(() => setScopeLoading(false));
+    setScopeError(null);
+    initialQueryStarted.current = false;
+    try {
+      const res = await reportApi.getScope();
+      if (requestId !== scopeRequestId.current) return;
+      const nextScope = res.data || null;
+      if (!nextScope) throw new Error('报表范围返回异常');
+      setScope(nextScope);
+      setSelectedGroup(nextScope.groups?.[0]?.id);
+      setSelectedDept(nextScope.departments?.[0]?.id);
+      setSelectedDeptGroup(undefined);
+      setSelectedProj(nextScope.projects?.[0]?.id);
+      setSelectedProjDept(undefined);
+      setSelectedProjGroup(undefined);
+      setSelectedOvertimeProject(undefined);
+      setLoadedTabs(new Set());
+    } catch (err: any) {
+      if (requestId !== scopeRequestId.current) return;
+      setScope(null);
+      setScopeError(getErrorMessage(err, '报表范围加载失败'));
+    } finally {
+      if (requestId === scopeRequestId.current) setScopeLoading(false);
+    }
+  };
+
+  const beginQuery = () => {
+    const requestId = ++queryRequestId.current;
+    setLoading(true);
+    setError(null);
+    return requestId;
+  };
+
+  const isLatestQuery = (requestId: number) => requestId === queryRequestId.current;
+  const finishQuery = (requestId: number) => {
+    if (isLatestQuery(requestId)) setLoading(false);
+  };
+
+  const invalidateTab = (key: ReportTabKey) => {
+    setLoadedTabs((previous) => {
+      const next = new Set(previous);
+      next.delete(key);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    loadScope();
+    return () => {
+      scopeRequestId.current += 1;
+      queryRequestId.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -374,16 +448,17 @@ export default function Report() {
   }, [scope, tabItems, tabKey]);
 
   const loadPersonal = async () => {
-    setLoading(true);
-    setError(null);
+    const requestId = beginQuery();
     try {
       const res = await reportApi.getPersonal(startDate, endDate);
-      setPersonalData(res.data || null);
+      if (isLatestQuery(requestId)) setPersonalData(res.data || null);
     } catch (err: any) {
-      setPersonalData(null);
-      setError(getErrorMessage(err, '个人报表加载失败'));
+      if (isLatestQuery(requestId)) {
+        setPersonalData(null);
+        setError(getErrorMessage(err, '个人报表加载失败'));
+      }
     } finally {
-      setLoading(false);
+      finishQuery(requestId);
     }
   };
 
@@ -392,16 +467,17 @@ export default function Report() {
       setError('请选择组别');
       return;
     }
-    setLoading(true);
-    setError(null);
+    const requestId = beginQuery();
     try {
       const res = await reportApi.getGroup(selectedGroup, startDate, endDate);
-      setGroupData(res.data || null);
+      if (isLatestQuery(requestId)) setGroupData(res.data || null);
     } catch (err: any) {
-      setGroupData(null);
-      setError(getErrorMessage(err, '组别报表加载失败'));
+      if (isLatestQuery(requestId)) {
+        setGroupData(null);
+        setError(getErrorMessage(err, '组别报表加载失败'));
+      }
     } finally {
-      setLoading(false);
+      finishQuery(requestId);
     }
   };
 
@@ -410,16 +486,17 @@ export default function Report() {
       setError('请选择部门');
       return;
     }
-    setLoading(true);
-    setError(null);
+    const requestId = beginQuery();
     try {
       const res = await reportApi.getDepartment(selectedDept, startDate, endDate, selectedDeptGroup);
-      setDeptData(res.data || null);
+      if (isLatestQuery(requestId)) setDeptData(res.data || null);
     } catch (err: any) {
-      setDeptData(null);
-      setError(getErrorMessage(err, '部门报表加载失败'));
+      if (isLatestQuery(requestId)) {
+        setDeptData(null);
+        setError(getErrorMessage(err, '部门报表加载失败'));
+      }
     } finally {
-      setLoading(false);
+      finishQuery(requestId);
     }
   };
 
@@ -428,38 +505,41 @@ export default function Report() {
       setError('请选择项目');
       return;
     }
-    setLoading(true);
-    setError(null);
+    const requestId = beginQuery();
     try {
       const res = await reportApi.getProject(selectedProj, startDate, endDate, {
         departmentId: selectedProjDept,
         groupId: selectedProjGroup,
       });
-      setProjData(res.data || null);
+      if (isLatestQuery(requestId)) setProjData(res.data || null);
     } catch (err: any) {
-      setProjData(null);
-      setError(getErrorMessage(err, '项目报表加载失败'));
+      if (isLatestQuery(requestId)) {
+        setProjData(null);
+        setError(getErrorMessage(err, '项目报表加载失败'));
+      }
     } finally {
-      setLoading(false);
+      finishQuery(requestId);
     }
   };
 
   const loadOvertime = async () => {
-    setLoading(true);
-    setError(null);
+    const requestId = beginQuery();
     try {
       const res = await reportApi.getOvertime({
         startDate,
         endDate,
         departmentId: selectedDept,
         groupId: selectedDeptGroup,
+        projectId: selectedOvertimeProject,
       });
-      setOvertimeData(res.data || null);
+      if (isLatestQuery(requestId)) setOvertimeData(res.data || null);
     } catch (err: any) {
-      setOvertimeData(null);
-      setError(getErrorMessage(err, '加班统计加载失败'));
+      if (isLatestQuery(requestId)) {
+        setOvertimeData(null);
+        setError(getErrorMessage(err, '加班统计加载失败'));
+      }
     } finally {
-      setLoading(false);
+      finishQuery(requestId);
     }
   };
 
@@ -473,9 +553,17 @@ export default function Report() {
     else loadPersonal();
   };
 
+  useEffect(() => {
+    if (!scope || initialQueryStarted.current || !tabItems.some((item) => item.key === tabKey)) return;
+    initialQueryStarted.current = true;
+    queryCurrent(tabKey);
+  }, [scope, tabItems, tabKey]);
+
   /** 切 Tab 时若该 Tab 未加载过则自动加载 */
   const handleTabChange = (key: string) => {
     const nextKey = key as ReportTabKey;
+    cancelActiveQuery();
+    setError(null);
     setTabKey(nextKey);
     if (!loadedTabs.has(nextKey)) {
       queryCurrent(nextKey);
@@ -485,12 +573,21 @@ export default function Report() {
   /** 日期范围改变时清空已加载标记，强制重新查询 */
   const handleDateChange = (value: [dayjs.Dayjs | null, dayjs.Dayjs | null] | null) => {
     if (value && value[0] && value[1]) {
+      cancelActiveQuery();
+      setError(null);
       setDateRange([value[0], value[1]]);
       setLoadedTabs(new Set());
+      setPersonalData(null);
+      setGroupData(null);
+      setDeptData(null);
+      setProjData(null);
+      setOvertimeData(null);
     }
   };
 
   const handleExport = async (type: ReportTabKey) => {
+    if (exporting) return;
+    setExporting(true);
     try {
       const params: any = { startDate, endDate };
       if (type === 'group') {
@@ -508,16 +605,22 @@ export default function Report() {
       } else if (type === 'overtime') {
         params.departmentId = selectedDept;
         params.groupId = selectedDeptGroup;
+        params.projectId = selectedOvertimeProject;
       }
       const res = await request.get(`/reports/export/${type}`, { params, responseType: 'blob' });
-      const url = window.URL.createObjectURL(new Blob([res as any]));
+      const blob = res instanceof Blob ? res : new Blob([res as any]);
+      const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `${type}-report-${params.startDate}-${params.endDate}.xlsx`;
+      document.body.appendChild(a);
       a.click();
-      window.URL.revokeObjectURL(url);
+      a.remove();
+      window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
     } catch (err: any) {
       message.error(getErrorMessage(err, '导出失败'));
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -538,39 +641,102 @@ export default function Report() {
               <Select
                 placeholder="选择组别"
                 style={{ width: 200 }}
-                options={(scope?.groups || []).map((group) => ({ label: group.name, value: group.id }))}
+                options={(scope?.groups || []).map((group) => ({
+                  label: `${group.department?.name ? `${group.department.name} / ` : ''}${group.name}`,
+                  value: group.id,
+                }))}
                 value={selectedGroup}
-                onChange={setSelectedGroup}
+                onChange={(value) => {
+                  cancelActiveQuery();
+                  setError(null);
+                  setSelectedGroup(value);
+                  setGroupData(null);
+                  invalidateTab('group');
+                }}
               />
             </Col>
           )}
           {(tabKey === 'department' || tabKey === 'overtime') && (
             <>
-              <Col>
-                <Select
-                  placeholder="选择部门"
-                  style={{ width: 200 }}
-                  allowClear={tabKey === 'overtime'}
-                  options={(scope?.departments || []).map((department) => ({ label: department.name, value: department.id }))}
-                  value={selectedDept}
-                  onChange={(value) => {
-                    setSelectedDept(value);
-                    setSelectedDeptGroup(undefined);
-                  }}
-                />
-              </Col>
-              <Col>
-                <Select
-                  placeholder="按组别过滤"
-                  style={{ width: 200 }}
-                  allowClear
-                  disabled={tabKey === 'department' && !selectedDept}
-                  options={groupsForDept(selectedDept).map((group) => ({ label: group.name, value: group.id }))}
-                  value={selectedDeptGroup}
-                  onChange={setSelectedDeptGroup}
-                />
-              </Col>
+              {(tabKey === 'department' || (scope?.departments || []).length > 0) && (
+                <Col>
+                  <Select
+                    placeholder="选择部门"
+                    style={{ width: 200 }}
+                    allowClear={tabKey === 'overtime'}
+                    options={(scope?.departments || []).map((department) => ({ label: department.name, value: department.id }))}
+                    value={selectedDept}
+                    onChange={(value) => {
+                      cancelActiveQuery();
+                      setError(null);
+                      setSelectedDept(value);
+                      setSelectedDeptGroup(undefined);
+                      if (tabKey === 'overtime') setSelectedOvertimeProject(undefined);
+                      if (tabKey === 'department') {
+                        setDeptData(null);
+                        invalidateTab('department');
+                      } else {
+                        setOvertimeData(null);
+                        invalidateTab('overtime');
+                      }
+                    }}
+                  />
+                </Col>
+              )}
+              {(tabKey === 'department' || (scope?.groups || []).length > 0) && (
+                <Col>
+                  <Select
+                    placeholder="按组别过滤"
+                    style={{ width: 200 }}
+                    allowClear
+                    disabled={tabKey === 'department' && !selectedDept}
+                    options={groupsForDept(selectedDept).map((group) => ({
+                      label: `${group.department?.name ? `${group.department.name} / ` : ''}${group.name}`,
+                      value: group.id,
+                    }))}
+                    value={selectedDeptGroup}
+                    onChange={(value) => {
+                      cancelActiveQuery();
+                      setError(null);
+                      setSelectedDeptGroup(value);
+                      if (tabKey === 'overtime' && value) setSelectedOvertimeProject(undefined);
+                      if (tabKey === 'department') {
+                        setDeptData(null);
+                        invalidateTab('department');
+                      } else {
+                        setOvertimeData(null);
+                        invalidateTab('overtime');
+                      }
+                    }}
+                  />
+                </Col>
+              )}
             </>
+          )}
+          {tabKey === 'overtime' && (
+            <Col>
+              <Select
+                placeholder="按项目过滤"
+                style={{ width: 220 }}
+                allowClear
+                options={(scope?.overtimeProjects || []).map((project) => ({
+                  label: `${project.name}（${project.code}）`,
+                  value: project.id,
+                }))}
+                value={selectedOvertimeProject}
+                onChange={(value) => {
+                  cancelActiveQuery();
+                  setError(null);
+                  setSelectedOvertimeProject(value);
+                  if (value) {
+                    setSelectedDept(undefined);
+                    setSelectedDeptGroup(undefined);
+                  }
+                  setOvertimeData(null);
+                  invalidateTab('overtime');
+                }}
+              />
+            </Col>
           )}
           {tabKey === 'project' && (
             <>
@@ -581,10 +747,13 @@ export default function Report() {
                   options={(scope?.projects || []).map((project) => ({ label: project.name, value: project.id }))}
                   value={selectedProj}
                   onChange={(value) => {
+                    cancelActiveQuery();
+                    setError(null);
                     setSelectedProj(value);
                     setSelectedProjDept(undefined);
                     setSelectedProjGroup(undefined);
                     setProjData(null);
+                    invalidateTab('project');
                   }}
                 />
               </Col>
@@ -596,8 +765,12 @@ export default function Report() {
                   options={projectDepartments.map((department) => ({ label: department.name, value: department.id }))}
                   value={selectedProjDept}
                   onChange={(value) => {
+                    cancelActiveQuery();
+                    setError(null);
                     setSelectedProjDept(value);
                     setSelectedProjGroup(undefined);
+                    setProjData(null);
+                    invalidateTab('project');
                   }}
                 />
               </Col>
@@ -608,29 +781,50 @@ export default function Report() {
                   allowClear
                   options={projectGroups.map((group) => ({ label: group.name, value: group.id }))}
                   value={selectedProjGroup}
-                  onChange={setSelectedProjGroup}
+                  onChange={(value) => {
+                    cancelActiveQuery();
+                    setError(null);
+                    setSelectedProjGroup(value);
+                    setProjData(null);
+                    invalidateTab('project');
+                  }}
                 />
               </Col>
             </>
           )}
           <Col>
-            <Button type="primary" onClick={() => queryCurrent()} loading={loading}>查询</Button>
+            <Button type="primary" onClick={() => queryCurrent()} loading={loading}
+              disabled={scopeLoading || tabItems.length === 0}>查询</Button>
           </Col>
-          <Col>
-            <Button icon={<DownloadOutlined />} onClick={() => handleExport(tabKey)}>
-              导出Excel
-            </Button>
-          </Col>
+          {canExport && (
+            <Col>
+              <Button icon={<DownloadOutlined />} onClick={() => handleExport(tabKey)} loading={exporting}
+                disabled={scopeLoading || tabItems.length === 0 || !canExportCurrent}
+                title={canExportCurrent ? undefined : '导出授权不包含当前筛选范围'}>
+                导出Excel
+              </Button>
+            </Col>
+          )}
         </Row>
       </Card>
 
-      {error && (
+      {scopeError && (
+        <Alert
+          type="error"
+          showIcon
+          message="报表范围加载失败"
+          description={scopeError}
+          action={<Button size="small" onClick={() => loadScope()} loading={scopeLoading}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {error && !scopeError && (
         <Alert
           type="error"
           showIcon
           message={error}
-          closable
-          onClose={() => setError(null)}
+          action={<Button size="small" onClick={() => queryCurrent()} loading={loading}>重试</Button>}
           style={{ marginBottom: 16 }}
         />
       )}
@@ -644,7 +838,7 @@ export default function Report() {
         />
 
         <Spin spinning={loading}>
-          {tabItems.length === 0 && <Empty description="暂无可查看的报表" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+          {!scopeError && !scopeLoading && tabItems.length === 0 && <Empty description="暂无可查看的报表" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
           {tabKey === 'personal' && <PersonalView data={personalData} />}
           {tabKey === 'group' && <GroupView data={groupData} />}
           {tabKey === 'department' && <DepartmentView data={deptData} />}

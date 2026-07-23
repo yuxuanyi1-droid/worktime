@@ -5,15 +5,15 @@ import { requirePermission } from '../middleware/permission';
 import {
   firstQueryValue,
   parseDateString,
-  parseNonNegativeNumber,
   parsePagination,
   parsePositiveInt,
   parseString,
 } from '../utils/validation';
-import { canAccessUserData } from '../utils/accessControl';
+import { AccessPolicyService } from '../services/accessPolicyService';
 
 const router = Router();
 const weeklyReportService = new WeeklyReportService();
+const accessPolicy = new AccessPolicyService();
 
 function parseWeeklyReportPayload(body: Record<string, unknown>) {
   return {
@@ -21,7 +21,6 @@ function parseWeeklyReportPayload(body: Record<string, unknown>) {
     weekEnd: parseDateString(body.weekEnd, 'weekEnd'),
     content: parseString(body.content, 'content', { max: 20000 }),
     summary: parseString(body.summary, 'summary', { max: 2000 }),
-    totalDays: body.totalDays === undefined ? undefined : parseNonNegativeNumber(body.totalDays, 'totalDays', { max: 7 }),
   };
 }
 
@@ -48,7 +47,7 @@ router.get('/week', requirePermission('weekly_report:view:self', 'weekly_report:
     const userId = firstQueryValue(req.query.userId)
       ? parsePositiveInt(firstQueryValue(req.query.userId), 'userId')
       : req.user!.id;
-    if (!await canAccessUserData(req.user!, userId, {
+    if (!await accessPolicy.canAccessUserData(req.user!, userId, {
       departmentPermissions: ['weekly_report:view:department'],
       groupPermissions: ['weekly_report:view:group'],
     })) {

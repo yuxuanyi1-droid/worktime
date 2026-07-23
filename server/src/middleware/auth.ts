@@ -19,6 +19,8 @@ type CachedAuthUser = {
   permissions: string[];
   tokenVersion: number;
   permissionModelVersion: number;
+  /** 最近一次授权开始/到期时间；到点后禁止继续使用缓存中的权限集合。 */
+  permissionsRefreshAt: number | null;
 };
 
 /** PAT 明文前缀，auth 中间件据此区分 JWT 与 PAT */
@@ -34,7 +36,33 @@ export interface AuthRequest extends Request {
   /** 当前请求用户完整权限集合（含角色权限 + 生效中的授权 + 蕴含展开）。请求级缓存。 */
   userPermissions?: Set<string>;
   /** 当前请求的认证方式：jwt（登录会话）或 pat（个人访问令牌，用于 pi skill / 外部工具） */
-  authMethod?: 'jwt' | 'pat';
+  authMethod?: 'jwt' | 'pat' | 'agent';
+}
+
+const AGENT_READ_PATHS = new Set([
+  'timesheets/my',
+  'timesheets/weekly-summary',
+  'overtime/my',
+  'overtime/stats',
+  'weekly-reports/my',
+  'weekly-reports/week',
+  'approvals/pending',
+  'approvals/my-submissions',
+  'approvals/history',
+  'reports/personal',
+  'reports/dashboard',
+  'reports/group',
+  'reports/department',
+]);
+
+/** AI 内部令牌只能访问 worktime_query 暴露的只读资源。 */
+export function isAgentRequestAllowed(method: string, originalUrl: string): boolean {
+  if (method.toUpperCase() !== 'GET') return false;
+  const pathname = originalUrl.split('?')[0].replace(/\/+$/, '');
+  const marker = '/api/v1/';
+  const apiIndex = pathname.lastIndexOf(marker);
+  if (apiIndex < 0) return false;
+  return AGENT_READ_PATHS.has(pathname.slice(apiIndex + marker.length));
 }
 
 /**
@@ -70,11 +98,17 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
 
     // JWT 分支：原有逻辑
     const decoded = jwt.verify(token, authConfig.jwtSecret) as any;
+    const isAgentToken = decoded.purpose === 'agent';
+    if (isAgentToken && !isAgentRequestAllowed(req.method, req.originalUrl)) {
+      return res.status(403).json({ code: 403, message: 'AI 内部令牌无权访问该接口' });
+    }
 
     const cacheKey = CacheKeys.authUser(decoded.id);
     const cached = await cacheGet<CachedAuthUser>(cacheKey);
-    if (cached?.permissionModelVersion === PERMISSION_MODEL_VERSION) {
-      if (decoded.v !== cached.tokenVersion) {
+    const permissionCacheFresh = cached?.permissionsRefreshAt == null
+      || cached.permissionsRefreshAt > Date.now();
+    if (cached?.permissionModelVersion === PERMISSION_MODEL_VERSION && permissionCacheFresh) {
+      if (Number(decoded.v) !== Number(cached.tokenVersion)) {
         return res.status(401).json({ code: 401, message: '登录已失效，请重新登录' });
       }
       req.user = {
@@ -84,7 +118,7 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
         roles: cached.roles,
       };
       req.userPermissions = new Set(cached.permissions);
-      req.authMethod = 'jwt';
+      req.authMethod = isAgentToken ? 'agent' : 'jwt';
       return next();
     }
 
@@ -99,7 +133,7 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
     }
 
     // 校验 token 版本：改密/登出后 version+1，旧 token 即失效
-    if (decoded.v !== user.tokenVersion) {
+    if (Number(decoded.v) !== Number(user.tokenVersion)) {
       return res.status(401).json({ code: 401, message: '登录已失效，请重新登录' });
     }
 
@@ -110,14 +144,16 @@ export const authMiddleware = async (req: AuthRequest, res: Response, next: Next
       roles: user.roles.map(r => r.name),
     };
     // 一次性算出权限集合挂到请求对象，permissionMiddleware 直接复用，避免每个权限校验重复查库
-    req.userPermissions = await accessPolicy.getPermissionCodesForLoadedUser(user);
-    req.authMethod = 'jwt';
+    const permissionSnapshot = await accessPolicy.getPermissionSnapshotForLoadedUser(user);
+    req.userPermissions = permissionSnapshot.permissions;
+    req.authMethod = isAgentToken ? 'agent' : 'jwt';
 
     await cacheSet(cacheKey, {
       ...req.user,
       permissions: Array.from(req.userPermissions),
-      tokenVersion: user.tokenVersion,
+      tokenVersion: Number(user.tokenVersion),
       permissionModelVersion: PERMISSION_MODEL_VERSION,
+      permissionsRefreshAt: permissionSnapshot.refreshAt,
     } satisfies CachedAuthUser, CacheTtl.auth);
 
     return next();
@@ -143,7 +179,7 @@ async function authenticatePat(token: string, req: AuthRequest, res: Response, n
   }
 
   // 过期校验
-  if (pat.expiresAt && pat.expiresAt.getTime() < Date.now()) {
+  if (pat.expiresAt && pat.expiresAt.getTime() <= Date.now()) {
     return res.status(401).json({ code: 401, message: '访问令牌已过期' });
   }
 

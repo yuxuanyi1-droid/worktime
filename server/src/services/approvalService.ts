@@ -15,6 +15,7 @@ import { PermissionGovernanceService } from './permissionGovernanceService';
 import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
 import { BusinessError } from '../utils/errors';
 import { round2 } from '../utils/validation';
+import { invalidateAuthUsers } from '../config/cache';
 
 type TargetType = 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
 
@@ -43,7 +44,7 @@ interface ApprovalTargetLike {
   reason?: string;
   weekStart?: string;
   weekEnd?: string;
-  totalHours?: number;
+  totalDays?: number;
   content?: string;
   summary?: string;
   permissionCode?: string;
@@ -62,6 +63,10 @@ type PendingNotification =
 
 export class ApprovalService {
   constructor(private manager?: EntityManager) {}
+
+  private transaction<T>(work: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return this.manager ? work(this.manager) : AppDataSource.transaction(work);
+  }
 
   private get recordRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalRecord); }
   private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
@@ -147,6 +152,7 @@ export class ApprovalService {
       targetType,
       targetId: target.id,
       instanceId: instance?.id ?? target.approvalInstanceId ?? null,
+      status: target.status,
       applicant: applicant?.realName,
       applicantId: applicant?.id,
       department: applicant?.department?.name,
@@ -190,7 +196,7 @@ export class ApprovalService {
       base.title = `${applicantPrefix}${target.weekStart}~${target.weekEnd} 周报`;
       base.weekStart = target.weekStart;
       base.weekEnd = target.weekEnd;
-      base.totalHours = target.totalHours;
+      base.totalDays = target.totalDays;
       base.summary = target.summary;
     } else if (targetType === 'permission_request') {
       base.title = `${applicantPrefix}申请开通 ${target.permissionName}`;
@@ -279,15 +285,25 @@ export class ApprovalService {
   }
 
   async approve(approverId: number, approverName: string, items: { targetType: string; targetId: number; action: 'approve' | 'reject'; comment?: string }[]) {
+    if (!items.length) throw new BusinessError('请选择需要审批的记录');
+    const itemKeys = new Set<string>();
+    for (const item of items) {
+      const key = `${item.targetType}:${item.targetId}`;
+      if (itemKeys.has(key)) throw new BusinessError(`审批记录重复（类型：${item.targetType}，编号：${item.targetId}）`);
+      itemKeys.add(key);
+      if (item.action === 'reject' && !item.comment?.trim()) throw new BusinessError('驳回时必须填写原因');
+    }
     const isAdmin = await this.isAdminUser(approverId);
     const notifications: PendingNotification[] = [];
+    const permissionGrantUserIds = new Set<number>();
+    const applicantNameCache = new Map<number, string>();
 
-    await AppDataSource.transaction(async (manager) => {
+    await this.transaction(async (manager) => {
       const txService = new ApprovalService(manager);
 
       for (const item of items) {
         const { target, repo, applicantId } = await txService.getTargetInfo(item.targetType, item.targetId);
-        if (!target) throw new BusinessError(`${item.targetType} record ${item.targetId} not found`);
+        if (!target) throw new BusinessError(`审批记录不存在（类型：${item.targetType}，编号：${item.targetId}）`);
         if (target.status !== 'submitted') throw new BusinessError(`记录 ${item.targetId} 不是待审批状态`);
 
         const result = await txService.approvalInstanceService.act({
@@ -326,6 +342,15 @@ export class ApprovalService {
         }
 
         if (item.targetType === 'timesheet' && target.submissionGroupId) {
+          // 在目标仍为 submitted 时冻结，确保通过、驳回和撤回三种终态的
+          // consumed 均包含本次申请，快照口径一致。
+          if (result.status === 'approved' || result.status === 'rejected') {
+            await txService.freezeTimesheetQuotaSnapshot(
+              result.instance.id,
+              target.submissionGroupId,
+              applicantId,
+            );
+          }
           await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
           if (item.action === 'approve' && result.status === 'approved') {
             // 新版本审批通过：按 rootGroupId deprecate 整条旧链上所有旧版本（非当前 submissionGroupId）
@@ -346,21 +371,13 @@ export class ApprovalService {
               );
             }
           }
-          // 终态（通过/驳回）时冻结配额快照：把当前的动态配额值写入 instance.quotaSnapshot，
-          // 之后查看已通过/已驳回的单子展示此快照（不再动态更新），作为审批内容的永久记录。
-          if (result.status === 'approved' || result.status === 'rejected') {
-            await txService.freezeTimesheetQuotaSnapshot(
-              result.instance.id,
-              target.submissionGroupId,
-              applicantId,
-            );
-          }
         } else if (item.targetType === 'permission_request') {
           if (result.status === 'approved') {
             const grant = await txService.permissionGovernanceService.activateGrant(item.targetId, result.instance.id, {
               id: approverId,
               name: approverName,
             });
+            permissionGrantUserIds.add(applicantId);
             await txService.permissionRequestRepo.update(item.targetId, { ...updateData, grantId: grant.id });
           } else if (result.status === 'rejected') {
             await txService.permissionGovernanceService.markRejected(item.targetId);
@@ -376,18 +393,24 @@ export class ApprovalService {
         } else if (result.status === 'approved') {
           notifications.push({ kind: 'result', applicantId, targetType: item.targetType, targetId: item.targetId, approved: true });
         } else if (result.nextApproverIds.length) {
+          let applicantName = applicantNameCache.get(applicantId);
+          if (applicantName === undefined) {
+            applicantName = (await txService.userRepo.findOneBy({ id: applicantId }))?.realName || '申请人';
+            applicantNameCache.set(applicantId, applicantName);
+          }
           notifications.push({
             kind: 'pending',
             approverIds: result.nextApproverIds,
             targetType: item.targetType,
             targetId: item.targetId,
-            applicantName: approverName,
+            applicantName,
             title: `审批流转至步骤${result.instance.currentStepOrder}`,
           });
         }
       }
     });
 
+    await invalidateAuthUsers([...permissionGrantUserIds]);
     await this.flushNotifications(notifications);
     return { success: true };
   }
@@ -408,70 +431,96 @@ export class ApprovalService {
 
   async getMySubmissions(userId: number, params: { targetType?: string; status?: string; startDate?: string; endDate?: string; page?: number; pageSize?: number }) {
     const { targetType, status, startDate, endDate, page = 1, pageSize = 20 } = params;
-    const results: any[] = [];
+    type Candidate = { targetType: TargetType; targetId: number; sortAt: string | Date };
+    const values: unknown[] = [];
+    const isPostgres = (this.manager?.connection.options.type ?? AppDataSource.options.type) === 'postgres';
+    const bind = (value: unknown) => {
+      values.push(value);
+      return isPostgres ? `$${values.length}` : '?';
+    };
+    const candidateQueries: string[] = [];
 
     if (!targetType || targetType === 'timesheet') {
-      const qb = this.timesheetRepo
-        .createQueryBuilder('t')
-        .leftJoinAndSelect('t.project', 'p')
-        .leftJoinAndSelect('t.user', 'u')
-        .where('t.userId = :userId', { userId })
-        .andWhere('t.status != :deprecated', { deprecated: 'deprecated' });
-      if (startDate && endDate) qb.andWhere('t.date BETWEEN :startDate AND :endDate', { startDate, endDate });
-      const items = await qb.getMany();
-
-      const seenGroups = new Set<number>();
-      const dedupItems: typeof items = [];
-      for (const item of items) {
-        if (status && item.status !== status) continue;
-        if (item.submissionGroupId) {
-          if (seenGroups.has(item.submissionGroupId)) continue;
-          seenGroups.add(item.submissionGroupId);
-        }
-        dedupItems.push(item);
-      }
-      const instanceMap = await this.batchInstances('timesheet', dedupItems);
-      for (const item of dedupItems) {
-        results.push(await this.buildListItem('timesheet', item, instanceMap.get(item.id) ?? null, item.user));
-      }
+      const conditions = [`t."userId" = ${bind(userId)}`, `t."status" <> 'deprecated'`];
+      if (status) conditions.push(`t."status" = ${bind(status)}`);
+      if (startDate) conditions.push(`t."date" >= ${bind(startDate)}`);
+      if (endDate) conditions.push(`t."date" <= ${bind(endDate)}`);
+      candidateQueries.push(`
+        SELECT 'timesheet' AS "targetType", MIN(t.id) AS "targetId",
+          COALESCE(MAX(i."submittedAt"), MAX(t."updatedAt")) AS "sortAt"
+        FROM timesheets t
+        LEFT JOIN approval_instances i ON i.id = t."approvalInstanceId"
+        WHERE ${conditions.join(' AND ')}
+        GROUP BY COALESCE(t."submissionGroupId", -t.id)
+      `);
     }
 
-    if (!targetType || targetType === 'overtime') {
-      const where: any = { userId };
-      if (status) where.status = status;
-      let items = await this.overtimeRepo.find({ where });
-      if (startDate && endDate) items = items.filter(i => i.date >= startDate && i.date <= endDate);
-      const instanceMap = await this.batchInstances('overtime', items);
-      for (const item of items) {
-        results.push(await this.buildListItem('overtime', item, instanceMap.get(item.id) ?? null));
-      }
+    const addSingleRecordQuery = (
+      type: Exclude<TargetType, 'timesheet'>,
+      table: string,
+      userColumn: string,
+      dateColumn?: string,
+    ) => {
+      if (targetType && targetType !== type) return;
+      const alias = 'x';
+      const conditions = [`${alias}."${userColumn}" = ${bind(userId)}`];
+      if (status) conditions.push(`${alias}."status" = ${bind(status)}`);
+      if (dateColumn && startDate) conditions.push(`${alias}."${dateColumn}" >= ${bind(startDate)}`);
+      if (dateColumn && endDate) conditions.push(`${alias}."${dateColumn}" <= ${bind(endDate)}`);
+      candidateQueries.push(`
+        SELECT '${type}' AS "targetType", ${alias}.id AS "targetId",
+          COALESCE(i."submittedAt", ${alias}."updatedAt") AS "sortAt"
+        FROM ${table} ${alias}
+        LEFT JOIN approval_instances i ON i.id = ${alias}."approvalInstanceId"
+        WHERE ${conditions.join(' AND ')}
+      `);
+    };
+    addSingleRecordQuery('overtime', 'overtime_applications', 'userId', 'date');
+    addSingleRecordQuery('weekly_report', 'weekly_reports', 'userId', 'weekStart');
+    // 权限申请没有业务日期字段，日期筛选仍沿用原行为，不对其生效。
+    addSingleRecordQuery('permission_request', 'permission_requests', 'applicantId');
+
+    if (!candidateQueries.length) return { list: [], total: 0, page, pageSize };
+    const unionSql = candidateQueries.join(' UNION ALL ');
+    const querySource = this.manager ?? AppDataSource;
+    const totalRows = await querySource.query(`SELECT COUNT(*) AS count FROM (${unionSql}) candidates`, values);
+    const total = Number(totalRows?.[0]?.count ?? 0);
+    const limitPlaceholder = bind(pageSize);
+    const offsetPlaceholder = bind((page - 1) * pageSize);
+    const rows = await querySource.query(
+      `SELECT * FROM (${unionSql}) candidates ORDER BY "sortAt" DESC, "targetType", "targetId" DESC LIMIT ${limitPlaceholder} OFFSET ${offsetPlaceholder}`,
+      values,
+    ) as Candidate[];
+    const candidates = rows.map(row => ({ ...row, targetId: Number(row.targetId) }));
+
+    const idsByType = new Map<TargetType, number[]>();
+    for (const candidate of candidates) {
+      const ids = idsByType.get(candidate.targetType) ?? [];
+      ids.push(candidate.targetId);
+      idsByType.set(candidate.targetType, ids);
+    }
+    const targetMap = new Map<string, ApprovalTargetLike>();
+    const instanceMap = new Map<string, ApprovalInstance | null>();
+    for (const [type, ids] of idsByType) {
+      const repo = this.getRepoByTargetType(type);
+      if (!repo) continue;
+      const targets = await repo.find({ where: { id: In(ids) } as any }) as ApprovalTargetLike[];
+      for (const target of targets) targetMap.set(`${type}_${target.id}`, target);
+      const instances = await this.batchInstances(type, targets);
+      for (const [id, instance] of instances) instanceMap.set(`${type}_${id}`, instance);
     }
 
-    if (!targetType || targetType === 'weekly_report') {
-      const where: any = { userId };
-      if (status) where.status = status;
-      let items = await this.weeklyReportRepo.find({ where });
-      if (startDate && endDate) items = items.filter(i => i.weekStart >= startDate && i.weekStart <= endDate);
-      const instanceMap = await this.batchInstances('weekly_report', items);
-      for (const item of items) {
-        results.push(await this.buildListItem('weekly_report', item, instanceMap.get(item.id) ?? null));
-      }
+    const applicant = await this.userRepo.findOne({
+      where: { id: userId },
+      relations: ['department', 'group'],
+    });
+    const list: any[] = [];
+    for (const candidate of candidates) {
+      const key = `${candidate.targetType}_${candidate.targetId}`;
+      const target = targetMap.get(key);
+      if (!target) continue;
+      list.push(await this.buildListItem(candidate.targetType, target, instanceMap.get(key) ?? null, applicant));
     }
-
-    if (!targetType || targetType === 'permission_request') {
-      const where: any = { applicantId: userId };
-      if (status) where.status = status;
-      const items = await this.permissionRequestRepo.find({ where });
-      const applicant = await this.userRepo.findOne({ where: { id: userId }, relations: ['department', 'group'] });
-      const instanceMap = await this.batchInstances('permission_request', items);
-      for (const item of items) {
-        results.push(await this.buildListItem('permission_request', item, instanceMap.get(item.id) ?? null, applicant));
-      }
-    }
-
-    results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    const total = results.length;
-    const list = results.slice((page - 1) * pageSize, page * pageSize);
     return { list, total, page, pageSize };
   }
 
@@ -517,57 +566,24 @@ export class ApprovalService {
     return result;
   }
 
-  async getApprovalHistory(params: { targetType?: string; targetId?: number; page?: number; pageSize?: number; viewerId: number; mine?: boolean }) {
-    const { targetType, targetId, page = 1, pageSize = 20, viewerId, mine } = params;
+  async getApprovalHistory(params: { targetType?: string; targetId?: number; page?: number; pageSize?: number; viewerId: number }) {
+    const { targetType, targetId, page = 1, pageSize = 20, viewerId } = params;
     const qb = this.recordRepo.createQueryBuilder('r');
     if (targetType) qb.andWhere('r.targetType = :targetType', { targetType });
     if (targetId) qb.andWhere('r.targetId = :targetId', { targetId });
-    if (mine) {
-      qb.andWhere('r.approverId = :viewerId', { viewerId });
-      qb.andWhere('r.action IN (:...actions)', { actions: ['approve', 'reject'] });
-    }
+    qb.andWhere('r.approverId = :viewerId', { viewerId });
+    qb.andWhere('r.action IN (:...actions)', { actions: ['approve', 'reject'] });
 
     qb.orderBy('r.createdAt', 'DESC');
-    const records = await qb.getMany();
-
-    // 批量预取所有 target：按 targetType 分组用 In(...) 一次查，避免逐条 getTargetInfo
-    const targetIdsByType = new Map<string, Set<number>>();
-    for (const record of records) {
-      const bucket = targetIdsByType.get(record.targetType) ?? new Set<number>();
-      bucket.add(record.targetId);
-      targetIdsByType.set(record.targetType, bucket);
-    }
-    const targetMap = new Map<string, any>();
-    for (const [type, idSet] of targetIdsByType) {
-      const ids = [...idSet];
-      const repo = this.getRepoByTargetType(type);
-      if (repo && ids.length) {
-        const found = await repo.find({ where: { id: In(ids) } as any });
-        for (const t of found) targetMap.set(`${type}_${t.id}`, t);
-      }
-    }
-
-    const list: ApprovalRecord[] = [];
-    const permissionCache = new Map<string, boolean>();
-
-    for (const record of records) {
-      const key = `${record.targetType}_${record.targetId}`;
-      let canView = permissionCache.get(key);
-      if (canView === undefined) {
-        const target = targetMap.get(key);
-        canView = !!target && await this.canViewApprovalTarget(record.targetType, target, record.targetId, viewerId, records.filter(r => r.targetType === record.targetType && r.targetId === record.targetId));
-        permissionCache.set(key, canView);
-      }
-      if (canView) list.push(record);
-    }
-
-    const total = list.length;
-    const pagedList = list.slice((page - 1) * pageSize, page * pageSize);
-    return { list: pagedList, total, page, pageSize };
+    const [list, total] = await qb
+      .skip((page - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
+    return { list, total, page, pageSize };
   }
 
   async withdraw(userId: number, targetType: string, targetId: number) {
-    await AppDataSource.transaction(async (manager) => {
+    await this.transaction(async (manager) => {
       const txService = new ApprovalService(manager);
       const { target, repo } = await txService.getTargetInfo(targetType, targetId);
       if (!target) throw new BusinessError('记录不存在');
@@ -617,23 +633,42 @@ export class ApprovalService {
   }
 
   async cc(fromUserId: number, fromUserName: string, targetType: string, targetId: number, recipientIds: number[]) {
-    await AppDataSource.transaction(async (manager) => {
+    const uniqueRecipientIds = [...new Set(recipientIds)].filter(id => id !== fromUserId);
+    if (!uniqueRecipientIds.length) throw new BusinessError('请选择至少一名其他用户作为抄送人');
+
+    let createdCount = 0;
+    const createdRecipientIds: number[] = [];
+    await this.transaction(async (manager) => {
       const txService = new ApprovalService(manager);
       const { target } = await txService.getTargetInfo(targetType, targetId);
       if (!target) throw new BusinessError('记录不存在');
       if ((target.userId ?? target.applicantId) !== fromUserId) throw new BusinessError('只能抄送自己的申请');
       const instance = await txService.getTargetInstance(targetType, target, targetId);
 
-      for (const recipientId of recipientIds) {
-        const recipient = await txService.userRepo.findOneBy({ id: recipientId });
-        if (!recipient) continue;
+      const recipients = await txService.userRepo.find({
+        where: { id: In(uniqueRecipientIds), status: 1 },
+      });
+      if (recipients.length !== uniqueRecipientIds.length) throw new BusinessError('抄送人不存在或已被禁用');
+      const existing = await txService.recordRepo.find({
+        where: {
+          targetType: targetType as TargetType,
+          targetId,
+          action: 'cc',
+          approverId: In(uniqueRecipientIds),
+        },
+        select: ['approverId'],
+      });
+      const existingIds = new Set(existing.map(record => record.approverId));
+
+      for (const recipient of recipients) {
+        if (existingIds.has(recipient.id)) continue;
 
         await txService.recordRepo.save(txService.recordRepo.create({
           targetType: targetType as TargetType,
           targetId,
           instanceId: instance?.id ?? null,
           taskId: null,
-          approverId: recipientId,
+          approverId: recipient.id,
           approverName: recipient.realName,
           action: 'cc',
           comment: `${fromUserName} 抄送给您传阅`,
@@ -641,10 +676,21 @@ export class ApprovalService {
           stepType: 'cc',
           stepLabel: '抄送传阅',
         }));
+        createdCount += 1;
+        createdRecipientIds.push(recipient.id);
       }
     });
 
-    return { success: true };
+    if (!createdCount) throw new BusinessError('所选用户均已收到过该审批抄送');
+    try {
+      await new NotificationPublisher().notifyApprovalCc(
+        createdRecipientIds,
+        targetType,
+        targetId,
+        fromUserName,
+      );
+    } catch {}
+    return { success: true, createdCount };
   }
 
   async getMyCcList(userId: number, params: { page?: number; pageSize?: number }) {
@@ -788,7 +834,7 @@ export class ApprovalService {
     } else if (targetType === 'weekly_report') {
       content.weekStart = target.weekStart;
       content.weekEnd = target.weekEnd;
-      content.totalHours = target.totalHours;
+      content.totalDays = target.totalDays;
       content.content = target.content;
       content.summary = target.summary;
     } else if (targetType === 'permission_request') {
@@ -924,13 +970,19 @@ export class ApprovalService {
     if (!instance) return [];
     return instance.stepsSnapshot.map(step => {
       const stepTasks = tasks.filter(task => task.stepOrder === step.stepOrder);
-      const actedTask = stepTasks.find(task => task.status === 'approved' || task.status === 'rejected');
-      let status: 'pending' | 'current' | 'approved' | 'rejected' = 'pending';
+      const rejectedTask = stepTasks.find(task => task.status === 'rejected');
+      const approvedTask = stepTasks.find(task => task.status === 'approved');
+      const withdrawnTask = stepTasks.find(task => task.status === 'withdrawn');
+      const skippedTask = stepTasks.find(task => task.status === 'skipped');
+      const actedTask = rejectedTask ?? approvedTask ?? withdrawnTask ?? skippedTask;
+      let status: 'pending' | 'current' | 'approved' | 'rejected' | 'skipped' | 'withdrawn' = 'pending';
 
-      if (actedTask?.status === 'approved') status = 'approved';
-      else if (actedTask?.status === 'rejected') status = 'rejected';
+      if (rejectedTask) status = 'rejected';
+      else if (instance.status === 'withdrawn' && withdrawnTask) status = 'withdrawn';
+      // 会签中已有部分人通过时，整步仍是“当前步骤”，不能提前展示为已通过。
       else if (instance.status === 'pending' && instance.currentStepOrder === step.stepOrder) status = 'current';
-      else if (instance.status === 'approved') status = 'approved';
+      else if (approvedTask || instance.status === 'approved') status = 'approved';
+      else if (skippedTask) status = 'skipped';
 
       // 每个审批人的独立状态（A9：区分实际处理人 / skipped / pending，避免或签下误导）
       const approverStatuses = step.approvers.map(approver => {

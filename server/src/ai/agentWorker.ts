@@ -8,6 +8,7 @@ import { parentPort } from 'node:worker_threads';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Type } from 'typebox';
+import { PromptScheduler } from './promptScheduler';
 
 let pi: any = null;
 
@@ -15,6 +16,7 @@ interface WorkerSession {
   session: any;
   userId: number;
   sessionFile?: string;
+  accessToken: { current: string };
   unsubscribe: () => void;
   lastActiveAt: number;
 }
@@ -23,6 +25,19 @@ const sessions = new Map<string, WorkerSession>();
 const SAFE_CWD = path.resolve(__dirname, '../../data/agent-cwd');
 const SESSIONS_ROOT = path.resolve(__dirname, '../../data/agent-sessions');
 const IDLE_SESSION_TTL_MS = 30 * 60 * 1000;
+
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value >= min ? Math.min(value, max) : fallback;
+}
+
+const MAX_RESIDENT_SESSIONS = envInt('AI_MAX_RESIDENT_SESSIONS', 200, 10, 10_000);
+const MAX_SESSIONS_PER_USER = envInt('AI_MAX_SESSIONS_PER_USER', 30, 1, 1_000);
+const promptScheduler = new PromptScheduler(
+  envInt('AI_MAX_CONCURRENT_PROMPTS', 12, 1, 1_000),
+  envInt('AI_MAX_QUEUED_PROMPTS', 100, 0, 10_000),
+  () => postWorkerStats(),
+);
 
 const RESOURCE_CONFIG = {
   my_timesheets: { path: '/timesheets/my', label: '查询我的工时' },
@@ -54,13 +69,44 @@ function post(message: any) {
   }
 }
 
+function postWorkerStats() {
+  post({
+    type: 'stats',
+    stats: { ...promptScheduler.stats(), residentSessions: sessions.size },
+  });
+}
+
 function userSessionDir(userId: number): string {
   const dir = path.join(SESSIONS_ROOT, String(userId));
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
   return dir;
 }
 
-function buildQueryUrl(worktimeApi: string, resource: ResourceName, params: Record<string, unknown>): string {
+export function assertSessionQuota(existingCount: number, maxSessions = MAX_SESSIONS_PER_USER): void {
+  if (!Number.isInteger(existingCount) || existingCount < 0) throw new Error('会话数量无效');
+  if (existingCount >= maxSessions) {
+    throw new Error(`最多保留${maxSessions}条对话，请先删除不需要的历史对话`);
+  }
+}
+
+function disposeSession(sessionId: string, record: WorkerSession) {
+  record.unsubscribe();
+  record.session.dispose?.();
+  sessions.delete(sessionId);
+  postWorkerStats();
+}
+
+function ensureResidentCapacity() {
+  if (sessions.size < MAX_RESIDENT_SESSIONS) return;
+  const idle = [...sessions.entries()]
+    .filter(([, record]) => !record.session.isStreaming)
+    .sort((a, b) => a[1].lastActiveAt - b[1].lastActiveAt)[0];
+  if (!idle) throw new Error('AI 服务当前会话较多，请稍后重试');
+  disposeSession(idle[0], idle[1]);
+}
+
+export function buildQueryUrl(worktimeApi: string, resource: ResourceName, params: Record<string, unknown>): string {
   const url = new URL(`${worktimeApi}${RESOURCE_CONFIG[resource].path}`);
   const allowed = ['startDate', 'endDate', 'status', 'weekStart', 'page', 'pageSize', 'userId', 'includeAll'];
   for (const key of allowed) {
@@ -72,7 +118,7 @@ function buildQueryUrl(worktimeApi: string, resource: ResourceName, params: Reco
   return url.toString();
 }
 
-function createWorktimeQueryTool(pat: string, worktimeApi: string) {
+function createWorktimeQueryTool(accessToken: { current: string }, worktimeApi: string) {
   const resources = Object.keys(RESOURCE_CONFIG) as ResourceName[];
   return pi.defineTool({
     name: 'worktime_query',
@@ -109,7 +155,7 @@ function createWorktimeQueryTool(pat: string, worktimeApi: string) {
       const url = buildQueryUrl(worktimeApi, resource, params);
       const response = await fetch(url, {
         method: 'GET',
-        headers: { Authorization: `Bearer ${pat}`, Accept: 'application/json' },
+        headers: { Authorization: `Bearer ${accessToken.current}`, Accept: 'application/json' },
         signal,
       });
       const raw = await response.text();
@@ -144,19 +190,27 @@ async function createOrOpenSession(data: {
   const existing = sessionId ? sessions.get(sessionId) : undefined;
   if (existing) {
     if (existing.userId !== userId) throw new Error('会话不存在');
+    existing.accessToken.current = pat;
     existing.lastActiveAt = Date.now();
     post({ type: 'created', requestId, sessionId, sessionFile: existing.sessionFile, reused: true });
     return;
   }
 
+  ensureResidentCapacity();
+
   const sessionDir = userSessionDir(userId);
+  const available = await pi.SessionManager.list(SAFE_CWD, sessionDir);
   let sessionManager: any;
   if (sessionId) {
-    const available = await pi.SessionManager.list(SAFE_CWD, sessionDir);
     const info = available.find((item: any) => item.id === sessionId);
     if (!info) throw new Error('会话不存在');
     sessionManager = pi.SessionManager.open(info.path, sessionDir, SAFE_CWD);
   } else {
+    const knownSessionIds = new Set(available.map((item: any) => item.id));
+    for (const [knownSessionId, record] of sessions) {
+      if (record.userId === userId) knownSessionIds.add(knownSessionId);
+    }
+    assertSessionQuota(knownSessionIds.size);
     sessionManager = pi.SessionManager.create(SAFE_CWD, sessionDir);
   }
 
@@ -182,7 +236,8 @@ async function createOrOpenSession(data: {
   });
   await resourceLoader.reload();
 
-  const queryTool = createWorktimeQueryTool(pat, worktimeApi);
+  const accessToken = { current: pat };
+  const queryTool = createWorktimeQueryTool(accessToken, worktimeApi);
   const created = await pi.createAgentSession({
     cwd: SAFE_CWD,
     authStorage,
@@ -194,6 +249,9 @@ async function createOrOpenSession(data: {
     sessionManager,
   });
   const session = created.session;
+  if (session.sessionFile) {
+    await fs.promises.chmod(session.sessionFile, 0o600).catch(() => undefined);
+  }
   const unsubscribe = session.subscribe((event: any) => {
     const record = sessions.get(session.sessionId);
     if (record) record.lastActiveAt = Date.now();
@@ -203,9 +261,11 @@ async function createOrOpenSession(data: {
     session,
     userId,
     sessionFile: session.sessionFile,
+    accessToken,
     unsubscribe,
     lastActiveAt: Date.now(),
   });
+  postWorkerStats();
   post({ type: 'created', requestId, sessionId: session.sessionId, sessionFile: session.sessionFile, reused: false });
 }
 
@@ -240,7 +300,7 @@ async function listSessions(data: { requestId: string; userId: number }) {
   post({ type: 'sessions', requestId: data.requestId, sessions: result });
 }
 
-function messageText(message: any): string {
+export function messageText(message: any): string {
   if (!message) return '';
   if (typeof message.content === 'string') return message.content;
   if (!Array.isArray(message.content)) return '';
@@ -250,7 +310,7 @@ function messageText(message: any): string {
     .join('');
 }
 
-function serializeHistory(session: any) {
+export function serializeHistory(session: any) {
   return (session.messages || []).flatMap((message: any, index: number) => {
     if (message.role !== 'user' && message.role !== 'assistant') return [];
     const text = messageText(message).trim();
@@ -272,31 +332,35 @@ function getOwnedSession(sessionId: string, userId: number): WorkerSession {
 
 async function promptSession(data: { requestId: string; sessionId: string; userId: number; message: string }) {
   const record = getOwnedSession(data.sessionId, data.userId);
-  if (record.session.isStreaming) throw new Error('当前会话正在处理中');
-  if (!record.session.sessionManager.getSessionName()) {
-    record.session.setSessionName(data.message.trim().slice(0, 30) || '新对话');
-  }
-  await record.session.prompt(data.message);
+  await promptScheduler.run(data.sessionId, async () => {
+    if (record.session.isStreaming) throw new Error('当前会话正在处理中');
+    if (!record.session.sessionManager.getSessionName()) {
+      record.session.setSessionName(data.message.trim().slice(0, 30) || '新对话');
+    }
+    await record.session.prompt(data.message);
+  });
   post({ type: 'prompt-done', requestId: data.requestId, sessionId: data.sessionId });
 }
 
-function entryMessageText(entry: any): string {
+export function entryMessageText(entry: any): string {
   if (entry?.type !== 'message' || entry.message?.role !== 'user') return '';
   return messageText(entry.message).trim();
 }
 
 async function regenerateSession(data: { requestId: string; sessionId: string; userId: number; message: string }) {
   const record = getOwnedSession(data.sessionId, data.userId);
-  if (record.session.isStreaming) throw new Error('当前会话正在处理中');
-  const branch = record.session.sessionManager.getBranch();
-  const lastUserEntry = [...branch].reverse().find((entry: any) => entryMessageText(entry));
-  if (!lastUserEntry) throw new Error('没有可重新生成的消息');
+  await promptScheduler.run(data.sessionId, async () => {
+    if (record.session.isStreaming) throw new Error('当前会话正在处理中');
+    const branch = record.session.sessionManager.getBranch();
+    const lastUserEntry = [...branch].reverse().find((entry: any) => entryMessageText(entry));
+    if (!lastUserEntry) throw new Error('没有可重新生成的消息');
 
-  const navigation = await record.session.navigateTree(lastUserEntry.id, { summarize: false });
-  if (navigation.cancelled) throw new Error('重新生成已取消');
-  const prompt = navigation.editorText?.trim() || data.message.trim();
-  if (!prompt) throw new Error('没有可重新生成的消息');
-  await record.session.prompt(prompt);
+    const navigation = await record.session.navigateTree(lastUserEntry.id, { summarize: false });
+    if (navigation.cancelled) throw new Error('重新生成已取消');
+    const prompt = navigation.editorText?.trim() || data.message.trim();
+    if (!prompt) throw new Error('没有可重新生成的消息');
+    await record.session.prompt(prompt);
+  });
   post({ type: 'prompt-done', requestId: data.requestId, sessionId: data.sessionId });
 }
 
@@ -308,9 +372,15 @@ async function queueMessage(data: { requestId: string; sessionId: string; userId
   post({ type: 'action-done', requestId: data.requestId });
 }
 
+async function refreshAccessToken(data: { requestId: string; sessionId: string; userId: number; pat: string }) {
+  const record = getOwnedSession(data.sessionId, data.userId);
+  record.accessToken.current = data.pat;
+  post({ type: 'action-done', requestId: data.requestId });
+}
+
 async function abortSession(data: { requestId: string; sessionId: string; userId: number }) {
   const record = getOwnedSession(data.sessionId, data.userId);
-  await record.session.abort();
+  if (!promptScheduler.cancelQueued(data.sessionId)) await record.session.abort();
   post({ type: 'action-done', requestId: data.requestId });
 }
 
@@ -331,10 +401,8 @@ async function deleteSession(data: { requestId: string; sessionId: string; userI
   if (record) {
     if (record.userId !== data.userId) throw new Error('会话不存在');
     sessionFile = record.sessionFile;
-    if (record.session.isStreaming) await record.session.abort();
-    record.unsubscribe();
-    record.session.dispose?.();
-    sessions.delete(data.sessionId);
+    if (!promptScheduler.cancelQueued(data.sessionId) && record.session.isStreaming) await record.session.abort();
+    disposeSession(data.sessionId, record);
   } else {
     const available = await pi.SessionManager.list(SAFE_CWD, userSessionDir(data.userId));
     sessionFile = available.find((item: any) => item.id === data.sessionId)?.path;
@@ -357,6 +425,7 @@ async function handleMessage(message: any) {
     case 'prompt': return promptSession(message);
     case 'regenerate': return regenerateSession(message);
     case 'queue': return queueMessage(message);
+    case 'refresh-token': return refreshAccessToken(message);
     case 'abort': return abortSession(message);
     case 'rename': return renameSession(message);
     case 'delete': return deleteSession(message);
@@ -364,32 +433,40 @@ async function handleMessage(message: any) {
   }
 }
 
-parentPort?.on('message', (message: any) => {
-  handleMessage(message).catch((error: any) => {
-    post({
-      type: 'error',
-      requestId: message?.requestId,
-      sessionId: message?.sessionId,
-      message: error?.message || 'worker 处理失败',
+if (parentPort) {
+  parentPort.on('message', (message: any) => {
+    handleMessage(message).catch((error: any) => {
+      post({
+        type: 'error',
+        requestId: message?.requestId,
+        sessionId: message?.sessionId,
+        message: error?.message || 'worker 处理失败',
+      });
     });
   });
-});
 
-const cleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [sessionId, record] of sessions) {
-    if (!record.session.isStreaming && now - record.lastActiveAt > IDLE_SESSION_TTL_MS) {
-      record.unsubscribe();
-      record.session.dispose?.();
-      sessions.delete(sessionId);
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [sessionId, record] of sessions) {
+      if (!record.session.isStreaming && now - record.lastActiveAt > IDLE_SESSION_TTL_MS) {
+        disposeSession(sessionId, record);
+      }
     }
-  }
-}, 10 * 60 * 1000);
-cleanupTimer.unref();
+  }, 10 * 60 * 1000);
+  cleanupTimer.unref();
+
+  void bootstrap().catch((error) => {
+    post({ type: 'error', message: `pi 加载失败：${(error as Error).message}` });
+  });
+}
 
 async function bootstrap() {
-  fs.mkdirSync(SAFE_CWD, { recursive: true });
-  fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
+  // Worker 线程不支持设置 process.umask（Node 24 会抛 ERR_WORKER_UNSUPPORTED_OPERATION）。
+  // 目录与会话文件改用显式 mode/chmod，避免依赖进程级全局状态。
+  fs.mkdirSync(SAFE_CWD, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(SESSIONS_ROOT, { recursive: true, mode: 0o700 });
+  fs.chmodSync(SAFE_CWD, 0o700);
+  fs.chmodSync(SESSIONS_ROOT, 0o700);
   // 本项目输出 CommonJS，TypeScript 会把普通 import() 降级为 require()；而 pi 包只导出
   // ESM 的 import 条件。通过原生动态 import 保留 ESM 加载语义，避免启动时报
   // “No exports main defined”。模块名是服务端固定常量，不接收用户输入。
@@ -397,8 +474,5 @@ async function bootstrap() {
     (specifier: string) => Promise<any>;
   pi = await nativeImport('@earendil-works/pi-coding-agent');
   post({ type: 'ready' });
+  postWorkerStats();
 }
-
-bootstrap().catch((error) => {
-  post({ type: 'error', message: `pi 加载失败：${(error as Error).message}` });
-});

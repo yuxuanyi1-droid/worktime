@@ -4,8 +4,9 @@ import {
   DatePicker, Tag, message, Typography, Row, Col, Popconfirm, Alert,
   Descriptions,
 } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
+import { EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
+import dayjs from 'dayjs';
 import { overtimeApi } from '../../api/overtime';
 import { approvalApi } from '../../api/approval';
 import { systemApi } from '../../api/system';
@@ -17,9 +18,12 @@ const { TextArea } = Input;
 
 export default function Overtime() {
   const [data, setData] = useState<OvertimeApplication[]>([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<OvertimeApplication | null>(null);
   const [projects, setProjects] = useState<{ id: number; name: string; code: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [form] = Form.useForm();
@@ -29,6 +33,7 @@ export default function Overtime() {
   const canCreate = hasPermission('overtime:create');
   const canViewSelf = hasPermission('overtime:view:self');
   const canDelete = hasPermission('overtime:delete:self');
+  const canUpdate = hasPermission('overtime:update:self');
   const canSubmit = hasPermission('overtime:submit:self');
   const canWithdraw = hasPermission('approval:withdraw:self');
 
@@ -37,18 +42,23 @@ export default function Overtime() {
     return e?.response?.data?.message || e?.message || fallback;
   };
 
-  useEffect(() => { loadData(); loadProjects(); }, []);
+  useEffect(() => { void loadData(page); }, [page, canViewSelf]);
+  useEffect(() => {
+    if (canSubmit && (canCreate || canUpdate)) void loadProjects();
+  }, [canCreate, canSubmit, canUpdate]);
 
-  const loadData = async () => {
+  const loadData = async (targetPage = page) => {
     if (!canViewSelf) {
       setData([]);
+      setTotal(0);
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const res = await overtimeApi.getMy({ pageSize: 100 });
+      const res = await overtimeApi.getMy({ page: targetPage, pageSize: 20 });
       setData(res.data?.list || []);
+      setTotal(res.data?.total || 0);
     } catch (e: any) {
       setData([]);
       setError(e?.response?.data?.message || e?.message || '加班列表加载失败');
@@ -88,9 +98,15 @@ export default function Overtime() {
       onOk: async () => {
         setSubmitting(true);
         try {
-          await overtimeApi.createAndSubmit(payload);
-          message.success('已提交审批');
+          if (editingRecord) {
+            await overtimeApi.update(editingRecord.id, payload);
+            await overtimeApi.submit([editingRecord.id]);
+          } else {
+            await overtimeApi.createAndSubmit(payload);
+          }
+          message.success(editingRecord ? '修改后已重新提交审批' : '已提交审批');
           setModalOpen(false);
+          setEditingRecord(null);
           form.resetFields();
           loadData();
         } catch (e) {
@@ -100,6 +116,24 @@ export default function Overtime() {
         }
       },
     });
+  };
+
+  const openCreate = () => {
+    setEditingRecord(null);
+    form.resetFields();
+    setModalOpen(true);
+  };
+
+  const openEdit = (record: OvertimeApplication) => {
+    setEditingRecord(record);
+    form.setFieldsValue({
+      date: dayjs(record.date),
+      projectId: record.projectId,
+      overtimeType: record.overtimeType,
+      days: Number(record.days),
+      reason: record.reason,
+    });
+    setModalOpen(true);
   };
 
   const handleDelete = async (id: number) => {
@@ -147,6 +181,11 @@ export default function Overtime() {
               <Button type="link" size="small">撤回</Button>
             </Popconfirm>
           )}
+          {canUpdate && canSubmit && ['draft', 'rejected', 'withdrawn'].includes(record.status) && (
+            <Button type="link" size="small" icon={<EditOutlined />} onClick={() => openEdit(record)}>
+              {record.status === 'draft' ? '编辑并提交' : '修改并重提'}
+            </Button>
+          )}
           {canDelete && record.status === 'draft' && (
             <Popconfirm title="确定删除?" onConfirm={() => handleDelete(record.id)}>
               <Button type="link" size="small" danger>删除</Button>
@@ -167,7 +206,7 @@ export default function Overtime() {
           <Col>
             <Space>
               {canCreate && canSubmit && (
-                <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setModalOpen(true); }}>
+                <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
                   新增加班
                 </Button>
               )}
@@ -181,8 +220,7 @@ export default function Overtime() {
           type="error"
           showIcon
           message={error}
-          closable
-          onClose={() => setError(null)}
+          action={<Button size="small" onClick={() => void loadData(page)}>重试</Button>}
           style={{ marginBottom: 16 }}
         />
       )}
@@ -193,14 +231,21 @@ export default function Overtime() {
           loading={loading}
           columns={columns}
           dataSource={data}
-          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+          pagination={{
+            current: page,
+            pageSize: 20,
+            total,
+            showSizeChanger: false,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: setPage,
+          }}
         />
       </Card>
 
       <Modal
-        title="新增加班申请"
+        title={editingRecord ? '修改加班申请' : '新增加班申请'}
         open={modalOpen}
-        onCancel={() => { setModalOpen(false); form.resetFields(); }}
+        onCancel={() => { setModalOpen(false); setEditingRecord(null); form.resetFields(); }}
         onOk={() => form.submit()}
         confirmLoading={submitting}
         okText="提交审批"
@@ -222,8 +267,8 @@ export default function Overtime() {
               { label: '工作日加班', value: 'weekday' },
             ]} />
           </Form.Item>
-          <Form.Item name="days" label="加班时长(天)" rules={[{ required: true }]}>
-            <InputNumber min={0.5} max={24} step={0.5} style={{ width: '100%' }} />
+          <Form.Item name="days" label="加班时长（天）" rules={[{ required: true, message: '请输入加班时长' }]}>
+            <InputNumber min={0.5} max={1} step={0.5} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="reason" label="加班原因">
             <TextArea rows={3} placeholder="请说明加班原因" />

@@ -161,7 +161,7 @@ export class OidcAdapter implements OidcProvider {
         mismatching_state: 'state 校验失败，请重新发起',
       };
       const msg = friendly[errCode] ||
-        (errCode ? `OIDC 提供商返回错误：${errCode}${errBody ? `（${errBody}）` : ''}` : 'OIDC 换 token 失败，请检查 IdP 配置');
+        (errCode ? `OIDC 提供商返回错误：${errCode}` : 'OIDC 换 token 失败，请检查 IdP 配置');
       throw new BusinessError(msg, 502);
     }
 

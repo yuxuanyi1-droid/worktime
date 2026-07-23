@@ -1,3 +1,5 @@
+import { useAuthStore } from '../../stores/authStore';
+
 /**
  * Agent 聊天的 SSE 客户端。
  *
@@ -54,6 +56,7 @@ export function startChat(
 
     // 401：登录失效，触发全局退出
     if (res.status === 401) {
+      useAuthStore.getState().clearAuth();
       handlers.onError('登录已失效');
       window.dispatchEvent(new CustomEvent('unauthorized'));
       return;
@@ -78,12 +81,16 @@ export function startChat(
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let receivedDone = false;
+    let receivedTerminalError = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        // SSE 标准允许 CRLF；统一为 LF 后再按空行切帧。
+        buffer = buffer.replace(/\r\n/g, '\n');
         // 按双换行切帧（SSE 帧以 \n\n 分隔）
         let sepIndex: number;
         while ((sepIndex = buffer.indexOf('\n\n')) >= 0) {
@@ -100,16 +107,20 @@ export function startChat(
             const event = JSON.parse(jsonStr);
             handlers.onEvent(event);
             if (event.type === 'done') {
+              receivedDone = true;
               handlers.onDone();
               return;
             }
+            if (event.type === 'error') receivedTerminalError = true;
           } catch {
-            // 单帧解析失败跳过，不中断整个流
+            throw new Error('AI 响应格式异常，请重试');
           }
         }
       }
-      // 流自然结束（未收到 done）
-      handlers.onDone();
+      if (controller.signal.aborted || receivedDone) return;
+      // 服务端成功路径一定发送 done。错误帧是另一种终态；两者都没有时说明代理或网络提前截断。
+      if (receivedTerminalError) handlers.onDone();
+      else handlers.onError('AI 连接意外中断，请重试');
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
       handlers.onError(e?.message || '读取响应流失败');

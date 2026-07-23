@@ -1,4 +1,4 @@
-import { EntityManager } from 'typeorm';
+import { EntityManager, In } from 'typeorm';
 import { BusinessError } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { ApprovalFlow } from '../entities/ApprovalFlow';
@@ -8,6 +8,7 @@ import { User } from '../entities/User';
 import { Project } from '../entities/Project';
 import { ProjectSE } from '../entities/ProjectSE';
 import { Department } from '../entities/Department';
+import { ApprovalInstance } from '../entities/ApprovalInstance';
 import {
   ApprovalFlowStepSnapshot,
   ApprovalFlowVersion,
@@ -18,7 +19,6 @@ import {
   CacheTtl,
   cacheGet,
   cacheSet,
-  invalidateAllDefaultFlows,
   invalidateDefaultFlow,
 } from '../config/cache';
 
@@ -29,6 +29,23 @@ type ApprovalFlowStepLike = {
   parentLevel?: number;
   customApproverId?: number | null;
 };
+
+const approvalTargetTypes = new Set<ApprovalTargetType>([
+  'timesheet',
+  'overtime',
+  'weekly_report',
+  'permission_request',
+]);
+const approvalStepTypes = new Set<ApprovalFlowStep['stepType']>([
+  'group_leader',
+  'parent_leader',
+  'dept_leader',
+  'module_se',
+  'project_manager',
+  'custom',
+]);
+const projectContextStepTypes = new Set<ApprovalFlowStep['stepType']>(['module_se', 'project_manager']);
+const projectContextFlowTypes = new Set<ApprovalTargetType>(['timesheet', 'overtime']);
 
 /** 项目审批用投影（managers + module SE），供 resolveApprovers 缓存 */
 export type ProjectApprovalCache = {
@@ -64,6 +81,49 @@ export class ApprovalFlowEngine {
   private get projectRepo() { return (this.manager ?? AppDataSource).getRepository(Project); }
   private get projectSERepo() { return (this.manager ?? AppDataSource).getRepository(ProjectSE); }
   private get deptRepo() { return (this.manager ?? AppDataSource).getRepository(Department); }
+  private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
+
+  private transaction<T>(work: (manager: EntityManager) => Promise<T>) {
+    if (this.manager?.queryRunner?.isTransactionActive) return work(this.manager);
+    return (this.manager?.connection ?? AppDataSource).transaction(work);
+  }
+
+  private async validateSteps(type: string, steps: any[]) {
+    if (!approvalTargetTypes.has(type as ApprovalTargetType)) throw new BusinessError('审批流程适用类型无效');
+    if (!Array.isArray(steps) || !steps.length) throw new BusinessError('审批流程至少需要一个步骤');
+    if (steps.length > 20) throw new BusinessError('审批流程最多支持20个步骤');
+
+    for (const [index, step] of steps.entries()) {
+      if (!step || typeof step !== 'object' || !approvalStepTypes.has(step.stepType)) {
+        throw new BusinessError(`第${index + 1}个审批步骤类型无效`);
+      }
+      if (typeof step.label !== 'string' || !step.label.trim() || step.label.trim().length > 100) {
+        throw new BusinessError(`第${index + 1}个审批步骤名称无效`);
+      }
+      if (projectContextStepTypes.has(step.stepType) && !projectContextFlowTypes.has(type as ApprovalTargetType)) {
+        throw new BusinessError('周报审批和权限申请审批不支持模块SE或项目管理员步骤');
+      }
+      if (step.stepType === 'parent_leader') {
+        const level = Number(step.parentLevel ?? 1);
+        if (!Number.isInteger(level) || level < 1 || level > 5) {
+          throw new BusinessError(`第${index + 1}个审批步骤的上级层级必须为1至5`);
+        }
+      }
+      if (step.stepType === 'custom' && (!Number.isInteger(Number(step.customApproverId)) || Number(step.customApproverId) < 1)) {
+        throw new BusinessError(`第${index + 1}个审批步骤必须指定审批人`);
+      }
+    }
+
+    const customApproverIds = Array.from(new Set(
+      steps
+        .filter(step => step.stepType === 'custom')
+        .map(step => Number(step.customApproverId)),
+    ));
+    if (!customApproverIds.length) return;
+    const users = await this.userRepo.findBy({ id: In(customApproverIds) });
+    if (users.length !== customApproverIds.length) throw new BusinessError('自定义审批人不存在');
+    if (users.some(user => Number(user.status) !== 1)) throw new BusinessError('自定义审批人已被禁用');
+  }
 
   /**
    * 获取某类型的默认审批流程
@@ -94,9 +154,11 @@ export class ApprovalFlowEngine {
       relations: ['user'],
     });
     const data: ProjectApprovalCache = {
-      managers: (project?.managers || []).map((m) => ({ userId: m.id, userName: m.realName })),
+      managers: (project?.managers || [])
+        .filter((manager) => Number(manager.status) === 1)
+        .map((m) => ({ userId: m.id, userName: m.realName })),
       moduleSEs: ses
-        .filter((se) => se.user)
+        .filter((se) => Number(se.user?.status) === 1)
         .map((se) => ({ groupId: se.groupId, userId: se.user.id, userName: se.user.realName })),
     };
     await cacheSet(cacheKey, data, CacheTtl.project);
@@ -127,7 +189,7 @@ export class ApprovalFlowEngine {
           where: { id: group.id },
           relations: ['leader'],
         });
-        if (!freshGroup?.leader) return [];
+        if (!freshGroup?.leader || Number(freshGroup.leader.status) !== 1) return [];
         return [{ userId: freshGroup.leader.id, userName: freshGroup.leader.realName }];
       }
 
@@ -148,7 +210,7 @@ export class ApprovalFlowEngine {
             // 到顶了（当前组即顶级组）：用顶级组负责人兜底，避免顶级组成员无人审批而自动通过。
             // 若顶级组也无负责人，才返回空（仍由上层 start 逻辑判定跳过/自动通过）。
             // 注：若兜底的审批人恰为申请人自己，会被 start 的自排逻辑（approvalInstanceService）排除。
-            if (!fresh?.leader) return [];
+            if (!fresh?.leader || Number(fresh.leader.status) !== 1) return [];
             return [{ userId: fresh.leader.id, userName: fresh.leader.realName }];
           }
           currentGroup = fresh.parent;
@@ -157,7 +219,7 @@ export class ApprovalFlowEngine {
           where: { id: currentGroup!.id },
           relations: ['leader'],
         });
-        if (!targetGroup?.leader) return [];
+        if (!targetGroup?.leader || Number(targetGroup.leader.status) !== 1) return [];
         return [{ userId: targetGroup.leader.id, userName: targetGroup.leader.realName }];
       }
 
@@ -167,7 +229,7 @@ export class ApprovalFlowEngine {
           where: { id: applicant.department?.id ?? 0 },
           relations: ['leader'],
         });
-        if (!dept?.leader) return [];
+        if (!dept?.leader || Number(dept.leader.status) !== 1) return [];
         return [{ userId: dept.leader.id, userName: dept.leader.realName }];
       }
 
@@ -206,7 +268,7 @@ export class ApprovalFlowEngine {
         // 自定义审批人
         if (!step.customApproverId) return [];
         const user = await this.userRepo.findOne({ where: { id: step.customApproverId } });
-        if (!user) return [];
+        if (!user || Number(user.status) !== 1) return [];
         return [{ userId: user.id, userName: user.realName }];
       }
 
@@ -261,7 +323,7 @@ export class ApprovalFlowEngine {
 
   async getFlow(id: number) {
     const flow = await this.flowRepo.findOne({ where: { id }, relations: ['steps'] });
-    if (flow?.steps) flow.steps.sort((a, b) => a.stepOrder - b.stepOrder);
+    if (flow?.steps) flow.steps = [...flow.steps].sort((a, b) => a.stepOrder - b.stepOrder);
     return flow;
   }
 
@@ -276,9 +338,15 @@ export class ApprovalFlowEngine {
     };
   }
 
-  async createFlowVersion(flowId: number) {
-    const flow = await this.getFlow(flowId);
-    if (!flow) throw new BusinessError('Approval flow not found');
+  async createFlowVersion(flowId: number): Promise<ApprovalFlowVersion> {
+    if (!this.manager?.queryRunner?.isTransactionActive) {
+      return this.transaction(manager => new ApprovalFlowEngine(manager).createFlowVersion(flowId));
+    }
+    // 同一流程的版本号按流程行串行分配，避免两个并发更新都计算出相同的 MAX+1。
+    const lockedFlow = await this.flowRepo.findOne({ where: { id: flowId }, lock: { mode: 'pessimistic_write' } });
+    if (!lockedFlow) throw new BusinessError('审批流程不存在');
+    const flow = await this.flowRepo.findOneOrFail({ where: { id: flowId }, relations: ['steps'] });
+    flow.steps = [...(flow.steps || [])].sort((a, b) => a.stepOrder - b.stepOrder);
 
     const lastVersion = await this.versionRepo.findOne({
       where: { flowId },
@@ -333,71 +401,102 @@ export class ApprovalFlowEngine {
   }
 
   async createFlow(data: { name: string; type: string; description?: string; isDefault?: boolean; enabled?: boolean; steps: any[] }) {
-    // 如果设为默认，取消同类型其他默认
-    if (data.isDefault) {
-      await this.flowRepo.update({ type: data.type as any, isDefault: true }, { isDefault: false });
-    }
-
-    const flow = this.flowRepo.create({
-      name: data.name,
-      type: data.type as any,
-      description: data.description,
-      isDefault: data.isDefault ?? false,
-      enabled: data.enabled ?? true,
-      steps: data.steps.map((s: any, i: number) => this.stepRepo.create({
-        stepOrder: i + 1,
-        stepType: s.stepType,
-        label: s.label,
-        parentLevel: s.parentLevel || 1,
-        customApproverId: s.customApproverId || null,
-        requireAllApprovers: s.requireAllApprovers ?? false,
-      })),
+    const enabled = data.enabled ?? true;
+    if (data.isDefault && !enabled) throw new BusinessError('默认审批流程必须启用');
+    const saved = await this.transaction(async (manager) => {
+      const engine = new ApprovalFlowEngine(manager);
+      await engine.validateSteps(data.type, data.steps);
+      if (data.isDefault) {
+        await engine.flowRepo.update({ type: data.type as any, isDefault: true }, { isDefault: false });
+      }
+      const flow = engine.flowRepo.create({
+        name: data.name,
+        type: data.type as any,
+        description: data.description,
+        isDefault: data.isDefault ?? false,
+        enabled,
+        steps: data.steps.map((s: any, i: number) => engine.stepRepo.create({
+          stepOrder: i + 1,
+          stepType: s.stepType,
+          label: s.label,
+          parentLevel: s.parentLevel || 1,
+          customApproverId: s.customApproverId || null,
+          requireAllApprovers: s.requireAllApprovers ?? false,
+        })),
+      });
+      const result = await engine.flowRepo.save(flow);
+      await engine.createFlowVersion(result.id);
+      return result;
     });
-    const saved = await this.flowRepo.save(flow);
-    await this.createFlowVersion(saved.id);
     await invalidateDefaultFlow(data.type);
     return this.getFlow(saved.id);
   }
 
-  async updateFlow(id: number, data: { name?: string; description?: string; isDefault?: boolean; enabled?: boolean; steps?: any[] }) {
-    const flow = await this.flowRepo.findOne({ where: { id }, relations: ['steps'] });
-    if (!flow) throw new BusinessError('审批流程不存在');
+  async updateFlow(id: number, data: { name?: string; type?: string; description?: string; isDefault?: boolean; enabled?: boolean; steps?: any[] }) {
+    const saved = await this.transaction(async (manager) => {
+      const engine = new ApprovalFlowEngine(manager);
+      const lockedFlow = await engine.flowRepo.findOne({ where: { id }, lock: { mode: 'pessimistic_write' } });
+      if (!lockedFlow) throw new BusinessError('审批流程不存在');
+      const flow = await engine.flowRepo.findOneOrFail({ where: { id }, relations: ['steps'] });
+      if (data.type !== undefined && data.type !== flow.type) {
+        throw new BusinessError('审批流程适用类型创建后不可修改');
+      }
+      if (data.steps !== undefined) await engine.validateSteps(flow.type, data.steps);
 
-    if (data.isDefault) {
-      await this.flowRepo.update({ type: flow.type, isDefault: true }, { isDefault: false });
-    }
+      const nextDefault = data.isDefault ?? flow.isDefault;
+      const nextEnabled = data.enabled ?? flow.enabled;
+      if (nextDefault && !nextEnabled) throw new BusinessError('默认审批流程必须启用');
+      if (flow.isDefault && !nextDefault) throw new BusinessError('请先将同类型的其他流程设为默认流程');
+      if (data.isDefault) {
+        const previousDefaults = await engine.flowRepo.find({
+          where: { type: flow.type, isDefault: true },
+        });
+        for (const previous of previousDefaults) {
+          if (previous.id !== id) await engine.flowRepo.update(previous.id, { isDefault: false });
+        }
+      }
 
-    if (data.name !== undefined) flow.name = data.name;
-    if (data.description !== undefined) flow.description = data.description;
-    if (data.isDefault !== undefined) flow.isDefault = data.isDefault;
-    if (data.enabled !== undefined) flow.enabled = data.enabled;
+      if (data.steps !== undefined) {
+        await engine.stepRepo.delete({ flowId: id });
+        const nextSteps = data.steps.map((s: any, i: number) => engine.stepRepo.create({
+          stepOrder: i + 1,
+          stepType: s.stepType,
+          label: s.label,
+          parentLevel: s.parentLevel || 1,
+          customApproverId: s.customApproverId || null,
+          requireAllApprovers: s.requireAllApprovers ?? false,
+          flowId: id,
+        }));
+        await engine.stepRepo.save(nextSteps);
+      }
 
-    if (data.steps) {
-      // 删除旧步骤，创建新步骤
-      await this.stepRepo.delete({ flowId: id });
-      flow.steps = data.steps.map((s: any, i: number) => this.stepRepo.create({
-        stepOrder: i + 1,
-        stepType: s.stepType,
-        label: s.label,
-        parentLevel: s.parentLevel || 1,
-        customApproverId: s.customApproverId || null,
-        requireAllApprovers: s.requireAllApprovers ?? false,
-        flowId: id,
-      }));
-    }
-
-    const saved = await this.flowRepo.save(flow);
-    await this.createFlowVersion(saved.id);
-    await invalidateDefaultFlow(flow.type);
+      await engine.flowRepo.update(id, {
+        name: data.name ?? flow.name,
+        description: data.description ?? flow.description,
+        isDefault: nextDefault,
+        enabled: nextEnabled,
+      });
+      await engine.createFlowVersion(id);
+      return engine.flowRepo.findOneByOrFail({ id });
+    });
+    await invalidateDefaultFlow(saved.type);
     return this.getFlow(saved.id);
   }
 
   async deleteFlow(id: number) {
-    const flow = await this.flowRepo.findOne({ where: { id } });
-    await this.stepRepo.delete({ flowId: id });
-    const result = await this.flowRepo.delete(id);
-    if (flow) await invalidateDefaultFlow(flow.type);
-    else await invalidateAllDefaultFlows();
+    const { result, type } = await this.transaction(async manager => {
+      const engine = new ApprovalFlowEngine(manager);
+      const flow = await engine.flowRepo.findOne({
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!flow) throw new BusinessError('审批流程不存在');
+      if (flow.isDefault) throw new BusinessError('默认审批流程不能删除，请先切换默认流程');
+      const usedCount = await engine.instanceRepo.count({ where: { flowId: id } });
+      if (usedCount > 0) throw new BusinessError('该审批流程已有历史审批记录，不能删除；可改为停用');
+      return { result: await engine.flowRepo.delete(id), type: flow.type };
+    });
+    await invalidateDefaultFlow(type);
     return result;
   }
 }

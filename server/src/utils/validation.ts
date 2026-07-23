@@ -41,6 +41,21 @@ export function parseOptionalDateString(value: unknown, field: string) {
   return parseDateString(value, field);
 }
 
+/**
+ * 校验可选日期区间的先后关系。YYYY-MM-DD 可直接按字典序比较，
+ * 避免引入本地时区后在服务器上出现跨日偏移。
+ */
+export function assertDateRange(
+  startDate: string | undefined,
+  endDate: string | undefined,
+  startField = 'startDate',
+  endField = 'endDate',
+): void {
+  if (startDate && endDate && startDate > endDate) {
+    throw new BusinessError(`${startField}不能晚于${endField}`);
+  }
+}
+
 export function parseEnum<T extends string>(value: unknown, field: string, allowed: readonly T[]) {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
     throw new BusinessError(`${field}取值无效`);
@@ -55,6 +70,21 @@ export function parseOptionalEnum<T extends string>(value: unknown, field: strin
 
 export function parseBooleanQuery(value: unknown) {
   return value === true || value === 'true';
+}
+
+export function parseOptionalBooleanQuery(value: unknown, field: string) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new BusinessError(`${field}必须是true或false`);
+}
+
+export function parseOptionalDateTime(value: unknown, field: string) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new BusinessError(`${field}必须是有效日期时间`);
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new BusinessError(`${field}必须是有效日期时间`);
+  return new Date(timestamp).toISOString();
 }
 
 export function parseString(
@@ -72,6 +102,22 @@ export function parseString(
   if (options.min !== undefined && parsed.length < options.min) throw new BusinessError(`${field}不能少于${options.min}个字符`);
   if (options.max !== undefined && parsed.length > options.max) throw new BusinessError(`${field}不能超过${options.max}个字符`);
   return parsed;
+}
+
+export function parseOptionalEmail(value: unknown, field = '邮箱'): string | undefined {
+  const email = parseString(value, field, { max: 100 });
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new BusinessError(`${field}格式无效`);
+  }
+  return email;
+}
+
+export function parseOptionalPhone(value: unknown, field = '手机号'): string | undefined {
+  const phone = parseString(value, field, { max: 20 });
+  if (phone && !/^\+?[0-9 ()-]{6,20}$/.test(phone)) {
+    throw new BusinessError(`${field}格式无效`);
+  }
+  return phone;
 }
 
 export function parseDays(value: unknown, field = 'days') {

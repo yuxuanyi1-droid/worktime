@@ -2,6 +2,7 @@ import { EntityManager } from 'typeorm';
 import { AppDataSource } from '../config/database';
 import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
+import { WeeklyReport } from '../entities/WeeklyReport';
 import { Between, Not } from 'typeorm';
 import { ApprovalService } from './approvalService';
 import { BusinessError } from '../utils/errors';
@@ -80,6 +81,7 @@ export class ReportService {
 
   private get timesheetRepo() { return (this.manager ?? AppDataSource).getRepository(Timesheet); }
   private get overtimeRepo() { return (this.manager ?? AppDataSource).getRepository(OvertimeApplication); }
+  private get weeklyReportRepo() { return (this.manager ?? AppDataSource).getRepository(WeeklyReport); }
   private get approvalService() { return new ApprovalService(this.manager); }
 
   private dedupTimesheets(records: Timesheet[]): Timesheet[] {
@@ -174,15 +176,20 @@ export class ReportService {
     return this.summarizeTimesheets(records);
   }
 
-  async getOvertimeReport(params: { departmentId?: number; departmentIds?: number[]; groupId?: number; groupIds?: number[]; userId?: number; startDate: string; endDate: string; matchAnyScope?: boolean }) {
-    const { departmentId, departmentIds, groupId, groupIds, userId, startDate, endDate, matchAnyScope } = params;
+  async getOvertimeReport(params: { departmentId?: number; departmentIds?: number[]; groupId?: number; groupIds?: number[]; projectId?: number; projectIds?: number[]; userId?: number; startDate: string; endDate: string; matchAnyScope?: boolean; allowAll?: boolean }) {
+    const {
+      departmentId, departmentIds, groupId, groupIds, projectId, projectIds,
+      userId, startDate, endDate, matchAnyScope, allowAll,
+    } = params;
     // 安全防护：无任何数据范围约束时拒绝执行，避免全表泄露（调用方必须保证至少一个范围）
-    const hasScope = departmentId || departmentIds?.length || groupId || groupIds?.length || userId;
-    if (!hasScope) {
+    const hasScope = departmentId || departmentIds?.length || groupId || groupIds?.length
+      || projectId || projectIds?.length || userId;
+    if (!hasScope && !allowAll) {
       throw new BusinessError('加班报表缺少数据范围约束');
     }
     const qb = this.overtimeRepo.createQueryBuilder('o')
       .leftJoinAndSelect('o.user', 'u')
+      .leftJoinAndSelect('o.project', 'p')
       .where('o.date BETWEEN :start AND :end', { start: startDate, end: endDate })
       .andWhere('o.status = :status', { status: 'approved' });
 
@@ -192,12 +199,18 @@ export class ReportService {
       else if (departmentId) scopeConditions.push('o.departmentSnapshotId = :departmentId');
       if (groupIds?.length) scopeConditions.push('o.groupSnapshotId IN (:...groupIds)');
       else if (groupId) scopeConditions.push('o.groupSnapshotId = :groupId');
-      if (scopeConditions.length) qb.andWhere(`(${scopeConditions.join(' OR ')})`, { departmentIds, departmentId, groupIds, groupId });
+      if (projectIds?.length) scopeConditions.push('o.projectId IN (:...projectIds)');
+      else if (projectId) scopeConditions.push('o.projectId = :projectId');
+      if (scopeConditions.length) qb.andWhere(`(${scopeConditions.join(' OR ')})`, {
+        departmentIds, departmentId, groupIds, groupId, projectIds, projectId,
+      });
     } else {
       if (departmentIds?.length) qb.andWhere('o.departmentSnapshotId IN (:...departmentIds)', { departmentIds });
       else if (departmentId) qb.andWhere('o.departmentSnapshotId = :departmentId', { departmentId });
       if (groupIds?.length) qb.andWhere('o.groupSnapshotId IN (:...groupIds)', { groupIds });
       else if (groupId) qb.andWhere('o.groupSnapshotId = :groupId', { groupId });
+      if (projectIds?.length) qb.andWhere('o.projectId IN (:...projectIds)', { projectIds });
+      else if (projectId) qb.andWhere('o.projectId = :projectId', { projectId });
     }
     if (userId) qb.andWhere('o.userId = :userId', { userId });
 
@@ -220,17 +233,44 @@ export class ReportService {
     return { totalDays, byType, byUser, byGroup, records };
   }
 
-  async getDashboardData(userId: number) {
+  async getDashboardData(userId: number, visibility: {
+    timesheet: boolean;
+    overtime: boolean;
+    approvals: boolean;
+    weeklyReport: boolean;
+  }) {
     const now = new Date();
     const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
     const monthEnd = formatLocalDate(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+    const isoWeekday = now.getDay() || 7;
+    const weekStart = formatLocalDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - isoWeekday + 1));
+    const weekEnd = formatLocalDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - isoWeekday + 7));
 
     // 本月工时：一次查询同时算 monthDays 和 trend（两者 where 条件相同，避免重复查询）
-    const rawMonthTimesheets = await this.timesheetRepo.find({
-      where: { userId, date: Between(monthStart, monthEnd), status: Not('deprecated') },
-      order: { date: 'ASC' },
-    });
-    const monthTimesheets = this.dedupTimesheets(rawMonthTimesheets);
+    const [monthTimesheets, pendingResult, monthOvertime, draftTimesheetCount, weeklyReport] = await Promise.all([
+      visibility.timesheet
+        ? this.timesheetRepo.find({
+          where: { userId, date: Between(monthStart, monthEnd), status: Not('deprecated') },
+          order: { date: 'ASC' },
+        })
+        : Promise.resolve([]),
+      visibility.approvals
+        ? this.approvalService.getPendingList(userId, { page: 1, pageSize: 1 })
+        : Promise.resolve({ total: 0 }),
+      visibility.overtime
+        ? this.overtimeRepo.find({
+          where: { userId, date: Between(monthStart, monthEnd), status: 'approved' },
+        })
+        : Promise.resolve([]),
+      visibility.timesheet
+        ? this.timesheetRepo.count({
+          where: { userId, date: Between(weekStart, weekEnd), status: 'draft' },
+        })
+        : Promise.resolve(0),
+      visibility.weeklyReport
+        ? this.weeklyReportRepo.findOne({ where: { userId, weekStart } })
+        : Promise.resolve(null),
+    ]);
     const monthByDate: Record<string, number> = {};
     for (const record of monthTimesheets) {
       monthByDate[record.date] = round2((monthByDate[record.date] || 0) + Number(record.days));
@@ -238,14 +278,16 @@ export class ReportService {
     const monthDays = totalOfDates(monthByDate);
     const trend = Object.entries(monthByDate).map(([date, days]) => ({ date, days }));
 
-    const pendingResult = await this.approvalService.getPendingList(userId, { page: 1, pageSize: 1 });
     const pendingCount = pendingResult.total;
-
-    const monthOvertime = await this.overtimeRepo.find({
-      where: { userId, date: Between(monthStart, monthEnd), status: 'approved' },
-    });
     const overtimeDays = round2(monthOvertime.reduce((sum, record) => sum + Number(record.days), 0));
 
-    return { monthDays, overtimeDays, pendingCount, trend };
+    return {
+      monthDays,
+      overtimeDays,
+      pendingCount,
+      trend,
+      hasTimesheetDrafts: draftTimesheetCount > 0,
+      weeklyReportStatus: weeklyReport?.status ?? null,
+    };
   }
 }

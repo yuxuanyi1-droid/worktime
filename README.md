@@ -75,7 +75,7 @@ https://sso.qinyuan.cloud/worktime/oidc/callback
 
 `OIDC_REDIRECT_ORIGIN` 同时用于登录发起和回调换 token，优先级最高，只允许填写协议、域名和可选端口，不能带 path/query。组合后的地址必须能够实际访问同一套前端回调页面，并在 OIDC 服务商后台登记完全相同的 URL。
 
-前端与 API 同源时会自动信任当前请求来源；跨域、代理 Host 与公网域名不一致或需要额外回调域名时，在根 `.env` 显式配置：
+开发/测试环境中前端与 API 同源时会自动信任当前请求来源。生产环境为防止伪造 Host 形成开放回调，必须配置推荐的 `OIDC_REDIRECT_ORIGIN`，或在根 `.env` 显式配置允许来源：
 
 ```bash
 OIDC_REDIRECT_ORIGINS=https://sso.qinyuan.cloud
@@ -86,6 +86,8 @@ OIDC_REDIRECT_ORIGINS=https://sso.qinyuan.cloud
 ```text
 https://sso.qinyuan.cloud/worktime/oidc/callback
 ```
+
+身份源的 discovery、换令牌和用户信息请求默认最多等待 10 秒，可通过 `OIDC_REQUEST_TIMEOUT_MS` 在 1000～60000 毫秒范围内调整。网络错误、超时和无效响应统一返回可恢复的身份源错误，不会把授权码、令牌或 client secret 写入日志。
 
 ## 生产多实例部署
 
@@ -103,6 +105,8 @@ Cloudflare Tunnel / 其他入口
 ```
 
 三个 API 都设置 `APPROVAL_WORKER=0`，只负责接收请求和入队；独立 Worker 统一消费 Redis 审批队列。所有实例共享 PostgreSQL、Redis 和根 `.env`。
+
+审批 Worker 保留批处理吞吐；批次失败时会自动逐条隔离，单条任务达到 `APPROVAL_MAX_ATTEMPTS` 后进入死信 Stream，避免坏任务阻塞同批正常审批。`/api/metrics` 暴露 `approval_queue_messages` 与 `approval_dead_letter_messages`，后者大于 0 时应告警并人工排查。
 
 ### 一键管理脚本
 
@@ -166,25 +170,28 @@ http://127.0.0.1:3000
 | **报表中心** | 个人/部门/组别/项目/加班报表、图表展示、全类型 Excel 导出 |
 | **权限申请** | 细粒度权限申请-审批-授予闭环 |
 | **系统管理** | 部门/分组/用户/角色/权限/项目/审批流程/公告/审计日志 CRUD |
-| **AI 助手** | 全局悬浮聊天窗，自然语言查询工时/审批/加班/周报，流式回答 + 思考过程折叠 |
+| **AI 助手** | 全局悬浮聊天窗，自然语言只读查询工时/审批/加班/周报，流式回答 + 工具执行过程折叠 |
 
 ### AI 助手
 
-右下角悬浮按钮点开即用的 AI 工时助手，基于 [pi agent SDK](https://pi.dev)（`@earendil-works/pi-coding-agent`）+ 后端 Skill 实现，用户用自然语言提问即可查询自己的工时、审批、加班、周报。
+右下角悬浮按钮点开即用的 AI 工时助手，基于 [pi agent SDK](https://pi.dev)（`@earendil-works/pi-coding-agent`）和受限只读工具实现。用户用自然语言提问即可查询自己有权访问的工时、审批、加班、周报；未配置 AI 时前端不会展示入口。
 
 **架构：**
-- 后端 `server/src/ai/`：pi agent SDK 封装在 Worker 线程（避免 ESM/CJS 死锁），通过 `/api/v1/agent/chat` 以 **SSE（Server-Sent Events）** 流式推送 agent 事件（思考、工具调用、正文增量）。
-- Skill（`server/src/ai/skills/`）：每个 Skill 是一段 Markdown 指令，agent 用 bash + PAT 调用工时 API 完成查询，结果回传给模型组织回答。
+- 后端 `server/src/ai/`：pi agent SDK 封装在 Worker 线程（避免 ESM/CJS 死锁），通过 `/api/v1/agent/chat` 以 **SSE（Server-Sent Events）** 流式推送工具状态和正文增量。
+- 工具边界：Agent 只注册 `worktime_query`，不提供 bash、文件读取或任意 HTTP 工具；内部使用按用户签发的短期 JWT 调用本系统只读接口，数据范围继续经过原有权限校验。
+- 容量保护：每个实例默认同时生成 12 路、排队 100 路、驻留 200 个会话；同一会话串行执行，并在超限时返回明确的繁忙提示。
+- 容量观测：`/api/metrics` 提供 `ai_active_prompts`、`ai_queued_prompts`、`ai_resident_sessions`，扩容应以持续排队和 P95 等待时间为依据。
+- 多实例路由：`Caddyfile` 对 `/agent/*` 使用签名 Cookie 会话亲和，确保创建会话、SSE、消息排队和停止操作落在同一 AI Worker；其他 API 仍使用 `least_conn`。生产应配置 `CADDY_LB_COOKIE_SECRET`。
 - 前端 `client/src/components/AgentChat/`：裸 fetch + ReadableStream 解析自定义 SSE 流（绕过 axios 的 JSON 解析与 30s 超时），`useChat` 维护消息状态。
 
 **聊天界面特性：**
 - **流式输出**：边生成边显示，支持中途停止。
-- **过程折叠**：把模型的「思考 → 工具调用 → 思考 → 工具调用」按真实时序交织记录，统一折叠成一行「执行中 Xs / 已完成 · 用时 Xs」，展开可逐项查看，正文只显示最终答案。
-- **Markdown 渲染**：代码块语法高亮（按需加载 PrismLight）+ 复制按钮、表格/列表/引用块暖色调样式。
+- **过程折叠**：统一展示工具调用和执行状态；不向前端暴露模型原始推理文本，正文只显示最终答案。
+- **Markdown 渲染**：代码块语法高亮（按需加载 PrismLight）+ 复制按钮、表格/列表/引用块样式；外部图片默认隐藏，链接协议受限。
 - **消息操作**：每条回答可一键复制；最后一条回答支持重新生成。
 - **悬浮卡片式 UI**：自定义浮窗（非 Drawer），约 2/3 视口高、四周留白、16px 圆角，贴合项目暖色调设计系统。
 
-> AI 功能需在仓库根 `.env` 配置 `AI_API_KEY` 等，未配置时聊天接口返回 503 提示。
+> AI 功能需在仓库根 `.env` 配置 `AI_API_KEY` 等。未配置时 `/agent/status` 返回 `enabled: false`，聊天接口仍以 503 明确拒绝直接调用。
 
 ## 工程化与质量保证
 
@@ -196,7 +203,7 @@ http://127.0.0.1:3000
 
 ### 安全
 - **Token 版本号**：JWT 携带 `tokenVersion`，改密/登出时 +1 使所有旧 Token 立即失效
-- **限流**：express-rate-limit 全局限流（15 分钟/1000 次）+ 登录专用限流（10 分钟/20 次）
+- **限流**：express-rate-limit 全局限流（15 分钟/1000 次）+ 登录失败专用限流（10 分钟/100 次，可通过 `LOGIN_RATE_MAX` 调整）
 - **统一错误处理**：`BusinessError` 区分业务错误（400 + 友好提示）与系统错误（500 + 不泄露内部细节）
 - **审计日志**：改密、用户禁用/删除、角色权限变更、审批决策、权限授予/撤销等高敏感操作全程留痕
 
@@ -217,8 +224,10 @@ http://127.0.0.1:3000
 - 审计日志写入失败不再静默吞掉，记录到日志便于排查
 
 ### 测试
-- vitest 单元测试覆盖核心逻辑：`BusinessError`、输入校验（`validation`）、权限码蕴含展开、报表去重（含修改审批场景）
-- 运行：`cd server && npm run test`
+- 所有自动化用例、性能脚本和恢复演练统一位于根目录 `tests/`，避免前后端测试分散。
+- `npm test`：依次运行后端和前端测试；`npm run test:coverage`：生成 `tests/coverage/` 覆盖率报告。
+- `npm run test:server` / `npm run test:client`：分别运行服务端或客户端测试。
+- `npm run test:smoke:ai`：对已启动环境执行登录、AI 状态、建会话、SSE、历史持久化和删除的完整烟测；账号及地址可通过 `AI_SMOKE_*` 环境变量指定。
 
 ## 项目结构
 
@@ -244,6 +253,7 @@ http://127.0.0.1:3000
 │       ├── stores/          # Zustand 状态管理（含多 tab 同步）
 │       ├── router/          # 路由配置（含权限守卫）
 │       └── types/           # 类型定义
+├── tests/                   # 前后端测试、覆盖率、性能与恢复脚本
 └── package.json             # Monorepo 配置
 ```
 

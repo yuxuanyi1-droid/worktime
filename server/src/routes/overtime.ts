@@ -3,6 +3,7 @@ import { OvertimeService } from '../services/overtimeService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requireAllPermissions, requirePermission } from '../middleware/permission';
 import {
+  assertDateRange,
   firstQueryValue,
   parseArray,
   parseDateString,
@@ -15,10 +16,11 @@ import {
   parsePositiveInt,
   parseString,
 } from '../utils/validation';
+import { BusinessError } from '../utils/errors';
 
 const router = Router();
 const overtimeService = new OvertimeService();
-const overtimeStatuses = ['draft', 'submitted', 'approved', 'rejected'] as const;
+const overtimeStatuses = ['draft', 'submitted', 'approved', 'rejected', 'withdrawn'] as const;
 const overtimeTypes = ['weekend', 'holiday', 'weekday'] as const;
 
 function parseOvertimePayload(body: Record<string, unknown>, partial = false) {
@@ -31,7 +33,9 @@ function parseOvertimePayload(body: Record<string, unknown>, partial = false) {
       : parseEnum(body.overtimeType, 'overtimeType', overtimeTypes),
     days: partial && body.days === undefined ? undefined : parseDays(body.days),
     reason: parseString(body.reason, 'reason', { max: 1000 }),
-    projectId: parseOptionalPositiveInt(body.projectId, 'projectId'),
+    projectId: partial
+      ? parseOptionalPositiveInt(body.projectId, 'projectId')
+      : parsePositiveInt(body.projectId, 'projectId'),
   };
 }
 
@@ -41,9 +45,12 @@ router.use(authMiddleware);
 router.get('/my', requirePermission('overtime:view:self'), async (req: AuthRequest, res, next) => {
   try {
     const { page, pageSize } = parsePagination(req.query);
+    const startDate = parseOptionalDateString(firstQueryValue(req.query.startDate), 'startDate');
+    const endDate = parseOptionalDateString(firstQueryValue(req.query.endDate), 'endDate');
+    assertDateRange(startDate, endDate);
     const data = await overtimeService.getByUser(req.user!.id, {
-      startDate: parseOptionalDateString(firstQueryValue(req.query.startDate), 'startDate'),
-      endDate: parseOptionalDateString(firstQueryValue(req.query.endDate), 'endDate'),
+      startDate,
+      endDate,
       status: parseOptionalEnum(firstQueryValue(req.query.status), 'status', overtimeStatuses),
       page,
       pageSize,
@@ -123,7 +130,7 @@ router.delete('/:id', requirePermission('overtime:delete:self'), async (req: Aut
 // 提交审批
 router.post('/submit', requirePermission('overtime:submit:self'), async (req: AuthRequest, res, next) => {
   try {
-    const ids = parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 100 });
+    const ids = [...new Set(parseArray(req.body.ids, 'ids', (id, index) => parsePositiveInt(id, `ids[${index}]`), { min: 1, max: 100 }))];
     await overtimeService.submit(ids, req.user!.id);
     res.json({ code: 0, message: '提交成功' });
   } catch (error) {

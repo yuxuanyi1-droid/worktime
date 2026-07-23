@@ -40,6 +40,7 @@ import { usePermission } from '../../hooks/usePermission';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
+const PAGE_SIZE = 20;
 
 const scopeLabels: Record<string, string> = {
   self: '本人',
@@ -85,14 +86,22 @@ function RequestTable({
   data,
   loading,
   onReload,
+  total,
+  page,
+  onPageChange,
   showApplicant,
   onWithdraw,
+  withdrawingId,
 }: {
   data: PermissionRequestItem[];
   loading: boolean;
   onReload: () => void;
+  total: number;
+  page: number;
+  onPageChange: (page: number) => void;
   showApplicant?: boolean;
-  onWithdraw?: (id: number) => void;
+  onWithdraw?: (id: number) => Promise<void>;
+  withdrawingId?: number | null;
 }) {
   const navigate = useNavigate();
 
@@ -168,7 +177,15 @@ function RequestTable({
           </Button>
           {onWithdraw && record.status === 'submitted' && (
             <Popconfirm title="确定撤回该权限申请？" onConfirm={() => onWithdraw(record.id)}>
-              <Button type="link" size="small" icon={<RollbackOutlined />}>撤回</Button>
+              <Button
+                type="link"
+                size="small"
+                icon={<RollbackOutlined />}
+                loading={withdrawingId === record.id}
+                disabled={withdrawingId !== null && withdrawingId !== record.id}
+              >
+                撤回
+              </Button>
             </Popconfirm>
           )}
         </Space>
@@ -184,7 +201,14 @@ function RequestTable({
       dataSource={data}
       size="middle"
       scroll={{ x: 1000 }}
-      pagination={{ pageSize: 20, showTotal: (total) => `共 ${total} 条` }}
+      pagination={{
+        current: page,
+        pageSize: PAGE_SIZE,
+        total,
+        showSizeChanger: false,
+        showTotal: (count) => `共 ${count} 条`,
+        onChange: onPageChange,
+      }}
       title={() => (
         <Button icon={<ReloadOutlined />} onClick={onReload}>
           刷新
@@ -197,6 +221,10 @@ function RequestTable({
 function PermissionRequestPage() {
   const navigate = useNavigate();
   const { hasPermission } = usePermission();
+  const canCreate = hasPermission('permission_request:create');
+  const canViewSelf = hasPermission('permission_request:view:self');
+  const canViewAll = hasPermission('permission_request:view:all');
+  const canManageGrant = hasPermission('permission_grant:manage');
   const [form] = Form.useForm();
   const [grantablePermissions, setGrantablePermissions] = useState<Permission[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -204,21 +232,27 @@ function PermissionRequestPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [users, setUsers] = useState<{ id: number; realName: string; username?: string }[]>([]);
   const [myRequests, setMyRequests] = useState<PermissionRequestItem[]>([]);
+  const [myTotal, setMyTotal] = useState(0);
+  const [myPage, setMyPage] = useState(1);
   const [allRequests, setAllRequests] = useState<PermissionRequestItem[]>([]);
+  const [allTotal, setAllTotal] = useState(0);
+  const [allPage, setAllPage] = useState(1);
   const [grants, setGrants] = useState<UserPermissionGrant[]>([]);
+  const [grantTotal, setGrantTotal] = useState(0);
+  const [grantPage, setGrantPage] = useState(1);
   const [loading, setLoading] = useState(false);       // 我的申请列表
   const [baseLoading, setBaseLoading] = useState(false); // 基础选项（权限定义/范围选项）
   const [submitLoading, setSubmitLoading] = useState(false);
+  const [withdrawingId, setWithdrawingId] = useState<number | null>(null);
   const [allLoading, setAllLoading] = useState(false);
   const [grantLoading, setGrantLoading] = useState(false);
   const [selectedPermissionCode, setSelectedPermissionCode] = useState<string>();
   const [selectedScopeType, setSelectedScopeType] = useState<string>();
   const [grantStatus, setGrantStatus] = useState('active');
   const [grantUserId, setGrantUserId] = useState<number>();
-  const [tabKey, setTabKey] = useState('apply');
-
-  const canViewAll = hasPermission('permission_request:view:all');
-  const canManageGrant = hasPermission('permission_grant:manage');
+  const [tabKey, setTabKey] = useState(() => (
+    canCreate ? 'apply' : canViewSelf ? 'my' : canViewAll ? 'all' : canManageGrant ? 'grants' : ''
+  ));
 
   const selectedPermission = useMemo(
     () => grantablePermissions.find((permission) => permission.code === selectedPermissionCode),
@@ -264,18 +298,22 @@ function PermissionRequestPage() {
   }, [departments, groups, projects, selectedScopeType]);
 
   const loadBase = async () => {
+    if (!canCreate && !canManageGrant) return;
     setBaseLoading(true);
     try {
-      const [permissionRes, deptRes, groupRes, projectRes] = await Promise.all([
+      const [permissionRes, scopeResponses] = await Promise.all([
         permissionRequestApi.getGrantablePermissions(),
-        systemApi.getDepartments(),
-        systemApi.getGroups(),
-        systemApi.getActiveProjects(),
+        canCreate
+          ? Promise.all([systemApi.getDepartments(), systemApi.getGroups(), systemApi.getActiveProjects()])
+          : Promise.resolve(null),
       ]);
       if (permissionRes.data) setGrantablePermissions(permissionRes.data);
-      if (deptRes.data) setDepartments(deptRes.data);
-      if (groupRes.data) setGroups(groupRes.data);
-      if (projectRes.data) setProjects(projectRes.data as Project[]);
+      if (scopeResponses) {
+        const [deptRes, groupRes, projectRes] = scopeResponses;
+        if (deptRes.data) setDepartments(deptRes.data);
+        if (groupRes.data) setGroups(groupRes.data);
+        if (projectRes.data) setProjects(projectRes.data as Project[]);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, '权限申请基础数据加载失败'));
     } finally {
@@ -283,28 +321,39 @@ function PermissionRequestPage() {
     }
   };
 
-  const loadMyRequests = async () => {
+  const loadMyRequests = async (page = myPage) => {
+    if (!canViewSelf) return;
     setLoading(true);
     try {
-      const res = await permissionRequestApi.getMyRequests({ pageSize: 100 });
-      if (res.data) setMyRequests(res.data.list);
+      const res = await permissionRequestApi.getMyRequests({ page, pageSize: PAGE_SIZE });
+      if (res.data) {
+        setMyRequests(res.data.list);
+        setMyTotal(res.data.total);
+        setMyPage(res.data.page);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, '我的权限申请加载失败'));
       setMyRequests([]);
+      setMyTotal(0);
     } finally {
       setLoading(false);
     }
   };
 
-  const loadAllRequests = async () => {
+  const loadAllRequests = async (page = allPage) => {
     if (!canViewAll) return;
     setAllLoading(true);
     try {
-      const res = await permissionRequestApi.getAllRequests({ pageSize: 100 });
-      if (res.data) setAllRequests(res.data.list);
+      const res = await permissionRequestApi.getAllRequests({ page, pageSize: PAGE_SIZE });
+      if (res.data) {
+        setAllRequests(res.data.list);
+        setAllTotal(res.data.total);
+        setAllPage(res.data.page);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, '全部权限申请加载失败'));
       setAllRequests([]);
+      setAllTotal(0);
     } finally {
       setAllLoading(false);
     }
@@ -315,39 +364,56 @@ function PermissionRequestPage() {
     try {
       const res = await permissionRequestApi.getUsers();
       if (res.data) setUsers(res.data);
-    } catch {
+    } catch (error) {
       setUsers([]);
+      message.error(getErrorMessage(error, '授权用户加载失败'));
     }
   };
 
-  const loadGrants = async () => {
+  const loadGrants = async (page = grantPage) => {
     if (!canManageGrant) return;
     setGrantLoading(true);
     try {
       const res = await permissionRequestApi.getGrants({
-        pageSize: 100,
+        page,
+        pageSize: PAGE_SIZE,
         status: grantStatus || undefined,
         userId: grantUserId,
       });
-      if (res.data) setGrants(res.data.list);
+      if (res.data) {
+        setGrants(res.data.list);
+        setGrantTotal(res.data.total);
+        setGrantPage(res.data.page);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, '授权记录加载失败'));
       setGrants([]);
+      setGrantTotal(0);
     } finally {
       setGrantLoading(false);
     }
   };
 
   useEffect(() => {
-    loadBase();
-    loadMyRequests();
-    loadUsers();
+    if (canCreate || canManageGrant) loadBase();
+    if (canViewSelf) loadMyRequests(1);
+    if (canManageGrant) loadUsers();
   }, []);
 
   useEffect(() => {
-    if (tabKey === 'all') loadAllRequests();
-    if (tabKey === 'grants') loadGrants();
+    if (tabKey === 'all') loadAllRequests(allPage);
+    if (tabKey === 'grants') loadGrants(1);
   }, [tabKey, grantStatus, grantUserId]);
+
+  useEffect(() => {
+    const allowedTabs = [
+      canCreate && 'apply',
+      canViewSelf && 'my',
+      canViewAll && 'all',
+      canManageGrant && 'grants',
+    ].filter(Boolean) as string[];
+    if (!allowedTabs.includes(tabKey)) setTabKey(allowedTabs[0] || '');
+  }, [canCreate, canManageGrant, canViewAll, canViewSelf, tabKey]);
 
   const handleSubmit = async (values: any) => {
     const permission = grantablePermissions.find((item) => item.code === values.permissionCode);
@@ -376,8 +442,10 @@ function PermissionRequestPage() {
           form.resetFields();
           setSelectedPermissionCode(undefined);
           setSelectedScopeType(undefined);
-          await loadMyRequests();
-          setTabKey('my');
+          if (canViewSelf) {
+            await loadMyRequests(1);
+            setTabKey('my');
+          }
         } catch (error) {
           message.error(getErrorMessage(error, '权限申请提交失败'));
         } finally {
@@ -388,24 +456,62 @@ function PermissionRequestPage() {
   };
 
   const handleWithdraw = async (id: number) => {
+    if (withdrawingId !== null) return;
+    setWithdrawingId(id);
     try {
       await permissionRequestApi.withdraw(id);
       message.success('已撤回');
-      await loadMyRequests();
-      if (canViewAll) await loadAllRequests();
+      await loadMyRequests(myPage);
+      if (canViewAll) await loadAllRequests(allPage);
     } catch (error) {
       message.error(getErrorMessage(error, '撤回失败'));
+    } finally {
+      setWithdrawingId(null);
     }
   };
 
   const handleRevoke = async (id: number) => {
-    try {
-      await permissionRequestApi.revokeGrant(id);
-      message.success('授权已撤销');
-      await loadGrants();
-    } catch (error) {
-      message.error(getErrorMessage(error, '撤销授权失败'));
-    }
+    let reason = '';
+    Modal.confirm({
+      title: '撤销授权',
+      content: (
+        <div style={{ marginTop: 12 }}>
+          <Text type="secondary">撤销后用户将立即失去该范围权限，请填写原因以便审计。</Text>
+          <TextArea
+            autoFocus
+            maxLength={255}
+            showCount
+            rows={3}
+            placeholder="请输入撤销原因"
+            style={{ marginTop: 12 }}
+            onChange={(event) => { reason = event.target.value; }}
+          />
+        </div>
+      ),
+      okText: '确认撤销',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        if (!reason.trim()) {
+          message.warning('请填写撤销原因');
+          return Promise.reject();
+        }
+        try {
+          await permissionRequestApi.revokeGrant(id, reason.trim());
+          message.success('授权已撤销');
+          await loadGrants(grantPage);
+        } catch (error) {
+          message.error(getErrorMessage(error, '撤销授权失败'));
+          return Promise.reject(error);
+        }
+      },
+    });
+  };
+
+  const resetApplicationForm = () => {
+    form.resetFields();
+    setSelectedPermissionCode(undefined);
+    setSelectedScopeType(undefined);
   };
 
   const grantColumns = [
@@ -478,9 +584,9 @@ function PermissionRequestPage() {
             </Button>
           )}
           {record.status === 'active' && (
-            <Popconfirm title="确定撤销该授权？" onConfirm={() => handleRevoke(record.id)}>
-              <Button type="link" size="small" danger icon={<StopOutlined />}>撤销</Button>
-            </Popconfirm>
+            <Button type="link" size="small" danger icon={<StopOutlined />} onClick={() => handleRevoke(record.id)}>
+              撤销
+            </Button>
           )}
         </Space>
       ),
@@ -488,8 +594,8 @@ function PermissionRequestPage() {
   ];
 
   const tabItems = [
-    { key: 'apply', label: '申请开通' },
-    { key: 'my', label: '我的申请' },
+    ...(canCreate ? [{ key: 'apply', label: '申请开通' }] : []),
+    ...(canViewSelf ? [{ key: 'my', label: '我的申请' }] : []),
     ...(canViewAll ? [{ key: 'all', label: '全部申请' }] : []),
     ...(canManageGrant ? [{ key: 'grants', label: '授权管理' }] : []),
   ];
@@ -503,6 +609,10 @@ function PermissionRequestPage() {
 
       <Card style={{ borderRadius: 12 }}>
         <Tabs activeKey={tabKey} onChange={setTabKey} items={tabItems} />
+
+        {!tabItems.length && (
+          <Alert type="warning" showIcon message="当前角色尚未配置权限申请相关操作权限" />
+        )}
 
         {tabKey === 'apply' && (
           <Form
@@ -598,7 +708,7 @@ function PermissionRequestPage() {
               <Button type="primary" htmlType="submit" icon={<SendOutlined />} loading={submitLoading}>
                 提交审批
               </Button>
-              <Button onClick={() => form.resetFields()}>重置</Button>
+              <Button onClick={resetApplicationForm}>重置</Button>
             </Space>
           </Form>
         )}
@@ -607,8 +717,12 @@ function PermissionRequestPage() {
           <RequestTable
             data={myRequests}
             loading={loading}
-            onReload={loadMyRequests}
+            onReload={() => loadMyRequests(myPage)}
+            total={myTotal}
+            page={myPage}
+            onPageChange={loadMyRequests}
             onWithdraw={handleWithdraw}
+            withdrawingId={withdrawingId}
           />
         )}
 
@@ -616,7 +730,10 @@ function PermissionRequestPage() {
           <RequestTable
             data={allRequests}
             loading={allLoading}
-            onReload={loadAllRequests}
+            onReload={() => loadAllRequests(allPage)}
+            total={allTotal}
+            page={allPage}
+            onPageChange={loadAllRequests}
             showApplicant
           />
         )}
@@ -631,7 +748,10 @@ function PermissionRequestPage() {
                 placeholder="授权用户"
                 style={{ width: 180 }}
                 options={users.map((user) => ({ label: `${user.realName}${user.username ? ` (${user.username})` : ''}`, value: user.id }))}
-                onChange={setGrantUserId}
+                onChange={(value) => {
+                  setGrantUserId(value);
+                  setGrantPage(1);
+                }}
               />
               <Select
                 placeholder="授权状态"
@@ -642,9 +762,12 @@ function PermissionRequestPage() {
                   { label: '已撤销', value: 'revoked' },
                   { label: '已过期', value: 'expired' },
                 ]}
-                onChange={setGrantStatus}
+                onChange={(value) => {
+                  setGrantStatus(value);
+                  setGrantPage(1);
+                }}
               />
-              <Button icon={<ReloadOutlined />} onClick={loadGrants}>刷新</Button>
+              <Button icon={<ReloadOutlined />} onClick={() => loadGrants(grantPage)}>刷新</Button>
             </div>
             <Table
               rowKey="id"
@@ -653,7 +776,14 @@ function PermissionRequestPage() {
               dataSource={grants}
               size="middle"
               scroll={{ x: 1100 }}
-              pagination={{ pageSize: 20, showTotal: (total) => `共 ${total} 条` }}
+              pagination={{
+                current: grantPage,
+                pageSize: PAGE_SIZE,
+                total: grantTotal,
+                showSizeChanger: false,
+                showTotal: (count) => `共 ${count} 条`,
+                onChange: loadGrants,
+              }}
             />
           </>
         )}

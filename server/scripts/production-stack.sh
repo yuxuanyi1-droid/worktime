@@ -48,6 +48,7 @@ if [[ -n "$BASE_PATH" && "$BASE_PATH" != /* ]]; then
   exit 1
 fi
 HEALTH_PATH="${BASE_PATH}/api/health"
+CADDY_LB_COOKIE_SECRET="${CADDY_LB_COOKIE_SECRET:-$(read_root_env CADDY_LB_COOKIE_SECRET)}"
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -153,7 +154,8 @@ start_worker() {
 start_caddy() {
   (
     cd "$REPO_DIR"
-    nohup caddy run --config "$CADDY_CONFIG" --adapter caddyfile \
+    nohup env CADDY_LB_COOKIE_SECRET="$CADDY_LB_COOKIE_SECRET" \
+      caddy run --config "$CADDY_CONFIG" --adapter caddyfile \
       >"$LOG_DIR/caddy.log" 2>&1 </dev/null &
     echo $! >"$RUNTIME_DIR/caddy.pid"
   )
@@ -164,6 +166,9 @@ start_stack() {
   require_command caddy
   require_command curl
   require_command ss
+  if [[ -z "$CADDY_LB_COOKIE_SECRET" ]]; then
+    CADDY_LB_COOKIE_SECRET="$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")"
+  fi
   [[ -f "$SERVER_DIR/dist/app.js" ]] || {
     echo "服务端尚未构建，请先执行：bash server/scripts/production-stack.sh build" >&2
     exit 1
@@ -177,7 +182,8 @@ start_stack() {
     exit 1
   }
 
-  caddy validate --config "$CADDY_CONFIG" --adapter caddyfile >/dev/null
+  env CADDY_LB_COOKIE_SECRET="$CADDY_LB_COOKIE_SECRET" \
+    caddy validate --config "$CADDY_CONFIG" --adapter caddyfile >/dev/null
   for port in "${API_PORTS[@]}" 3000; do
     assert_port_free "$port"
   done

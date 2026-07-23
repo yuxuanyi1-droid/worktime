@@ -32,7 +32,18 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 }
 
 /** 权限路由守卫 */
-function PermissionRoute({ children, permission }: { children: React.ReactNode; permission: string }) {
+export const ROUTE_PERMISSIONS = {
+  '/timesheet': 'timesheet:access',
+  '/overtime': 'overtime:access',
+  '/weekly-report': 'weekly_report:access',
+  '/approval': 'approval:access',
+  '/report': 'report:access',
+  '/permission-request': 'permission_request:access',
+  '/project': 'project:access',
+  '/system': 'system:access',
+} as const;
+
+export function PermissionRoute({ children, permission }: { children: React.ReactNode; permission: string }) {
   const { hasPermission } = usePermission();
   if (!hasPermission(permission)) {
     return (
@@ -79,15 +90,16 @@ export default function AppRouter() {
         }
       >
         <Route index element={<Dashboard />} />
-        <Route path="timesheet" element={<PermissionRoute permission="timesheet:access"><Timesheet /></PermissionRoute>} />
-        <Route path="overtime" element={<PermissionRoute permission="overtime:access"><Overtime /></PermissionRoute>} />
-        <Route path="weekly-report" element={<PermissionRoute permission="weekly_report:access"><WeeklyReportPage /></PermissionRoute>} />
-        <Route path="approval" element={<PermissionRoute permission="approval:access"><Approval /></PermissionRoute>} />
-        <Route path="approval/detail/:targetType/:targetId" element={<PermissionRoute permission="approval:access"><ApprovalDetailPage /></PermissionRoute>} />
-        <Route path="report" element={<PermissionRoute permission="report:access"><Report /></PermissionRoute>} />
-        <Route path="permission-request" element={<PermissionRoute permission="permission_request:access"><PermissionRequestPage /></PermissionRoute>} />
-        <Route path="project" element={<ProjectPage />} />
-        <Route path="system" element={<PermissionRoute permission="system:access"><System /></PermissionRoute>} />
+        <Route path="timesheet" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/timesheet']}><Timesheet /></PermissionRoute>} />
+        <Route path="overtime" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/overtime']}><Overtime /></PermissionRoute>} />
+        <Route path="weekly-report" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/weekly-report']}><WeeklyReportPage /></PermissionRoute>} />
+        <Route path="approval" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/approval']}><Approval /></PermissionRoute>} />
+        {/* 详情接口会校验“申请人/实际审批人/管理员”；申请人不应被 approval:access 入口权限挡住。 */}
+        <Route path="approval/detail/:targetType/:targetId" element={<ApprovalDetailPage />} />
+        <Route path="report" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/report']}><Report /></PermissionRoute>} />
+        <Route path="permission-request" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/permission-request']}><PermissionRequestPage /></PermissionRoute>} />
+        <Route path="project" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/project']}><ProjectPage /></PermissionRoute>} />
+        <Route path="system" element={<PermissionRoute permission={ROUTE_PERMISSIONS['/system']}><System /></PermissionRoute>} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="pat" element={<PatPage />} />
         <Route path="notifications" element={<NotificationCenter />} />

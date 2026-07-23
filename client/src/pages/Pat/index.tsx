@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Card, Button, message, Typography, Table, Modal, Input, Form, Space, Tag, Popconfirm } from 'antd';
+import { useEffect, useRef, useState } from 'react';
+import { Alert, Card, Button, message, Typography, Table, Modal, Input, Form, Space, Tag, Popconfirm } from 'antd';
 import { PlusOutlined, CopyOutlined, DeleteOutlined, KeyOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { patApi, type PersonalAccessToken } from '../../api/pat';
@@ -11,22 +11,31 @@ export default function PatPage() {
   const [loading, setLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createdToken, setCreatedToken] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [form] = Form.useForm();
+  const loadRequestId = useRef(0);
 
   const load = async () => {
+    const requestId = ++loadRequestId.current;
     setLoading(true);
+    setLoadError(null);
     try {
       const res = await patApi.list();
-      setList(res.data || []);
+      if (requestId === loadRequestId.current) setList(res.data || []);
     } catch (e: any) {
-      // request 拦截器已弹 message
+      if (requestId === loadRequestId.current) {
+        setLoadError(e?.response?.data?.message || e?.message || '访问令牌加载失败');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestId.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     load();
+    return () => { loadRequestId.current += 1; };
   }, []);
 
   const handleCopy = async (text: string) => {
@@ -40,28 +49,44 @@ export default function PatPage() {
   };
 
   const handleCreate = async () => {
+    if (creating) return;
+    let values: { name: string; expiresAt?: string };
     try {
-      const values = await form.validateFields();
-      const res = await patApi.create({ name: values.name, expiresAt: values.expiresAt || undefined });
-      message.success('令牌已创建');
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
+    setCreating(true);
+    try {
+      const expiresAt = values.expiresAt ? dayjs(values.expiresAt).toISOString() : undefined;
+      const res = await patApi.create({ name: values.name, expiresAt });
       setCreateOpen(false);
       form.resetFields();
       if (res.data?.tokenPlain) {
+        message.success('令牌已创建');
         setCreatedToken(res.data.tokenPlain);
+      } else {
+        message.warning('令牌已创建，但未收到一次性明文。请删除该令牌后重新创建。');
       }
-      load();
-    } catch (e: any) {
-      // 校验失败或接口报错
+      await load();
+    } catch {
+      // request 拦截器已展示服务端错误
+    } finally {
+      setCreating(false);
     }
   };
 
   const handleDelete = async (id: number) => {
+    if (deletingId !== null) return;
+    setDeletingId(id);
     try {
       await patApi.remove(id);
       message.success('令牌已删除');
-      load();
+      await load();
     } catch {
       // ignore
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -104,7 +129,13 @@ export default function PatPage() {
       dataIndex: 'expiresAt',
       key: 'expiresAt',
       width: 140,
-      render: (t: string | null) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : <Tag>永不过期</Tag>),
+      render: (t: string | null) => {
+        if (!t) return <Tag>永不过期</Tag>;
+        const expired = dayjs(t).isBefore(dayjs());
+        return expired
+          ? <Tag color="red">已过期 {dayjs(t).format('YYYY-MM-DD HH:mm')}</Tag>
+          : dayjs(t).format('YYYY-MM-DD HH:mm');
+      },
     },
     {
       title: '操作',
@@ -118,8 +149,9 @@ export default function PatPage() {
           okText="删除"
           cancelText="取消"
           okButtonProps={{ danger: true }}
+          disabled={deletingId !== null}
         >
-          <Button type="text" danger size="small" icon={<DeleteOutlined />}>删除</Button>
+          <Button type="text" danger size="small" icon={<DeleteOutlined />} loading={deletingId === record.id}>删除</Button>
         </Popconfirm>
       ),
     },
@@ -137,9 +169,19 @@ export default function PatPage() {
       </div>
 
       <Card style={{ borderRadius: 12, marginBottom: 16 }}>
+        {loadError && (
+          <Alert
+            type="error"
+            showIcon
+            message={loadError}
+            action={<Button size="small" onClick={load}>重试</Button>}
+            style={{ marginBottom: 16 }}
+          />
+        )}
         <Paragraph type="secondary" style={{ marginBottom: 16, fontSize: 13 }}>
-          访问令牌（PAT）用于 pi agent 助手或外部工具（如 Cursor）通过 <Text code>Authorization: Bearer &lt;令牌&gt;</Text> 调用本系统 API。
-          令牌与你的账号权限相同，请妥善保管。在 Cursor 等工具中配合 <Text code>SKILL.md</Text> 使用即可自动查询工时、周报等数据。
+          访问令牌（PAT）仅用于 Cursor 等外部工具通过 <Text code>Authorization: Bearer &lt;令牌&gt;</Text> 调用本系统 API。
+          内置 AI 助手使用服务端短期凭证，不需要在此创建 PAT。PAT 继承你的账号权限，请妥善保管。
+          每个账号最多保留 20 个未过期令牌。
         </Paragraph>
         <Table
           rowKey="id"
@@ -155,9 +197,17 @@ export default function PatPage() {
         title="新建访问令牌"
         open={createOpen}
         onOk={handleCreate}
-        onCancel={() => { setCreateOpen(false); form.resetFields(); }}
-        okText="创建并复制"
+        onCancel={() => {
+          if (creating) return;
+          setCreateOpen(false);
+          form.resetFields();
+        }}
+        okText="创建令牌"
         cancelText="取消"
+        confirmLoading={creating}
+        maskClosable={!creating}
+        keyboard={!creating}
+        closable={!creating}
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item
@@ -165,10 +215,10 @@ export default function PatPage() {
             label="令牌名称"
             rules={[{ required: true, message: '请输入令牌名称' }, { max: 100, message: '最多 100 字符' }]}
           >
-            <Input placeholder="如：Cursor 集成 / 本地调试" />
+            <Input placeholder="如：Cursor 集成 / 本地调试" maxLength={100} />
           </Form.Item>
           <Form.Item name="expiresAt" label="过期时间（可选）" tooltip="留空则永不过期">
-            <Input type="datetime-local" style={{ width: '100%' }} />
+            <Input type="datetime-local" min={dayjs().format('YYYY-MM-DDTHH:mm')} style={{ width: '100%' }} />
           </Form.Item>
           <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
             令牌只会在创建后显示一次，关闭后无法再次查看，请立即复制并妥善保存。
@@ -188,6 +238,7 @@ export default function PatPage() {
         ]}
         closable={false}
         maskClosable={false}
+        keyboard={false}
       >
         <Paragraph type="warning">该令牌只显示一次，关闭后无法恢复。若丢失，请删除并重新创建。</Paragraph>
         <Input.TextArea value={createdToken} readOnly autoSize={{ minRows: 2, maxRows: 4 }} />

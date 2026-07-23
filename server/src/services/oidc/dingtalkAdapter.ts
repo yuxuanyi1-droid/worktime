@@ -37,6 +37,28 @@ export class DingTalkAdapter implements OidcProvider {
     return { clientId, clientSecret };
   }
 
+  private async request(url: string, init: RequestInit, operation: string): Promise<Response> {
+    const configuredTimeout = Number(process.env.OIDC_REQUEST_TIMEOUT_MS);
+    const timeoutMs = Number.isInteger(configuredTimeout) && configuredTimeout >= 1000
+      ? Math.min(configuredTimeout, 60_000)
+      : 10_000;
+    try {
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (error) {
+      logger.error({ err: error, provider: this.name, operation }, '钉钉登录请求异常');
+      throw new BusinessError(`钉钉登录失败：${operation}请求异常，请稍后重试`, 502);
+    }
+  }
+
+  private async responseJson(res: Response, operation: string): Promise<any> {
+    try {
+      return await res.json();
+    } catch (error) {
+      logger.error({ err: error, status: res.status, provider: this.name, operation }, '钉钉响应解析失败');
+      throw new BusinessError(`钉钉登录失败：${operation}返回了无效数据`, 502);
+    }
+  }
+
   /** 钉钉无 nonce 概念，返回空；state 由本系统 HMAC 层提供防 CSRF */
   async prepareAuth(): Promise<AuthPreparation> {
     return {};
@@ -63,7 +85,7 @@ export class DingTalkAdapter implements OidcProvider {
     const { clientId, clientSecret } = this.requireConfig();
 
     // 1. authCode 换 userAccessToken
-    const tokenRes = await fetch('https://api.dingtalk.com/v1.0/oauth2/userAccessToken', {
+    const tokenRes = await this.request('https://api.dingtalk.com/v1.0/oauth2/userAccessToken', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -72,28 +94,26 @@ export class DingTalkAdapter implements OidcProvider {
         code: params.code,
         grantType: 'authorization_code',
       }),
-    });
+    }, '换取 accessToken');
     if (!tokenRes.ok) {
-      const detail = await safeText(tokenRes);
-      logger.error({ status: tokenRes.status, detail }, '钉钉 userAccessToken 请求失败');
+      logger.error({ status: tokenRes.status, provider: this.name }, '钉钉 userAccessToken 请求失败');
       throw new BusinessError(`钉钉登录失败：换取 accessToken 失败（${tokenRes.status}）`, 502);
     }
-    const tokenBody = (await tokenRes.json()) as any;
+    const tokenBody = await this.responseJson(tokenRes, '换取 accessToken');
     const accessToken = tokenBody?.accessToken;
     if (!accessToken) {
       throw new BusinessError('钉钉登录失败：未返回 accessToken（授权码可能已过期）', 502);
     }
 
     // 2. accessToken 取用户信息
-    const userRes = await fetch('https://api.dingtalk.com/v1.0/contact/users/me', {
+    const userRes = await this.request('https://api.dingtalk.com/v1.0/contact/users/me', {
       headers: { 'x-acs-dingtalk-access-token': accessToken },
-    });
+    }, '获取用户信息');
     if (!userRes.ok) {
-      const detail = await safeText(userRes);
-      logger.error({ status: userRes.status, detail }, '钉钉用户信息请求失败');
+      logger.error({ status: userRes.status, provider: this.name }, '钉钉用户信息请求失败');
       throw new BusinessError(`钉钉登录失败：获取用户信息失败（${userRes.status}）`, 502);
     }
-    const userBody = (await userRes.json()) as any;
+    const userBody = await this.responseJson(userRes, '获取用户信息');
     // unionId 跨应用稳定，作为身份唯一标识；openId 次之
     const subject = userBody?.unionId || userBody?.openId;
     if (!subject) {
@@ -107,13 +127,5 @@ export class DingTalkAdapter implements OidcProvider {
       // 钉钉无 groups 概念，角色由本地管理员维护
       groups: undefined,
     };
-  }
-}
-
-async function safeText(res: Response): Promise<string> {
-  try {
-    return await res.text();
-  } catch {
-    return '<unreadable>';
   }
 }

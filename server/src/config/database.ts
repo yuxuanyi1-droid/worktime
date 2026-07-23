@@ -40,6 +40,11 @@ import { ExternalIdentityEmployeeId1700000000008 } from '../migrations/170000000
 import { AnnouncementGroupScope1700000000009 } from '../migrations/1700000000009-AnnouncementGroupScope';
 import { CustomRoleSupport1700000000010 } from '../migrations/1700000000010-CustomRoleSupport';
 import { RemoveUnusedPermissions1700000000011 } from '../migrations/1700000000011-RemoveUnusedPermissions';
+import { ApprovalInstanceResubmission1700000000012 } from '../migrations/1700000000012-ApprovalInstanceResubmission';
+import { ApprovalFlowDefaultConstraint1700000000013 } from '../migrations/1700000000013-ApprovalFlowDefaultConstraint';
+import { PermissionGrantConsistency1700000000014 } from '../migrations/1700000000014-PermissionGrantConsistency';
+import { OrganizationSiblingConstraint1700000000015 } from '../migrations/1700000000015-OrganizationSiblingConstraint';
+import { ExternalIdentityProviderConstraint1700000000016 } from '../migrations/1700000000016-ExternalIdentityProviderConstraint';
 
 /**
  * PostgreSQL 是当前唯一生产数据库；保留旧分支仅用于历史代码读取，不再保证 SQLite 兼容。
@@ -71,6 +76,11 @@ const migrations = [
   AnnouncementGroupScope1700000000009,
   CustomRoleSupport1700000000010,
   RemoveUnusedPermissions1700000000011,
+  ApprovalInstanceResubmission1700000000012,
+  ApprovalFlowDefaultConstraint1700000000013,
+  PermissionGrantConsistency1700000000014,
+  OrganizationSiblingConstraint1700000000015,
+  ExternalIdentityProviderConstraint1700000000016,
 ];
 
 /**

@@ -24,7 +24,10 @@ export interface ApprovalInstanceStepSnapshot {
 }
 
 @Entity('approval_instances')
-@Index('uq_approval_instance_target', ['targetType', 'targetId'], { unique: true })
+@Index('uq_approval_instance_active_target', ['targetType', 'targetId'], {
+  unique: true,
+  where: `"status" = 'pending'`,
+})
 @Index(['applicantId', 'status'])
 export class ApprovalInstance {
   @PrimaryGeneratedColumn()

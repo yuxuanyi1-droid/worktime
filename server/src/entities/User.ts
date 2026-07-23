@@ -35,10 +35,10 @@ export class User {
   tokenVersion!: number;
 
   @ManyToOne(() => Department, department => department.users, { nullable: true })
-  department!: Department;
+  department!: Department | null;
 
   @ManyToOne(() => Group, group => group.users, { nullable: true })
-  group!: Group;
+  group!: Group | null;
 
   @ManyToMany(() => Role, role => role.users)
   @JoinTable({

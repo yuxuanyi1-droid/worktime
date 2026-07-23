@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  Card, Tabs, Table, Button, Space, Tag, Typography, Empty, Modal, Badge, message,
-  List, Spin, Input, Descriptions,
+  Alert, Card, Tabs, Table, Button, Space, Tag, Typography, Empty, Modal, message,
+  List, Spin, Descriptions, Popconfirm,
 } from 'antd';
 import {
   BellOutlined, NotificationOutlined, CheckCircleOutlined, DeleteOutlined,
-  InfoCircleOutlined, WarningOutlined, ExclamationCircleOutlined,
+  InfoCircleOutlined, WarningOutlined, ExclamationCircleOutlined, SendOutlined,
 } from '@ant-design/icons';
 import {
   announcementApi,
@@ -25,6 +25,11 @@ export default function NotificationCenter() {
   const [tabKey, setTabKey] = useState(requestedTab === 'announce' ? 'announce' : 'notif');
   const [notifLoading, setNotifLoading] = useState(false);
   const [announLoading, setAnnounLoading] = useState(false);
+  const [markAllLoading, setMarkAllLoading] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const [announError, setAnnounError] = useState<string | null>(null);
+  const notifRequestId = useRef(0);
+  const announRequestId = useRef(0);
 
   // 通知
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
@@ -41,29 +46,53 @@ export default function NotificationCenter() {
   const [detailItem, setDetailItem] = useState<AnnouncementItem | null>(null);
 
   const loadNotifications = async () => {
+    const requestId = ++notifRequestId.current;
     setNotifLoading(true);
+    setNotifError(null);
     try {
       const res = await notificationApi.getList({ page: notifPage, pageSize: 20 });
-      if (res.data) { setNotifications(res.data.list); setNotifTotal(res.data.total); }
+      if (requestId === notifRequestId.current && res.data) {
+        setNotifications(res.data.list);
+        setNotifTotal(res.data.total);
+      }
     } catch (e: any) {
-      message.error(e?.response?.data?.message || '通知加载失败');
+      if (requestId === notifRequestId.current) {
+        setNotifications([]);
+        setNotifTotal(0);
+        setNotifError(e?.response?.data?.message || '通知加载失败');
+      }
+    } finally {
+      if (requestId === notifRequestId.current) setNotifLoading(false);
     }
-    setNotifLoading(false);
   };
 
   const loadAnnouncements = async () => {
+    const requestId = ++announRequestId.current;
     setAnnounLoading(true);
+    setAnnounError(null);
     try {
       const res = await announcementApi.getMyList({ page: announPage, pageSize: 20 });
-      if (res.data) { setAnnouncements(res.data.list); setAnnounTotal(res.data.total); }
+      if (requestId === announRequestId.current && res.data) {
+        setAnnouncements(res.data.list);
+        setAnnounTotal(res.data.total);
+      }
     } catch (e: any) {
-      message.error(e?.response?.data?.message || '公告加载失败');
+      if (requestId === announRequestId.current) {
+        setAnnouncements([]);
+        setAnnounTotal(0);
+        setAnnounError(e?.response?.data?.message || '公告加载失败');
+      }
+    } finally {
+      if (requestId === announRequestId.current) setAnnounLoading(false);
     }
-    setAnnounLoading(false);
   };
 
-  useEffect(() => { loadNotifications(); }, [notifPage]);
-  useEffect(() => { loadAnnouncements(); }, [announPage]);
+  useEffect(() => {
+    if (tabKey === 'notif') void loadNotifications();
+  }, [tabKey, notifPage]);
+  useEffect(() => {
+    if (tabKey === 'announce') void loadAnnouncements();
+  }, [tabKey, announPage]);
   useEffect(() => {
     setTabKey(requestedTab === 'announce' ? 'announce' : 'notif');
   }, [requestedTab]);
@@ -73,18 +102,46 @@ export default function NotificationCenter() {
     setSearchParams({ tab: key }, { replace: true });
   };
 
-  const handleNotifClick = async (item: NotificationItem) => {
-    if (!item.isRead) {
-      try {
-        await notificationApi.markAsRead([item.id]);
-        emitNotificationReadStateChanged();
-        loadNotifications();
-      } catch {}
+  const markNotificationAsRead = async (item: NotificationItem) => {
+    if (item.isRead) return true;
+    try {
+      await notificationApi.markAsRead([item.id]);
+      setNotifications(current => current.map(notification => (
+        notification.id === item.id ? { ...notification, isRead: true } : notification
+      )));
+      emitNotificationReadStateChanged();
+      return true;
+    } catch {
+      return false;
     }
+  };
+
+  const handleNotifOpen = async (item: NotificationItem) => {
+    await markNotificationAsRead(item);
     // 只有审批类通知才跳转详情页，其它类型（如 system）不跳
     const approvalTypes = ['timesheet', 'overtime', 'weekly_report', 'permission_request'];
     if (item.targetType && item.targetId && approvalTypes.includes(item.targetType)) {
       navigate(`/approval/detail/${item.targetType}/${item.targetId}`);
+    }
+  };
+
+  const handleNotifMarkRead = async (item: NotificationItem) => {
+    await markNotificationAsRead(item);
+  };
+
+  const handleNotifDelete = async (item: NotificationItem) => {
+    try {
+      await notificationApi.delete(item.id);
+      setNotifTotal(current => Math.max(0, current - 1));
+      if (notifications.length === 1 && notifPage > 1) {
+        setNotifPage(current => current - 1);
+      } else {
+        setNotifications(current => current.filter(notification => notification.id !== item.id));
+      }
+      emitNotificationReadStateChanged();
+      message.success('通知已删除');
+    } catch {
+      // 请求拦截器负责展示服务端错误。
     }
   };
 
@@ -94,7 +151,9 @@ export default function NotificationCenter() {
       try {
         await announcementApi.markAsRead(item.id);
         emitNotificationReadStateChanged();
-        loadAnnouncements();
+        setAnnouncements(current => current.map(announcement => (
+          announcement.id === item.id ? { ...announcement, isRead: true } : announcement
+        )));
         detail = { ...item, isRead: true };
       } catch {}
     }
@@ -103,22 +162,28 @@ export default function NotificationCenter() {
   };
 
   const handleMarkAllReadNotif = async () => {
+    setMarkAllLoading(true);
     try {
       await notificationApi.markAllAsRead();
       emitNotificationReadStateChanged();
-      loadNotifications();
+      setNotifications(current => current.map(notification => ({ ...notification, isRead: true })));
     } catch {
       // 拦截器已弹 message.error
+    } finally {
+      setMarkAllLoading(false);
     }
   };
 
   const handleMarkAllReadAnnoun = async () => {
+    setMarkAllLoading(true);
     try {
       await announcementApi.markAllAsRead();
       emitNotificationReadStateChanged();
-      loadAnnouncements();
+      setAnnouncements(current => current.map(announcement => ({ ...announcement, isRead: true })));
     } catch {
       // 拦截器已弹 message.error
+    } finally {
+      setMarkAllLoading(false);
     }
   };
 
@@ -126,11 +191,13 @@ export default function NotificationCenter() {
     if (type === 'approval_pending') return <CheckCircleOutlined style={{ color: '#6B8F71' }} />;
     if (type === 'approval_approved') return <CheckCircleOutlined style={{ color: '#4A8B5E' }} />;
     if (type === 'approval_rejected') return <DeleteOutlined style={{ color: '#C0564B' }} />;
+    if (type === 'approval_cc') return <SendOutlined style={{ color: '#722ed1' }} />;
     return <BellOutlined />;
   };
 
   const typeLabel: Record<string, string> = {
-    approval_pending: '待审批', approval_approved: '已通过', approval_rejected: '已驳回', system: '系统',
+    approval_pending: '待审批', approval_approved: '已通过', approval_rejected: '已驳回',
+    approval_cc: '审批抄送', system: '系统',
   };
 
   const announTypeIcon = (type: string) => {
@@ -157,10 +224,13 @@ export default function NotificationCenter() {
     {
       title: '标题', dataIndex: 'title', ellipsis: true,
       render: (t: string, r: NotificationItem) => (
-        <span style={{ fontWeight: r.isRead ? 400 : 600, cursor: 'pointer' }}
-          onClick={() => handleNotifClick(r)}>
+        <Button
+          type="link"
+          style={{ height: 'auto', padding: 0, fontWeight: r.isRead ? 400 : 600, textAlign: 'left' }}
+          onClick={() => handleNotifOpen(r)}
+        >
           {t}
-        </span>
+        </Button>
       ),
     },
     {
@@ -176,12 +246,11 @@ export default function NotificationCenter() {
       render: (_: any, r: NotificationItem) => (
         <Space>
           {!r.isRead && (
-            <Button type="link" size="small" onClick={() => handleNotifClick(r)}>标为已读</Button>
+            <Button type="link" size="small" onClick={() => handleNotifMarkRead(r)}>标为已读</Button>
           )}
-          <Button type="link" size="small" danger onClick={async () => {
-            await notificationApi.delete(r.id);
-            loadNotifications();
-          }}>删除</Button>
+          <Popconfirm title="确定删除这条通知？" onConfirm={() => handleNotifDelete(r)}>
+            <Button type="link" size="small" danger>删除</Button>
+          </Popconfirm>
         </Space>
       ),
     },
@@ -205,35 +274,57 @@ export default function NotificationCenter() {
             ),
           },
         ]} tabBarExtraContent={
-          <Button type="link" onClick={tabKey === 'notif' ? handleMarkAllReadNotif : handleMarkAllReadAnnoun}>
+          <Button
+            type="link"
+            loading={markAllLoading}
+            disabled={tabKey === 'notif' ? notifLoading : announLoading}
+            onClick={tabKey === 'notif' ? handleMarkAllReadNotif : handleMarkAllReadAnnoun}
+          >
             全部标为已读
           </Button>
         }
         />
 
         {tabKey === 'notif' ? (
-          <Table rowKey="id" columns={notifColumns} dataSource={notifications}
-            loading={notifLoading}
-            pagination={{
-              current: notifPage, total: notifTotal, pageSize: 20,
-              onChange: setNotifPage, showTotal: (t) => `共 ${t} 条`,
-            }}
-            size="middle" />
+          notifError ? (
+            <Alert
+              type="warning"
+              showIcon
+              message={notifError}
+              action={<Button size="small" onClick={() => void loadNotifications()}>重试</Button>}
+            />
+          ) : (
+            <Table rowKey="id" columns={notifColumns} dataSource={notifications}
+              loading={notifLoading}
+              pagination={{
+                current: notifPage, total: notifTotal, pageSize: 20,
+                showSizeChanger: false,
+                onChange: setNotifPage, showTotal: (t) => `共 ${t} 条`,
+              }}
+              size="middle" />
+          )
         ) : (
           <Spin spinning={announLoading}>
-            {announcements.length === 0 ? (
+            {announError ? (
+              <Alert
+                type="warning"
+                showIcon
+                message={announError}
+                action={<Button size="small" onClick={() => void loadAnnouncements()}>重试</Button>}
+              />
+            ) : announcements.length === 0 ? (
               <Empty description="暂无系统公告" />
             ) : (
               <List
                 dataSource={announcements}
                 pagination={{
                   current: announPage, total: announTotal, pageSize: 20,
+                  showSizeChanger: false,
                   onChange: setAnnounPage, showTotal: (t) => `共 ${t} 条`,
                 }}
                 renderItem={(item) => (
                   <List.Item
                     style={{
-                      cursor: 'pointer',
                       padding: '16px 20px',
                       marginBottom: 8,
                       borderRadius: 8,
@@ -244,7 +335,6 @@ export default function NotificationCenter() {
                       ),
                       boxShadow: item.isRead ? 'none' : '0 1px 4px rgba(0,0,0,0.06)',
                     }}
-                    onClick={() => handleAnnounClick(item)}
                     actions={[
                       item.isRead ? (
                         <Tag key="read">已读</Tag>
@@ -259,9 +349,15 @@ export default function NotificationCenter() {
                     <List.Item.Meta
                       avatar={announTypeIcon(item.type)}
                       title={
-                        <span>
+                        <span style={{ display: 'flex', alignItems: 'center' }}>
                           {announTypeTag(item.type)}
-                          <span style={{ fontWeight: item.isRead ? 400 : 600, marginLeft: 4 }}>{item.title}</span>
+                          <Button
+                            type="link"
+                            style={{ height: 'auto', padding: '0 4px', fontWeight: item.isRead ? 400 : 600, textAlign: 'left' }}
+                            onClick={() => handleAnnounClick(item)}
+                          >
+                            {item.title}
+                          </Button>
                         </span>
                       }
                       description={
@@ -298,9 +394,15 @@ export default function NotificationCenter() {
         footer={detailItem?.isRead ? null : (
           <Button type="primary" onClick={async () => {
             if (detailItem) {
-              await announcementApi.markAsRead(detailItem.id);
-              emitNotificationReadStateChanged();
-              loadAnnouncements();
+              try {
+                await announcementApi.markAsRead(detailItem.id);
+                emitNotificationReadStateChanged();
+                setAnnouncements(current => current.map(announcement => (
+                  announcement.id === detailItem.id ? { ...announcement, isRead: true } : announcement
+                )));
+              } catch {
+                return;
+              }
             }
             setDetailOpen(false);
             setDetailItem(null);
