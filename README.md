@@ -15,13 +15,13 @@
 
 ## 快速启动
 
-运行环境要求 Node.js 22.19.0 及以上，推荐 Node.js 24。使用 fnm 时请先执行 `fnm use 24`。
+运行环境要求 Node.js 22.19.0 及以上，推荐 Node.js 24。使用 fnm 时请先执行 `fnm use 24`；如果仍命中 Windows 挂载目录中的 Node，请用 `which node`、`node -v` 检查 WSL 当前解析到的可执行文件。
 
 ```bash
 # 1. 安装依赖并创建统一配置
 npm run install:all
 cp .env.example .env
-# 编辑根 .env，填写 JWT_SECRET、PostgreSQL、Redis 等配置
+# 编辑根 .env，填写 JWT_SECRET、PostgreSQL 等配置；多实例部署还需配置 Redis
 
 # 2. 初始化数据库
 cd server && npm run seed
@@ -106,6 +106,8 @@ Cloudflare Tunnel / 其他入口
 
 三个 API 都设置 `APPROVAL_WORKER=0`，只负责接收请求和入队；独立 Worker 统一消费 Redis 审批队列。所有实例共享 PostgreSQL、Redis 和根 `.env`。
 
+AI 生成任务并不是上述独立审批 Worker 的职责。每个 API 实例内部各自运行受隔离的 AI `worker_threads`，Caddy 使用签名 Cookie 将同一 AI 会话固定到一个 API 实例；独立进程 `approvalWorker.js` 只消费审批队列。
+
 审批 Worker 保留批处理吞吐；批次失败时会自动逐条隔离，单条任务达到 `APPROVAL_MAX_ATTEMPTS` 后进入死信 Stream，避免坏任务阻塞同批正常审批。`/api/metrics` 暴露 `approval_queue_messages` 与 `approval_dead_letter_messages`，后者大于 0 时应告警并人工排查。
 
 ### 一键管理脚本
@@ -178,7 +180,9 @@ http://127.0.0.1:3000
 
 **架构：**
 - 后端 `server/src/ai/`：pi agent SDK 封装在 Worker 线程（避免 ESM/CJS 死锁），通过 `/api/v1/agent/chat` 以 **SSE（Server-Sent Events）** 流式推送工具状态和正文增量。
+- 模型运行时：使用当前 pi SDK 的 `ModelRuntime` 加载 `server/data/pi-models.json`；API key 仅注入进程内运行时，不写入 `auth.json`。生成的模型配置权限限制为当前用户可读写。
 - 工具边界：Agent 只注册 `worktime_query`，不提供 bash、文件读取或任意 HTTP 工具；内部使用按用户签发的短期 JWT 调用本系统只读接口，数据范围继续经过原有权限校验。
+- 日期语义：系统提示按 `Asia/Shanghai` 注入当前日期和本周范围；调用个人周工时汇总时必须同时传入周一 `weekStart` 和周日 `weekEnd`，避免跨年、跨月或服务端默认日期造成误差。
 - 容量保护：每个实例默认同时生成 12 路、排队 100 路、驻留 200 个会话；同一会话串行执行，并在超限时返回明确的繁忙提示。
 - 容量观测：`/api/metrics` 提供 `ai_active_prompts`、`ai_queued_prompts`、`ai_resident_sessions`，扩容应以持续排队和 P95 等待时间为依据。
 - 多实例路由：`Caddyfile` 对 `/agent/*` 使用签名 Cookie 会话亲和，确保创建会话、SSE、消息排队和停止操作落在同一 AI Worker；其他 API 仍使用 `least_conn`。生产应配置 `CADDY_LB_COOKIE_SECRET`。
@@ -186,12 +190,28 @@ http://127.0.0.1:3000
 
 **聊天界面特性：**
 - **流式输出**：边生成边显示，支持中途停止。
-- **过程折叠**：统一展示工具调用和执行状态；不向前端暴露模型原始推理文本，正文只显示最终答案。
+- **过程折叠**：处理过程默认折叠，展开后每个分析/工具步骤仍可继续展开；分析步骤展示安全摘要和工具执行状态，不向浏览器传输模型原始推理文本，正文只显示最终答案。
 - **Markdown 渲染**：代码块语法高亮（按需加载 PrismLight）+ 复制按钮、表格/列表/引用块样式；外部图片默认隐藏，链接协议受限。
 - **消息操作**：每条回答可一键复制；最后一条回答支持重新生成。
 - **悬浮卡片式 UI**：自定义浮窗（非 Drawer），约 2/3 视口高、四周留白、16px 圆角，贴合项目暖色调设计系统。
 
 > AI 功能需在仓库根 `.env` 配置 `AI_API_KEY` 等。未配置时 `/agent/status` 返回 `enabled: false`，聊天接口仍以 503 明确拒绝直接调用。
+
+**验证与排障：**
+
+```bash
+# 先启动完整环境，再从仓库根目录执行真实登录、SSE、工具调用和历史记录烟测
+npm run test:smoke:ai
+
+# 子路径或非默认地址可显式覆盖
+AI_SMOKE_BASE_URL=http://127.0.0.1:3000/worktime/api/v1 \
+AI_SMOKE_QUESTION='我这周填了多少工时' \
+node tests/smoke/ai-api-smoke.mjs
+```
+
+- 多实例烟测必须保留服务端下发的 AI 亲和 Cookie，否则后续请求可能被转发到没有该会话的实例。
+- AI 只产生分析过程但没有最终正文时，前端会提示“AI 未生成可展示的回答，请重新生成”，不再把过程占位文案误当成答案。
+- 出现 500 时优先查看 `server/data/runtime/logs/api-*.log`；当前日志器会自动脱敏 Authorization、Cookie、API key、访问令牌和客户端密钥。脱敏只对新写入日志生效，升级前产生的旧日志应按运维策略清理，并轮换可能已落盘的凭据。
 
 ## 工程化与质量保证
 
@@ -206,6 +226,7 @@ http://127.0.0.1:3000
 - **限流**：express-rate-limit 全局限流（15 分钟/1000 次）+ 登录失败专用限流（10 分钟/100 次，可通过 `LOGIN_RATE_MAX` 调整）
 - **统一错误处理**：`BusinessError` 区分业务错误（400 + 友好提示）与系统错误（500 + 不泄露内部细节）
 - **审计日志**：改密、用户禁用/删除、角色权限变更、审批决策、权限授予/撤销等高敏感操作全程留痕
+- **日志脱敏**：结构化日志统一遮蔽 Authorization、Cookie、Token、API key 和客户端密钥，禁止在业务日志中手工拼接敏感凭据
 
 ### 性能
 - **数据库索引**：工时、通知、审计等高频查询表均建立复合索引
@@ -213,10 +234,11 @@ http://127.0.0.1:3000
 - **SQL 下推**：公告可见性判断下推到 SQL where，避免全表扫描+内存过滤
 - **权限缓存**：auth 中间件一次算出权限集挂到请求对象，permission 中间件复用
 
-### 数据库迁移
-- 关闭默认 `synchronize`（仅 `TYPEORM_SYNCHRONIZE=true` 显式开启），防止生产自动改表丢数据
-- `ensureSchema()`：空库自动建表、老库跳过、始终运行 migration
-- 增量 migration 平滑升级（如新增字段、补建索引），老库无需删数据重建
+### 数据库结构（开发阶段）
+- 当前项目仍处于开发阶段，修改 TypeORM 实体后不要求编写 migration，也不要求兼容已有开发数据
+- 本地可设置 `TYPEORM_SYNCHRONIZE=true`，启动时直接把实体结构同步到开发数据库
+- 需要干净环境时可重建开发数据库并重新执行 seed；现有 migration 仅作为历史初始化能力保留
+- 准备正式部署前需重新确定 schema 升级策略，并关闭生产环境的自动同步
 
 ### 可观测性
 - **pino 结构化日志**：开发环境 pretty 打印，生产环境 JSON 行（便于 ELK/Loki 采集）
@@ -259,10 +281,12 @@ http://127.0.0.1:3000
 
 ## 数据库说明
 
-项目生产数据库统一使用 **PostgreSQL**。连接参数位于仓库根 `.env`：`DB_HOST`、`DB_PORT`、`DB_USERNAME`、`DB_PASSWORD` 和 `DB_DATABASE`。
+项目数据库统一使用 **PostgreSQL**。连接参数位于仓库根 `.env`：`DB_HOST`、`DB_PORT`、`DB_USERNAME`、`DB_PASSWORD` 和 `DB_DATABASE`。
 
-Schema 由实体定义驱动，通过 `ensureSchema()`（空库自动建表）+ migration（增量升级）管理。修改实体后：
-- 编辑实体后生成并人工检查 migration，不依赖 `synchronize` 自动改表。
-- 运行 `cd server && npm run migration:run` 应用 migration。
-- migration 必须提供可用的 `down`，可通过 `npm run migration:revert` 回滚。
-- 已有生产数据时不得删库重 seed。
+当前为开发阶段，Schema 直接由 TypeORM 实体定义驱动。修改实体后可在本地设置：
+
+```bash
+TYPEORM_SYNCHRONIZE=true
+```
+
+随后重启后端即可同步开发库结构。开发数据无需保持向后兼容，需要时可以重建开发数据库并重新执行 `cd server && npm run seed`。现有 migration 文件暂时保留，但普通开发改动无需新增或维护 migration；正式部署前再重新评估数据库升级方案。
