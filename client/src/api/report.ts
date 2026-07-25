@@ -21,6 +21,9 @@ export const reportApi = {
 /** 自定义报表数据源 */
 export type CustomReportSource = 'timesheet' | 'overtime';
 
+/** 加班类型（与后端 reportQueryEngine.ALLOWED_OVERTIME_TYPES 同源，勿改单值） */
+export type ReportOvertimeType = 'weekend' | 'holiday' | 'weekday';
+
 /** 自定义报表度量 */
 export type CustomReportMeasure = 'sumDays' | 'count' | 'distinctUsers';
 
@@ -35,8 +38,8 @@ export interface CustomReportFilters {
   projectIds?: number[];
   /** 工时/加班状态，默认 ['approved'] */
   statuses?: string[];
-  /** 加班类型筛选（仅 source=overtime 时有效） */
-  overtimeType?: string;
+  /** 加班类型筛选（仅 source=overtime 时有效；复数数组，字段名与后端一致） */
+  overtimeTypes?: ReportOvertimeType[];
 }
 
 /** 自定义报表配置（运行与保存的 config） */

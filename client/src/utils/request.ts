@@ -137,7 +137,8 @@ request.interceptors.response.use(
   (response) => {
     const { data } = response;
     if (data.code !== 0 && data.code !== undefined) {
-      notifyErrorOnce(data.message || '请求失败');
+      // 业务错误（HTTP 200 但 code !== 0）：不主动弹 toast，由页面层 catch 统一自呈现，
+      // 避免与页面层 antd message.error 同时弹出造成双 toast（去重对差异化文案不可靠）。
       return Promise.reject(new Error(data.message));
     }
     return data;
@@ -154,9 +155,15 @@ request.interceptors.response.use(
       if (url.endsWith('/auth/refresh')) {
         return Promise.reject(error);
       }
-      // 其余接口 401：尝试静默刷新并重放
+      // 其余接口 401：尝试静默刷新并重放（401 提示由 unauthorized 事件 / 登出流程负责）
       return handle401WithRefresh(error);
     }
+    // 5xx：不主动弹 toast，由页面层自呈现（页面 catch 通常会读取 response.data.message）
+    if (error.response && error.response.status >= 500) {
+      return Promise.reject(error);
+    }
+    // 其余情况（4xx 业务错误、网络断开、超时）：保留拦截器统一提示。
+    // 网络断开时页面层往往拿不到具体消息，需要这里兜底。
     const msg = error.response?.data?.message || error.message || '网络错误';
     notifyErrorOnce(msg);
     return Promise.reject(error);

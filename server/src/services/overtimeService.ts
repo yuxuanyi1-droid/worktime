@@ -362,6 +362,10 @@ export class OvertimeService {
           });
         }
       }
+    }).catch((err) => {
+      // 并发提交撞 approval_instances 的 (targetType,targetId) 活跃唯一索引 → 友好提示
+      if (isUniqueViolation(err)) throw new BusinessError('该加班记录已提交，请刷新后重试');
+      throw err;
     });
 
     const notifier = new NotificationPublisher();

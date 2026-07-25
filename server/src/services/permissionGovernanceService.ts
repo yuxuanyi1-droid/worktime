@@ -1,5 +1,5 @@
 import { EntityManager, In, IsNull, LessThanOrEqual } from 'typeorm';
-import { BusinessError } from '../utils/errors';
+import { BusinessError, isBusinessError, isUniqueViolation } from '../utils/errors';
 import { AppDataSource } from '../config/database';
 import { permissionDefinitionMap, permissionDefinitions } from '../config/permissionDefinitions';
 import { Department } from '../entities/Department';
@@ -225,68 +225,78 @@ export class PermissionGovernanceService {
   }
 
   async activateGrant(requestId: number, approvalInstanceId: number | null, grantedBy: { id: number; name: string } | null) {
-    const request = await this.requestRepo.findOne({ where: { id: requestId } });
-    if (!request) throw new BusinessError('权限申请不存在');
-    if (request.status !== 'submitted' && request.status !== 'approved') {
-      throw new BusinessError('当前权限申请状态不允许授权');
-    }
-    if (request.expiresAt && request.expiresAt.getTime() <= Date.now()) {
-      throw new BusinessError('权限申请的有效期已过，请驳回后重新申请');
-    }
-    const permission = await this.permissionRepo.findOne({ where: { code: request.permissionCode } });
-    if (!permission) throw new BusinessError('申请对应的权限已不存在');
-
-    await this.expireElapsedGrants([request.applicantId]);
-
-    let grant = await this.grantRepo.findOne({
-      where: {
-        userId: request.applicantId,
-        permissionCode: request.permissionCode,
-        scopeType: request.scopeType,
-        scopeId: request.scopeId === null ? IsNull() : request.scopeId,
-        status: 'active',
-      },
-    });
-
-    if (grant && grant.requestId !== request.id) {
-      throw new BusinessError('该范围的权限已通过其他申请开通');
-    }
-
-    if (!grant) {
-      grant = this.grantRepo.create({
-        userId: request.applicantId,
-        permissionId: permission.id,
-        permissionCode: request.permissionCode,
-        scopeType: request.scopeType,
-        scopeId: request.scopeId,
-        scopeName: request.scopeName,
-        source: 'request',
-        status: 'active',
-        startsAt: new Date(),
-        expiresAt: request.expiresAt,
-        approvalInstanceId,
-        requestId: request.id,
-        grantedById: grantedBy?.id ?? null,
-        grantedByName: grantedBy?.name ?? null,
-        reason: request.reason,
-      });
-      try {
-        grant = await this.grantRepo.save(grant);
-      } catch (error) {
-        if (this.isUniqueViolation(error, 'uq_user_permission_grants_active_scope')) {
-          throw new BusinessError('该范围的权限已通过其他申请开通');
-        }
-        throw error;
+    try {
+      const request = await this.requestRepo.findOne({ where: { id: requestId } });
+      if (!request) throw new BusinessError('权限申请不存在');
+      if (request.status !== 'submitted' && request.status !== 'approved') {
+        throw new BusinessError('当前权限申请状态不允许授权');
       }
-    }
+      if (request.expiresAt && request.expiresAt.getTime() <= Date.now()) {
+        throw new BusinessError('权限申请的有效期已过，请驳回后重新申请');
+      }
+      // 用当前 definition.scopeTypes 重新校验申请时的 scopeType 仍被接受：
+      // 权限定义可能在申请提交后被收紧（scopeTypes 收窄），此时不应再按旧范围授予权限。
+      const definition = permissionDefinitionMap.get(request.permissionCode);
+      if (!definition || !definition.scopeTypes || !definition.scopeTypes.includes(request.scopeType)) {
+        throw new BusinessError('该权限申请的范围已不可用，请驳回后重新申请');
+      }
+      const permission = await this.permissionRepo.findOne({ where: { code: request.permissionCode } });
+      if (!permission) throw new BusinessError('申请对应的权限已不存在');
 
-    request.status = 'approved';
-    request.grantId = grant.id;
-    request.currentStep = 0;
-    request.totalSteps = 0;
-    request.approvalInstanceId = approvalInstanceId ?? request.approvalInstanceId;
-    await this.requestRepo.save(request);
-    return grant;
+      await this.expireElapsedGrants([request.applicantId]);
+
+      let grant = await this.grantRepo.findOne({
+        where: {
+          userId: request.applicantId,
+          permissionCode: request.permissionCode,
+          scopeType: request.scopeType,
+          scopeId: request.scopeId === null ? IsNull() : request.scopeId,
+          status: 'active',
+        },
+      });
+
+      if (grant && grant.requestId !== request.id) {
+        throw new BusinessError('该范围的权限已通过其他申请开通');
+      }
+
+      if (!grant) {
+        grant = this.grantRepo.create({
+          userId: request.applicantId,
+          permissionId: permission.id,
+          permissionCode: request.permissionCode,
+          scopeType: request.scopeType,
+          scopeId: request.scopeId,
+          scopeName: request.scopeName,
+          source: 'request',
+          status: 'active',
+          startsAt: new Date(),
+          expiresAt: request.expiresAt,
+          approvalInstanceId,
+          requestId: request.id,
+          grantedById: grantedBy?.id ?? null,
+          grantedByName: grantedBy?.name ?? null,
+          reason: request.reason,
+        });
+        grant = await this.grantRepo.save(grant);
+      }
+
+      request.status = 'approved';
+      request.grantId = grant.id;
+      request.currentStep = 0;
+      request.totalSteps = 0;
+      request.approvalInstanceId = approvalInstanceId ?? request.approvalInstanceId;
+      await this.requestRepo.save(request);
+      return grant;
+    } catch (error) {
+      // 业务校验错误原样上抛，保留可读文案与状态码。
+      if (isBusinessError(error)) throw error;
+      // 唯一约束冲突（并发授权撞同一 active scope）转成可读提示。isUniqueViolation 跨 Postgres/SQLite 方言。
+      if (isUniqueViolation(error)) {
+        throw new BusinessError('该范围的权限已通过其他申请开通');
+      }
+      // 其它底层 DB/运行时错误统一兜底为 503，避免审批路径直接冒泡 500。
+      throw new BusinessError('权限授权失败，请重试', 503);
+    }
   }
 
   async markRejected(requestId: number) {

@@ -68,8 +68,25 @@ export function parseOptionalEnum<T extends string>(value: unknown, field: strin
   return parseEnum(value, field, allowed);
 }
 
+/**
+ * 解析布尔值，接受多方言真/假字面量（大小写不敏感）。
+ * 真：true / "true" / 1 / "1" / "yes" / "y"
+ * 假：false / "false" / 0 / "0" / "no" / "n"
+ * 其它值抛 BusinessError（不再静默按 false 处理，避免节假日 isWorkday 等字段被误判）。
+ */
 export function parseBooleanQuery(value: unknown) {
-  return value === true || value === 'true';
+  // 缺失的可选布尔参数按 false 处理（不抛错），仅"存在但无法识别"才抛。
+  if (value === undefined || value === null || value === '') return false;
+  if (value === true) return true;
+  if (value === false) return false;
+  if (value === 1) return true;
+  if (value === 0) return false;
+  if (typeof value === 'string') {
+    const lower = value.toLowerCase();
+    if (lower === 'true' || lower === '1' || lower === 'yes' || lower === 'y') return true;
+    if (lower === 'false' || lower === '0' || lower === 'no' || lower === 'n') return false;
+  }
+  throw new BusinessError('布尔参数取值无效');
 }
 
 export function parseOptionalBooleanQuery(value: unknown, field: string) {

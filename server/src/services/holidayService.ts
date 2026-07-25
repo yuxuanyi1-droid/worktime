@@ -4,6 +4,7 @@ import { AppDataSource } from '../config/database';
 import { Holiday } from '../entities/Holiday';
 import { OvertimeType } from '../entities/OvertimeApplication';
 import { BusinessError } from '../utils/errors';
+import { logger } from '../utils/logger';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -11,13 +12,23 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  * 进程内缓存：节假日年度变更少，list/infer 命中缓存避免重复查库。
  * upsert/remove 时整体失效（节假日由管理员低频维护，简单清空比按年失效更安全）。
  *
+ * 多副本陈旧兜底：缓存项带短 TTL（HOLIDAY_CACHE_TTL_MS），即使某副本错过 invalidate
+ * 通知（如其它实例直接改库），最坏也只在该 TTL 内返回陈旧数据，不会长期偏移。
+ *
  * listByYear：key 为年份字符串或 'all'（无 year 过滤）。
  * mapByYear：key 为年份字符串，value 为 Map<dateString, isWorkday>，供 inferOvertimeType 做 O(1) 查找。
  */
-interface HolidayCache {
-  listByYear: Map<string, Holiday[]>;
-  mapByYear: Map<string, Map<string, boolean>>;
+interface CacheEntry<T> {
+  value: T;
+  loadedAt: number;
 }
+
+interface HolidayCache {
+  listByYear: Map<string, CacheEntry<Holiday[]>>;
+  mapByYear: Map<string, CacheEntry<Map<string, boolean>>>;
+}
+
+const HOLIDAY_CACHE_TTL_MS = 60_000;
 
 const cache: HolidayCache = {
   listByYear: new Map(),
@@ -42,14 +53,14 @@ export class HolidayService {
   async list(year?: number): Promise<Holiday[]> {
     const key = year ? String(year) : 'all';
     const cached = cache.listByYear.get(key);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.loadedAt < HOLIDAY_CACHE_TTL_MS) return cached.value;
     const qb = this.repo.createQueryBuilder('h');
     if (year) {
       qb.where('h.date LIKE :prefix', { prefix: `${year}-%` });
     }
     qb.orderBy('h.date', 'ASC');
     const result = await qb.getMany();
-    cache.listByYear.set(key, result);
+    cache.listByYear.set(key, { value: result, loadedAt: Date.now() });
     return result;
   }
 
@@ -57,13 +68,18 @@ export class HolidayService {
   private async getMapForYear(year: number): Promise<Map<string, boolean>> {
     const key = String(year);
     const cached = cache.mapByYear.get(key);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.loadedAt < HOLIDAY_CACHE_TTL_MS) return cached.value;
     const list = await this.list(year);
+    if (list.length === 0) {
+      // 该年度节假日日历未配置（可能尚未导入）。inferOvertimeType 将按周末兜底判定，
+      // 不阻断提交（日历可能确实为空且业务允许按周末判），但记日志便于运维感知并补录。
+      logger.warn({ year }, '该年度节假日日历未配置，inferOvertimeType 将按周末兜底判定');
+    }
     const map = new Map<string, boolean>();
     for (const h of list) {
       map.set(h.date, !!h.isWorkday);
     }
-    cache.mapByYear.set(key, map);
+    cache.mapByYear.set(key, { value: map, loadedAt: Date.now() });
     return map;
   }
 

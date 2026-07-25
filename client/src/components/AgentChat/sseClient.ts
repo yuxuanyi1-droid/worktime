@@ -167,6 +167,10 @@ export function startChat(
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
       handlers.onError(e?.message || '读取响应流失败');
+    } finally {
+      // 终态（done/错误/异常/abort）统一释放 reader，避免半开连接累积。
+      // cancel 对已 done 的流是 no-op，安全调用。
+      try { await reader.cancel(); } catch { /* ignore */ }
     }
   })();
 

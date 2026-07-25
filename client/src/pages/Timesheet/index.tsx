@@ -99,6 +99,7 @@ export default function TimesheetPage() {
   const [editing, setEditing] = useState(false); // 编辑模式：控制已提交/已审批行是否可编辑
   const rowSnapshotRef = useRef<Map<string, WeekRow>>(new Map()); // 编辑模式开始时的行快照
   const weekLoadReqId = useRef(0); // 切周请求竞态守卫：只接受最新一次的响应
+  const historyLoadReqId = useRef(0); // 历史记录请求竞态守卫：快速切日期范围时只接受最新响应
 
   // 系统设置：工时填报单位（天步长），默认 0.5 天
   const [unitStep, setUnitStep] = useState<number>(DEFAULT_UNIT);
@@ -113,8 +114,10 @@ export default function TimesheetPage() {
   const canWithdraw = hasPermission('approval:withdraw:self');
   const canFill = canCreate && canViewSelf;
 
-  // 判断当前周是否有已提交/已审批的行
-  const hasSubmittedRows = rows.some(r => r.originalStatus && r.originalStatus !== 'draft');
+  // 判断当前周是否有"已在审批链上"的行（approved/submitted）。
+  // rejected 行不在审批链上——用户应能编辑后重新提交，故不应让其隐藏"保存草稿"按钮。
+  // 之前用 `!== 'draft'` 会把 rejected / withdrawn 误算进来，导致周内有 rejected 行时无法存草稿。
+  const hasSubmittedRows = rows.some(r => r.originalStatus === 'approved' || r.originalStatus === 'submitted');
   // 判断当前周是否有审批中的行（用于区分"撤回修改"和"修改工时"按钮）
   const hasPendingRows = rows.some(r => r.originalStatus === 'submitted');
 
@@ -163,6 +166,8 @@ export default function TimesheetPage() {
       setHistoryData([]);
       return;
     }
+    // 竞态守卫：快速切日期范围时只接受最后一次请求的响应，避免旧响应覆盖新数据
+    const reqId = ++historyLoadReqId.current;
     setHistoryLoading(true);
     try {
       const res = await timesheetApi.getMy({
@@ -171,12 +176,15 @@ export default function TimesheetPage() {
         pageSize: 100,
         includeAll: 'true',
       });
+      if (reqId !== historyLoadReqId.current) return; // 已有更新的请求，丢弃本次响应
       if (res.data) setHistoryData(res.data.list);
     } catch (error) {
+      if (reqId !== historyLoadReqId.current) return;
       message.error(getErrorMessage(error, '工时历史加载失败'));
       setHistoryData([]);
+    } finally {
+      if (reqId === historyLoadReqId.current) setHistoryLoading(false);
     }
-    setHistoryLoading(false);
   };
 
   /** 加载当前周已有的工时数据（含已提交/已通过），填充到周表格 */
@@ -1068,7 +1076,7 @@ export default function TimesheetPage() {
 
       {/* ===== 历史记录 ===== */}
       <Card
-        title="历史记录"
+        title={<Space align="center">历史记录<Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>(仅显示最近 100 条，如需查看更早记录请缩小查询范围)</Text></Space>}
         style={{ borderRadius: 12 }}
         extra={
           <Space>

@@ -481,7 +481,7 @@ export class ApprovalInstanceService {
       { id: instance.id, status: 'pending', currentStepOrder: instance.currentStepOrder as any },
       { currentStepOrder: nextStepOrder },
     );
-    if (((r as any).affected ?? 1) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
+    if (((r as any).affected ?? 0) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
     instance.currentStepOrder = nextStepOrder;
 
     return {

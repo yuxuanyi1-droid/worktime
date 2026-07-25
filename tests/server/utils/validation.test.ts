@@ -90,13 +90,30 @@ describe('parseEnum', () => {
 });
 
 describe('parseBooleanQuery', () => {
-  it('仅 true 与 "true" 为真', () => {
+  it('接受多方言真/假字面量，缺失按 false', () => {
+    // 真：true / "true" / 1 / "1" / "yes" / "y"
     expect(parseBooleanQuery(true)).toBe(true);
     expect(parseBooleanQuery('true')).toBe(true);
+    expect(parseBooleanQuery(1)).toBe(true);
+    expect(parseBooleanQuery('1')).toBe(true);
+    expect(parseBooleanQuery('yes')).toBe(true);
+    expect(parseBooleanQuery('Y')).toBe(true);
+    // 假：false / "false" / 0 / "0" / "no" / "n"
     expect(parseBooleanQuery(false)).toBe(false);
     expect(parseBooleanQuery('false')).toBe(false);
+    expect(parseBooleanQuery(0)).toBe(false);
+    expect(parseBooleanQuery('0')).toBe(false);
+    expect(parseBooleanQuery('no')).toBe(false);
+    expect(parseBooleanQuery('n')).toBe(false);
+    // 缺失的可选布尔参数按 false（不抛错）
     expect(parseBooleanQuery(undefined)).toBe(false);
-    expect(parseBooleanQuery(1)).toBe(false);
+    expect(parseBooleanQuery(null)).toBe(false);
+    expect(parseBooleanQuery('')).toBe(false);
+  });
+
+  it('存在但无法识别的值抛错', () => {
+    expect(() => parseBooleanQuery('maybe')).toThrow('布尔参数取值无效');
+    expect(() => parseBooleanQuery(2)).toThrow('布尔参数取值无效');
   });
 });
 

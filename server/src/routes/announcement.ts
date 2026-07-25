@@ -4,6 +4,7 @@ import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requirePermission, getUserOrgInfo } from '../middleware/permission';
 import {
+  firstQueryValue,
   parseArray,
   parseEnum,
   parseOptionalBooleanQuery,
@@ -124,7 +125,7 @@ router.get('/my', async (req: AuthRequest, res, next) => {
     const data = await announcementService.getForUser(req.user!.id, orgInfo.departmentId, orgInfo.groupId, {
       page,
       pageSize,
-      isRead: parseOptionalBooleanQuery(req.query.isRead, 'isRead'),
+      isRead: parseOptionalBooleanQuery(firstQueryValue(req.query.isRead), 'isRead'),
     });
     res.json({ code: 0, data });
   } catch (error) {

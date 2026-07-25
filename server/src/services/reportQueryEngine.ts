@@ -90,17 +90,6 @@ const UNKNOWN_PROJECT = '未分配项目';
 const UNKNOWN_DEPARTMENT = '未分配部门';
 const UNKNOWN_GROUP = '未分配组别';
 
-// 报表查看相关权限码（用于推导 viewer 可见的数据范围）。
-// 注意：report:custom:view 本身不放大范围，只有 report:view:* 才扩大可见集。
-const REPORT_VIEW_PERMISSIONS = [
-  'report:view:self',
-  'report:view:group',
-  'report:view:department',
-  'report:view:project',
-  'report:view:overtime',
-  'report:view:all',
-];
-
 // ===================== 配置校验 =====================
 
 function parseIdArray(value: unknown, field: string): number[] | undefined {
@@ -277,6 +266,7 @@ async function computeScope(
   accessPolicy: AccessPolicyService,
   viewer: AccessViewer,
   filters: ReportQueryFilters,
+  source: ReportSource,
 ): Promise<ComputedScope> {
   const emptyResult = (over: Partial<ReportQueryFilters> = {}): ComputedScope => ({
     effective: { ...filters, ...over },
@@ -292,21 +282,29 @@ async function computeScope(
     return emptyResult();
   }
 
+  // 按 source 隔离权限码：overtime 源要求 report:view:overtime(/all)；
+  // timesheet 源用 timesheet 相关 report:view:*，避免仅 timesheet 报表权限的用户在自定义报表里读到加班数据。
+  const isOvertimeSource = source === 'overtime';
+  const sourceScopePerms = isOvertimeSource
+    ? ['report:view:overtime', 'report:view:all']
+    : ['report:view:self', 'report:view:group', 'report:view:department', 'report:view:project', 'report:view:all'];
   const perms = await accessPolicy.getPermissionCodes(viewer.id);
-  const hasAnyReportView = REPORT_VIEW_PERMISSIONS.some((code) => perms.has(code));
+  const hasAnyReportView = sourceScopePerms.some((code) => perms.has(code));
 
-  // 规则 2：无任何 report:view:* → 仅本人
+  // 无该 source 的任何报表权限：overtime 源拒绝（加班无 self 兜底）；timesheet 源回退本人
   if (!hasAnyReportView) {
+    if (isOvertimeSource) {
+      return { effective: filters, matchAnyScope: false, denyAll: true };
+    }
     return selfOnlyScope(viewer, filters);
   }
 
+  // 按 source 选择求可访问集的权限码：overtime 源三轴都用 report:view:overtime；timesheet 源按轴类型
+  const axisPerms = isOvertimeSource ? ['report:view:overtime'] : null;
   const [accessibleDept, accessibleGroup, accessibleProject] = await Promise.all([
-    accessPolicy.getAccessibleDepartmentIds(viewer, [
-      'report:view:department',
-      'report:view:overtime',
-    ]),
-    accessPolicy.getAccessibleGroupIds(viewer, ['report:view:group', 'report:view:overtime']),
-    accessPolicy.getAccessibleProjectIds(viewer, ['report:view:project', 'report:view:overtime']),
+    accessPolicy.getAccessibleDepartmentIds(viewer, axisPerms ?? ['report:view:department']),
+    accessPolicy.getAccessibleGroupIds(viewer, axisPerms ?? ['report:view:group']),
+    accessPolicy.getAccessibleProjectIds(viewer, axisPerms ?? ['report:view:project']),
   ]);
 
   // 任一轴返回 null 表示该轴完全开放（如 global 授权）→ 不裁剪，原样使用请求 filters
@@ -335,9 +333,11 @@ async function computeScope(
     return {
       effective: {
         ...filters,
-        departmentIds: deptIds.length ? deptIds : undefined,
-        groupIds: groupIds.length ? groupIds : undefined,
-        projectIds: projectIds.length ? projectIds : undefined,
+        // 仅把用户显式请求的组织轴写回；未请求的轴不参与裁剪，避免多轴权限用户只请求一个轴时
+        // 被偷偷 AND 进其它轴（如部门负责人请求 dept 却被 group 裁掉跨组数据）。
+        departmentIds: requestedDept ? (deptIds.length ? deptIds : undefined) : undefined,
+        groupIds: requestedGroup ? (groupIds.length ? groupIds : undefined) : undefined,
+        projectIds: requestedProject ? (projectIds.length ? projectIds : undefined) : undefined,
       },
       matchAnyScope: false,
       denyAll: false,
@@ -473,7 +473,7 @@ export class ReportQueryEngine {
   async run(configInput: unknown, viewer: AccessViewer): Promise<ReportQueryResult> {
     const config = validateReportQueryConfig(configInput);
     const accessPolicy = new AccessPolicyService(this.manager);
-    const scope = await computeScope(accessPolicy, viewer, config.filters ?? {});
+    const scope = await computeScope(accessPolicy, viewer, config.filters ?? {}, config.source);
 
     const hasSumDays = config.measures.includes('sumDays');
     const hasCount = config.measures.includes('count');

@@ -7,7 +7,6 @@ import {
   firstQueryValue,
   parseArray,
   parseDateString,
-  parseEnum,
   parseDays,
   parseOptionalDateString,
   parseOptionalEnum,
@@ -24,13 +23,11 @@ const overtimeStatuses = ['draft', 'submitted', 'approved', 'rejected', 'withdra
 const overtimeTypes = ['weekend', 'holiday', 'weekday'] as const;
 
 function parseOvertimePayload(body: Record<string, unknown>, partial = false) {
+  // overtimeType 由服务端 inferOvertimeType 按节假日日历权威推断，覆盖客户端传入值，
+  // 因此客户端可省略；这里仅做可选校验，避免强制要求无用占位。
   return {
     date: partial && body.date === undefined ? undefined : parseDateString(body.date, 'date'),
-    overtimeType: partial && body.overtimeType === undefined
-      ? undefined
-      : partial
-      ? parseOptionalEnum(body.overtimeType, 'overtimeType', overtimeTypes)
-      : parseEnum(body.overtimeType, 'overtimeType', overtimeTypes),
+    overtimeType: parseOptionalEnum(body.overtimeType, 'overtimeType', overtimeTypes),
     days: partial && body.days === undefined ? undefined : parseDays(body.days),
     reason: parseString(body.reason, 'reason', { max: 1000 }),
     projectId: partial

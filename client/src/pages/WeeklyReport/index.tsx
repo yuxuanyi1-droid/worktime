@@ -130,14 +130,19 @@ export default function WeeklyReportPage() {
   const saveDraft = async () => {
     const ws = weekStart.format('YYYY-MM-DD');
     const we = weekStart.add(6, 'day').format('YYYY-MM-DD');
+    // 发起时刻快照 + 立即 setDirty(false)：保存期间用户继续编辑会触发 onChange → setDirty(true)，
+    // 若 setDirty(false) 放在 await 之后，会把保存期间新增的 dirty 错误清掉，导致切周/关页丢字。
+    // 这里先快照、立即 setDirty(false)，保证保存期间任何新编辑都会重新置 dirty，且发送的是发起时刻的内容。
+    const contentSnapshot = content;
+    const summarySnapshot = summary;
+    setDirty(false);
     const response = await weeklyReportApi.save({
       weekStart: ws,
       weekEnd: we,
-      content,
-      summary,
+      content: contentSnapshot,
+      summary: summarySnapshot,
     });
     if (response.data && activeWeek.current === ws) setReport(response.data);
-    setDirty(false);
     return response.data;
   };
 

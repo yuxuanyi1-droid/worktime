@@ -625,7 +625,22 @@ export default function Report() {
       a.remove();
       window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
     } catch (err: any) {
-      message.error(getErrorMessage(err, '导出失败'));
+      // responseType:'blob' 时，4xx 响应体是 Blob 而非 JSON，err.response.data.message 取不到。
+      // 需要先用 blob.text() 取出文本再 JSON.parse 解析服务端返回的 message。
+      let errMsg = err?.message || '导出失败';
+      const data = err?.response?.data;
+      if (data instanceof Blob) {
+        try {
+          const text = await data.text();
+          const parsed = JSON.parse(text);
+          if (parsed?.message) errMsg = parsed.message;
+        } catch {
+          // Blob 解析失败时维持默认错误消息
+        }
+      } else if (data?.message) {
+        errMsg = data.message;
+      }
+      message.error(errMsg);
     } finally {
       setExporting(false);
     }

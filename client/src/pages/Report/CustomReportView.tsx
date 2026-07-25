@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -35,6 +35,7 @@ import {
   type CustomReportResult,
   type CustomReportScopeType,
   type CustomReportSource,
+  type ReportOvertimeType,
 } from '../../api/report';
 import type { ReportScope } from '../../types';
 import LazyEChart from '../../components/Charts/LazyEChart';
@@ -73,15 +74,15 @@ const MEASURE_LABEL: Record<CustomReportMeasure, string> = {
   distinctUsers: '人数',
 };
 
+// 与后端 reportQueryEngine.ALLOWED_STATUSES 同源：仅 approved/submitted/draft，
+// rejected/withdrawn 会被后端白名单拒绝导致运行报错，故不暴露。
 const STATUS_OPTIONS = [
   { value: 'draft', label: '草稿' },
   { value: 'submitted', label: '审批中' },
   { value: 'approved', label: '已审批' },
-  { value: 'rejected', label: '已驳回' },
-  { value: 'withdrawn', label: '已撤回' },
 ];
 
-const OVERTIME_TYPE_OPTIONS = [
+const OVERTIME_TYPE_OPTIONS: { value: ReportOvertimeType; label: string }[] = [
   { value: 'weekend', label: '周末加班' },
   { value: 'holiday', label: '节假日加班' },
   { value: 'weekday', label: '工作日加班' },
@@ -213,6 +214,10 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
   const [definitions, setDefinitions] = useState<CustomReportDefinition[]>([]);
   const [defsLoading, setDefsLoading] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  // 非 owner 加载他人共享配置时记录其名称，用于 header 标注"基于他人配置"并提示另存
+  const [basedOnName, setBasedOnName] = useState<string | null>(null);
+  // 运行预览竞态守卫：快速点击/切配置时只接受最新一次的响应，避免旧结果覆盖新结果
+  const runReqId = useRef(0);
 
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveForm] = Form.useForm();
@@ -242,23 +247,26 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
     if (src === 'timesheet') {
       if (config.rowDimension === 'overtimeType') patch.rowDimension = 'user';
       if (config.colDimension === 'overtimeType') patch.colDimension = null;
-      delete nextFilters.overtimeType;
+      delete nextFilters.overtimeTypes;
       patch.filters = nextFilters;
     }
     setConfig({ ...config, ...patch });
   };
 
   const runReport = async (cfg: CustomReportConfig = config) => {
+    const reqId = ++runReqId.current;
     setRunning(true);
     setRunError(null);
     try {
       const res = await customReportApi.run(cfg);
+      if (reqId !== runReqId.current) return; // 已有更新的请求，丢弃过期响应
       setResult(res.data || null);
     } catch (err: any) {
+      if (reqId !== runReqId.current) return;
       setResult(null);
       setRunError(err?.response?.data?.message || err?.message || '运行失败');
     } finally {
-      setRunning(false);
+      if (reqId === runReqId.current) setRunning(false);
     }
   };
 
@@ -279,27 +287,44 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
   }, []);
 
   const loadDefinition = (def: CustomReportDefinition) => {
+    const isOwner = !!currentUserId && def.owner?.id === currentUserId;
     setConfig(def.config);
-    setEditingId(def.id);
+    // 仅 owner 加载时才进入"编辑原报表"态；非 owner 不设 editingId，
+    // 保存时只能"另存为新报表"，避免对他人配置 updateDefinition 触发 403。
+    setEditingId(isOwner ? def.id : null);
+    setBasedOnName(isOwner ? null : def.name);
     setResult(null);
     setRunError(null);
-    message.info(`已加载「${def.name}」配置`);
+    message.info(
+      isOwner
+        ? `已加载「${def.name}」配置`
+        : `已加载「${def.name}」配置（基于他人配置，保存时请另存为新报表）`,
+    );
   };
 
   const handleNew = () => {
     setConfig(makeDefaultConfig());
     setEditingId(null);
+    setBasedOnName(null);
     setResult(null);
     setRunError(null);
   };
 
   const openSave = () => {
     saveForm.resetFields();
-    saveForm.setFieldsValue({ name: '', scope: 'private', scopeGroupId: undefined, scopeDepartmentId: undefined });
+    // owner 编辑已保存报表：回填原名称/范围；非 owner 基于他人配置：建议"副本"名称，走另存
+    const existing = editingId ? definitions.find((d) => d.id === editingId) : undefined;
+    const suggestedName = existing?.name ?? (basedOnName ? `${basedOnName}（副本）` : '');
+    saveForm.setFieldsValue({
+      name: suggestedName,
+      scope: existing?.scope ?? 'private',
+      scopeGroupId: undefined,
+      scopeDepartmentId: undefined,
+    });
     setSaveOpen(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (mode: 'update' | 'create') => {
     let values: any;
     try {
       values = await saveForm.validateFields();
@@ -315,14 +340,18 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
         scopeGroupId: values.scope === 'group' ? values.scopeGroupId : undefined,
         scopeDepartmentId: values.scope === 'department' ? values.scopeDepartmentId : undefined,
       };
-      if (editingId) {
+      if (mode === 'update' && editingId) {
+        // owner 更新原报表
         const res = await customReportApi.updateDefinition(editingId, payload);
         message.success('报表已更新');
         setEditingId(res.data?.id ?? editingId);
+        setBasedOnName(null);
       } else {
+        // 任何人可另存为新报表（清空 editingId 走 createDefinition）
         const res = await customReportApi.createDefinition(payload);
         setEditingId(res.data?.id ?? null);
-        message.success('报表已保存');
+        setBasedOnName(null);
+        message.success('报表已另存为新报表');
       }
       setSaveOpen(false);
       loadDefinitions();
@@ -345,7 +374,14 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
   };
 
   // ==================== 透视表构造 ====================
-  const hasCols = !!result && result.colKeys.length > 0;
+  // 按用户配置判断是否有列维度：后端在无列维度时会回哨兵 [{key:'__TOTAL__',label:''}]，
+  // 若用 colKeys.length>0 判断会恒为 true，导致多出一列空表头。
+  const hasCols = !!config.colDimension;
+  // 防御性过滤掉后端 __TOTAL__ 哨兵列，避免其混入表头/合计行。
+  const filteredColKeys = useMemo(
+    () => (result?.colKeys || []).filter((ck) => ck.key !== '__TOTAL__'),
+    [result],
+  );
 
   const pivotColumns = useMemo(() => {
     if (!result) return [];
@@ -361,7 +397,7 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
       },
     ];
     if (hasCols) {
-      result.colKeys.forEach((ck) => {
+      filteredColKeys.forEach((ck) => {
         cols.push({
           title: ck.label,
           key: `col_${ck.key}`,
@@ -387,7 +423,7 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
       });
     }
     return cols;
-  }, [result, config.measures, rowDimLabel, hasCols]);
+  }, [result, config.measures, rowDimLabel, hasCols, filteredColKeys]);
 
   const pivotData: PivotRow[] = useMemo(() => {
     if (!result) return [];
@@ -422,6 +458,8 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
         extra={
           editingId ? (
             <Tag color="blue">正在编辑已保存报表</Tag>
+          ) : basedOnName ? (
+            <Tag color="orange">基于他人配置：{basedOnName}</Tag>
           ) : (
             <Tag color="default">未保存配置</Tag>
           )
@@ -482,7 +520,12 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
                 value={config.measures}
                 onChange={(vals) => {
                   const measures = vals as CustomReportMeasure[];
-                  updateConfig({ measures: measures.length === 0 ? config.measures : measures });
+                  // 至少保留一个度量：清空时告警并回退（受控值不变，视觉自动回勾最后一个）
+                  if (measures.length === 0) {
+                    message.warning('至少保留一个度量');
+                    return;
+                  }
+                  updateConfig({ measures });
                 }}
                 options={MEASURE_OPTIONS}
               />
@@ -567,12 +610,14 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
             {config.source === 'overtime' && (
               <Col xs={24} sm={12} md={6}>
                 <Select
+                  mode="multiple"
                   allowClear
                   placeholder="加班类型（全部）"
                   style={{ width: '100%' }}
-                  value={config.filters.overtimeType}
-                  onChange={(v?: string) => updateConfig({ filters: { ...config.filters, overtimeType: v || undefined } })}
+                  value={config.filters.overtimeTypes || []}
+                  onChange={(vals: ReportOvertimeType[]) => updateConfig({ filters: { ...config.filters, overtimeTypes: vals.length ? vals : undefined } })}
                   options={OVERTIME_TYPE_OPTIONS}
+                  maxTagCount="responsive"
                 />
               </Col>
             )}
@@ -628,6 +673,14 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
             <Row gutter={[16, 16]}>
               <Col xs={24} xl={12}>
                 <Card type="inner" title="图表" style={{ borderRadius: 8 }}>
+                  {chartType === 'pie' && config.measures.length > 1 && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message={`饼图仅展示第一个度量（${MEASURE_LABEL[config.measures[0]]}），切柱状图/折线图可查看全部度量`}
+                      style={{ marginBottom: 12 }}
+                    />
+                  )}
                   {chartOption && hasChartData(chartOption) ? (
                     <LazyEChart option={chartOption} style={{ height: 320 }} />
                   ) : (
@@ -651,12 +704,12 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
                           <Table.Summary.Cell key="label" index={0}>
                             <Text strong>总计</Text>
                           </Table.Summary.Cell>,
-                          ...result.colKeys.map((ck, i) => (
+                          ...filteredColKeys.map((ck, i) => (
                             <Table.Summary.Cell key={ck.key} index={i + 1} align="right">
                               {renderCell(result.colTotals[ck.key], config.measures)}
                             </Table.Summary.Cell>
                           )),
-                          <Table.Summary.Cell key="grand" index={result.colKeys.length + 1} align="right">
+                          <Table.Summary.Cell key="grand" index={filteredColKeys.length + 1} align="right">
                             {renderCell(result.grandTotal, config.measures)}
                           </Table.Summary.Cell>,
                         ];
@@ -759,13 +812,22 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
       {/* ==================== 保存 / 编辑 弹窗 ==================== */}
       <Modal
         open={saveOpen}
-        title={editingId ? '更新报表' : '保存报表'}
+        title={editingId ? '更新 / 另存报表' : '保存为新报表'}
         onCancel={() => setSaveOpen(false)}
-        confirmLoading={saving}
-        onOk={handleSave}
-        okText={editingId ? '更新' : '保存'}
-        cancelText="取消"
         destroyOnClose
+        footer={
+          <Space>
+            <Button onClick={() => setSaveOpen(false)}>取消</Button>
+            {editingId && (
+              <Button type="primary" loading={saving} onClick={() => handleSave('update')}>
+                更新原报表
+              </Button>
+            )}
+            <Button type={editingId ? 'default' : 'primary'} loading={saving} onClick={() => handleSave('create')}>
+              {editingId ? '另存为新报表' : '保存为新报表'}
+            </Button>
+          </Space>
+        }
       >
         <Form form={saveForm} layout="vertical" preserve={false}>
           <Form.Item

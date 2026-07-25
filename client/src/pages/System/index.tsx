@@ -2525,7 +2525,9 @@ function HolidayTab() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false); // 未保存标志：切年/保存成功/加载完成后重置
   const loadRequestId = useRef(0);
+  const originalCountRef = useRef(0); // 该年从服务端加载时的原始记录数，用于保存确认文案
 
   const load = async () => {
     const requestId = ++loadRequestId.current;
@@ -2534,7 +2536,10 @@ function HolidayTab() {
     try {
       const res = await systemApi.getHolidays(year);
       if (requestId !== loadRequestId.current) return;
-      setItems((res.data || []).map(h => ({ ...h })));
+      const list = (res.data || []).map(h => ({ ...h }));
+      originalCountRef.current = list.length;
+      setItems(list);
+      setDirty(false); // 加载完成（或切换到另一年）后重置未保存标志
     } catch (error: any) {
       if (requestId === loadRequestId.current) {
         setLoadError(error?.response?.data?.message || '节假日日历加载失败');
@@ -2551,17 +2556,41 @@ function HolidayTab() {
 
   const updateRow = (index: number, patch: Partial<HolidayItem>) => {
     setItems(prev => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+    setDirty(true);
   };
 
   const addRow = () => {
-    setItems(prev => [...prev, { date: `${year}-01-01`, name: '', isWorkday: false }]);
+    // 默认日期给空串：避免连点"新增行"时多条同主键（之前默认 `${year}-01-01` 会冲突）。
+    // 用户必须显式选择日期，保存校验里也会检查空日期与重复日期。
+    setItems(prev => [...prev, { date: '', name: '', isWorkday: false }]);
+    setDirty(true);
   };
 
   const removeRow = (index: number) => {
     setItems(prev => prev.filter((_, i) => i !== index));
+    setDirty(true);
   };
 
-  const handleSave = async () => {
+  // 切年守卫：若有未保存的改动，弹确认框，避免静默丢失。
+  const changeYear = (next: number) => {
+    if (next === year) return;
+    if (!dirty) {
+      setYear(next);
+      return;
+    }
+    Modal.confirm({
+      title: '放弃未保存的修改？',
+      content: '切换年份后，当前编辑的节假日配置将不会保留。',
+      okText: '放弃并切换',
+      cancelText: '继续编辑',
+      onOk: () => {
+        setDirty(false);
+        setYear(next);
+      },
+    });
+  };
+
+  const handleSave = () => {
     for (const item of items) {
       if (!item.date || !item.name?.trim()) {
         message.warning('每行必须填写日期和名称');
@@ -2572,19 +2601,40 @@ function HolidayTab() {
         return;
       }
     }
-    setSaving(true);
-    try {
-      await systemApi.setHolidays(
-        year,
-        items.map(i => ({ date: i.date, name: i.name.trim(), isWorkday: !!i.isWorkday })),
-      );
-      message.success('节假日日历已保存');
-      await load();
-    } catch {
-      // 请求拦截器统一展示服务端错误。
-    } finally {
-      setSaving(false);
+    // 重复日期校验（同主键后写覆盖先写，但更友好的做法是显式提示）
+    const seen = new Set<string>();
+    for (const item of items) {
+      if (seen.has(item.date)) {
+        message.warning(`存在重复日期：${item.date}，请删除或修改重复项`);
+        return;
+      }
+      seen.add(item.date);
     }
+    const writeCount = items.length;
+    const originalCount = originalCountRef.current;
+    // upsertYear 会先删除该年全部记录再插入：保存前弹确认，列出写入与覆盖数。
+    Modal.confirm({
+      title: `确认覆盖 ${year} 年节假日配置？`,
+      content: `此次将写入 ${writeCount} 条记录，并覆盖 ${year} 年原有的 ${originalCount} 条配置。`,
+      okText: '确认覆盖保存',
+      cancelText: '取消',
+      onOk: async () => {
+        setSaving(true);
+        try {
+          await systemApi.setHolidays(
+            year,
+            items.map(i => ({ date: i.date, name: i.name.trim(), isWorkday: !!i.isWorkday })),
+          );
+          message.success('节假日日历已保存');
+          setDirty(false);
+          await load();
+        } catch {
+          // 请求拦截器统一展示服务端错误。
+        } finally {
+          setSaving(false);
+        }
+      },
+    });
   };
 
   const handleDeleteSingle = async (date: string) => {
@@ -2698,7 +2748,7 @@ function HolidayTab() {
             min={2000}
             max={2100}
             value={year}
-            onChange={(v) => setYear(v || currentYear)}
+            onChange={(v) => changeYear(v || currentYear)}
             style={{ width: 100 }}
           />
           <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} />

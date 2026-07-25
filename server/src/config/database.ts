@@ -48,6 +48,7 @@ import { ApprovalFlowDefaultConstraint1700000000013 } from '../migrations/170000
 import { PermissionGrantConsistency1700000000014 } from '../migrations/1700000000014-PermissionGrantConsistency';
 import { OrganizationSiblingConstraint1700000000015 } from '../migrations/1700000000015-OrganizationSiblingConstraint';
 import { ExternalIdentityProviderConstraint1700000000016 } from '../migrations/1700000000016-ExternalIdentityProviderConstraint';
+import { DataIntegrityConstraints1700000000017 } from '../migrations/1700000000017-DataIntegrityConstraints';
 import { HolidayCalendar1700000000018 } from '../migrations/1700000000018-HolidayCalendar';
 import { ReportDefinitions1700000000019 } from '../migrations/1700000000019-ReportDefinitions';
 
@@ -88,6 +89,7 @@ const migrations = [
   PermissionGrantConsistency1700000000014,
   OrganizationSiblingConstraint1700000000015,
   ExternalIdentityProviderConstraint1700000000016,
+  DataIntegrityConstraints1700000000017,
   HolidayCalendar1700000000018,
   ReportDefinitions1700000000019,
 ];
