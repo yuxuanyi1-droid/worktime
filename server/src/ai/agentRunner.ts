@@ -103,6 +103,16 @@ export function startWorker(): Promise<void> {
         setAiWorkerStats(message.stats || {});
         return;
       }
+      if (message.type === 'session-disposed' && message.sessionId) {
+        // worker 侧（空闲/容量）淘汰会话后同步清理主线程跟踪态，使下次访问走 openSession 重开
+        const sid = message.sessionId;
+        const owner = sessionOwners.get(sid);
+        sessionOwners.delete(sid);
+        sessionCallbacks.delete(sid);
+        sessionTokenRefreshAt.delete(sid);
+        if (owner !== undefined) openingSessions.delete(`${owner}:${sid}`);
+        return;
+      }
       if (message.type === 'error' && !message.requestId && !message.sessionId && !workerReady) {
         clearStartupTimer();
         const error = new Error(message.message || 'pi worker 启动失败');

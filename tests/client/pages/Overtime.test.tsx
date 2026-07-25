@@ -19,7 +19,10 @@ vi.mock('@client/api/overtime', () => ({
 }));
 
 vi.mock('@client/api/system', () => ({
-  systemApi: { getActiveProjects: vi.fn() },
+  systemApi: {
+    getActiveProjects: vi.fn(),
+    getHolidays: vi.fn().mockResolvedValue({ code: 0, data: [] }),
+  },
 }));
 
 vi.mock('@client/api/approval', () => ({

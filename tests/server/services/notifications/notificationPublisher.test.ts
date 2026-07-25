@@ -12,6 +12,9 @@ function config(enabled: boolean): TtRobotConfig {
     baseUrl: 'https://apimarket.myoas.com',
     timeoutMs: 5000,
     batchSize: 2000,
+    maxRetries: 3,
+    retryBaseDelayMs: 300,
+    batchIntervalMs: 200,
   };
 }
 

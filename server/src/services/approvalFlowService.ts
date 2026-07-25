@@ -239,9 +239,13 @@ export class ApprovalFlowEngine {
         if (!applicant.group) return [];
 
         const projectCfg = await this.getProjectApprovalConfig(projectId);
-        // 沿组层级向上查找匹配的SE
+        // 沿组层级向上查找匹配的SE。visited 集合防止组 parent 链出现循环引用（互指）时无限循环。
         let searchGroupId: number | null = applicant.group.id;
+        const visited = new Set<number>();
         while (searchGroupId) {
+          if (visited.has(searchGroupId)) return []; // 检测到组层级循环引用，终止查找
+          visited.add(searchGroupId);
+
           const validSes = projectCfg.moduleSEs
             .filter((se) => se.groupId === searchGroupId)
             .map((se) => ({ userId: se.userId, userName: se.userName }));

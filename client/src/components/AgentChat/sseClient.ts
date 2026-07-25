@@ -1,4 +1,5 @@
 import { useAuthStore } from '../../stores/authStore';
+import { authApi } from '../../api/auth';
 
 /**
  * Agent 聊天的 SSE 客户端。
@@ -7,6 +8,9 @@ import { useAuthStore } from '../../stores/authStore';
  * 绕过 utils/request.ts 的 axios 实例（其响应拦截器会把流当 JSON 解析、且 timeout 30s 会断流）。
  *
  * 解析 SSE 帧：`data: <json>\n\n`，每帧的 json 即一个 pi 事件对象（含 type 字段）。
+ *
+ * 401 处理：与 axios 实例的静默刷新保持一致——先用 refresh token 续期一次，
+ * 成功则用新 access token 重连；失败（或续期前就没有 refresh token）再走清态登出。
  */
 
 export interface SseHandlers {
@@ -33,34 +37,73 @@ export function startChat(
   handlers: SseHandlers,
 ): AbortController {
   const controller = new AbortController();
-  const token = localStorage.getItem('token');
+
+  const doFetch = (token: string | null): Promise<Response> =>
+    fetch(buildUrl(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+  // 终态：登录失效，清态并通知 UI 登出
+  const terminateAsUnauthorized = () => {
+    useAuthStore.getState().clearAuth();
+    handlers.onError('登录已失效');
+    window.dispatchEvent(new CustomEvent('unauthorized'));
+  };
 
   (async () => {
+    let token = localStorage.getItem('token');
     let res: Response;
     try {
-      res = await fetch(buildUrl(), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      res = await doFetch(token);
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
       handlers.onError(e?.message || '网络连接失败');
       return;
     }
 
-    // 401：登录失效，触发全局退出
+    // 401：先尝试一次 refresh，成功则用新 token 重连；失败/无 refresh token 则登出
     if (res.status === 401) {
-      useAuthStore.getState().clearAuth();
-      handlers.onError('登录已失效');
-      window.dispatchEvent(new CustomEvent('unauthorized'));
-      return;
+      const refreshToken = useAuthStore.getState().refreshToken;
+      let refreshed = false;
+      if (refreshToken) {
+        try {
+          const r = await authApi.refresh(refreshToken);
+          const cur = useAuthStore.getState();
+          if (cur.user) {
+            cur.setAuth(r.data.token, cur.user, cur.refreshToken);
+            token = r.data.token;
+            refreshed = true;
+          }
+        } catch {
+          refreshed = false;
+        }
+      }
+      if (!refreshed) {
+        terminateAsUnauthorized();
+        return;
+      }
+      // 用新 token 重连一次
+      try {
+        res = await doFetch(token);
+      } catch (e: any) {
+        if (e?.name === 'AbortError') return;
+        handlers.onError(e?.message || '网络连接失败');
+        return;
+      }
+      // 重连后仍然 401：refresh token 也已失效，登出
+      if (res.status === 401) {
+        terminateAsUnauthorized();
+        return;
+      }
     }
+
     // 503：AI 未配置；429：限流；其他非 2xx
     if (!res.ok) {
       let msg = `请求失败（${res.status}）`;

@@ -61,7 +61,7 @@ export default function Login() {
     try {
       const res = await authApi.login(values);
       if (res.data) {
-        setAuth(res.data.token, res.data.user);
+        setAuth(res.data.token, res.data.user, res.data.refreshToken);
         message.success('登录成功');
         const redirect = safeInternalRedirect(searchParams.get('redirect'));
         navigate(redirect);

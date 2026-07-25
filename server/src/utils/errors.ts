@@ -22,3 +22,17 @@ export class BusinessError extends Error {
 export function isBusinessError(error: unknown): error is BusinessError {
   return error instanceof BusinessError;
 }
+
+/**
+ * 判定是否为唯一约束冲突（跨驱动）：
+ * - Postgres：error.code === '23505'（unique_violation）
+ * - SQLite：message 含 "UNIQUE constraint failed"
+ * 用于把并发提交撞唯一索引的底层错误转成可读的 BusinessError。
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const e = error as { code?: string; errno?: number; message?: string };
+  if (e.code === '23505') return true;
+  const msg = String(e.message || '');
+  return /UNIQUE constraint failed/i.test(msg);
+}

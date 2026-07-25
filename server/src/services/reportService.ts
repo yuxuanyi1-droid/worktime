@@ -7,6 +7,7 @@ import { Between, Not } from 'typeorm';
 import { ApprovalService } from './approvalService';
 import { BusinessError } from '../utils/errors';
 import { round2 } from '../utils/validation';
+import { businessMonthRange, businessWeekRange } from '../utils/time';
 
 type SummaryWithCount = { days: number; count: number };
 type SummaryHours = { days: number };
@@ -48,6 +49,25 @@ function totalOfDates(byDate: Record<string, number>) {
 }
 
 /**
+ * 报表日期范围上限保护（防 OOM）：默认最多 366 天。
+ * 报表/导出目前会把范围内记录全部载入内存做去重与汇总，过大的范围（如 10 年）
+ * 可能拉取海量记录导致进程 OOM。这里在入口处拒绝超大范围，提示缩小查询条件。
+ * 完整的流式/分批重构改动较大，暂以范围上限 + 注释作为兜底防护。
+ */
+const REPORT_MAX_RANGE_DAYS = 366;
+export function assertReportRange(startDate: string, endDate: string, maxDays = REPORT_MAX_RANGE_DAYS) {
+  const start = new Date(`${startDate}T00:00:00.000Z`);
+  const end = new Date(`${endDate}T00:00:00.000Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new BusinessError('报表日期范围格式无效');
+  }
+  const diffDays = Math.floor((end.getTime() - start.getTime()) / 86_400_000);
+  if (diffDays > maxDays) {
+    throw new BusinessError(`报表日期范围不能超过 ${maxDays} 天，请缩小查询范围`);
+  }
+}
+
+/**
  * 报表工时去重：按 (userId, projectId, date) 取最新的已审批通过（approved）的 submissionGroup 的记录。
  * 抽成独立导出函数便于单元测试。
  *
@@ -72,6 +92,9 @@ export function dedupReportTimesheets(records: Timesheet[]): Timesheet[] {
   return records.filter(r => {
     if (r.status !== 'approved') return false;
     const key = `${r.userId}_${r.projectId}_${r.date}`;
+    // submissionGroupId 为 null 的历史 approved（特性上线前提交、未经版本链）：
+    // 仅当该 key 不存在带组号的 approved 时纳入，避免这些历史工时从报表/导出中消失、合计偏低。
+    if (!r.submissionGroupId) return !maxApprovedGroupByKey.has(key);
     return r.submissionGroupId === maxApprovedGroupByKey.get(key);
   });
 }
@@ -144,27 +167,34 @@ export class ReportService {
   }
 
   async getPersonalReport(userId: number, startDate: string, endDate: string) {
+    assertReportRange(startDate, endDate);
     const records = await this.getReportTimesheets(startDate, endDate, { userId });
     return this.summarizeTimesheets(records);
   }
 
   async getGroupReport(groupId: number, startDate: string, endDate: string, groupIds?: number[]) {
+    assertReportRange(startDate, endDate);
     const records = await this.getReportTimesheets(startDate, endDate, { groupId, groupIds });
     return this.summarizeTimesheets(records);
   }
 
   async getDepartmentReport(departmentId: number, startDate: string, endDate: string, filters: ReportFilters = {}) {
+    assertReportRange(startDate, endDate);
     const records = await this.getReportTimesheets(startDate, endDate, { ...filters, departmentId });
     return this.summarizeTimesheets(records);
   }
 
   async getProjectReport(projectId: number, startDate: string, endDate: string, filters: ReportFilters = {}) {
+    assertReportRange(startDate, endDate);
     const qb = this.timesheetRepo.createQueryBuilder('t')
       .leftJoinAndSelect('t.user', 'u')
       .leftJoinAndSelect('t.project', 'p')
       .where('p.id = :projectId', { projectId })
       .andWhere('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
-      .andWhere('t.status IN (:...statuses)', { statuses: ['approved', 'submitted'] });
+      // 只统计 approved：dedupReportTimesheets 会丢弃 submitted/draft 等状态，
+      // 此前同时拉取 submitted 属于无效查询（必然被去重丢弃），这里改为只查 approved，
+      // 与 getReportTimesheets 口径一致，减少无效数据载入。
+      .andWhere('t.status = :status', { status: 'approved' });
 
     if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
     else if (filters.departmentId) qb.andWhere('t.departmentSnapshotId = :departmentId', { departmentId: filters.departmentId });
@@ -187,6 +217,7 @@ export class ReportService {
     if (!hasScope && !allowAll) {
       throw new BusinessError('加班报表缺少数据范围约束');
     }
+    assertReportRange(startDate, endDate);
     const qb = this.overtimeRepo.createQueryBuilder('o')
       .leftJoinAndSelect('o.user', 'u')
       .leftJoinAndSelect('o.project', 'p')
@@ -225,6 +256,11 @@ export class ReportService {
       acc[key] = round2((acc[key] || 0) + Number(record.days));
       return acc;
     }, {} as Record<string, number>);
+    // 已知不一致（保留，未统一）：加班报表的 byUser 为 Record<string, number>（仅天数），
+    // 而普通报表（summarizeTimesheets）的 byUser 为 Record<string, { days, count }>。
+    // 强行统一会同时破坏 server 集成测试（reportService.integration.test.ts 断言数字形态）
+    // 与前端契约（Report.test.tsx 的加班 mock 也按数字形态），属于跨层契约变更，风险超出本 LOW 修复范围。
+    // 如后续要统一，建议统一到 { days, count } 并同步更新前端与测试。
     const byGroup = records.reduce((acc, record) => {
       addHoursSummary(acc, record.groupSnapshotName || UNKNOWN_GROUP, Number(record.days));
       return acc;
@@ -239,12 +275,9 @@ export class ReportService {
     approvals: boolean;
     weeklyReport: boolean;
   }) {
-    const now = new Date();
-    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-    const monthEnd = formatLocalDate(new Date(now.getFullYear(), now.getMonth() + 1, 0));
-    const isoWeekday = now.getDay() || 7;
-    const weekStart = formatLocalDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - isoWeekday + 1));
-    const weekEnd = formatLocalDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - isoWeekday + 7));
+    // 周/月边界统一按业务时区 Asia/Shanghai 计算，避免容器 UTC 部署下边界偏移 8 小时
+    const { monthStart, monthEnd } = businessMonthRange();
+    const { weekStart, weekEnd } = businessWeekRange();
 
     // 本月工时：一次查询同时算 monthDays 和 trend（两者 where 条件相同，避免重复查询）
     const [monthTimesheets, pendingResult, monthOvertime, draftTimesheetCount, weeklyReport] = await Promise.all([

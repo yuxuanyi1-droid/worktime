@@ -8,6 +8,10 @@ export const authApi = {
   logout: () =>
     request.post<any, { code: number }>('/auth/logout'),
 
+  /** 用 refresh token 换取新的短期 access token。失败（过期/版本不符）后端返回 401。 */
+  refresh: (refreshToken: string) =>
+    request.post<any, { code: number; data: { token: string } }>('/auth/refresh', { refreshToken }),
+
   getProfile: () =>
     request.get<any, { code: number; data: UserInfo }>('/auth/profile'),
 

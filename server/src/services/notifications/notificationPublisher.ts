@@ -93,9 +93,34 @@ export class NotificationPublisher {
     options: PublishNotificationOptions = {},
   ) {
     const uniqueUserIds = Array.from(new Set(userIds.filter(id => Number.isInteger(id) && id > 0)));
-    const notifications = await this.inApp.createBatch(uniqueUserIds, notification);
+    const notifications = await this.persistInApp(uniqueUserIds, notification);
+    if (!notifications.length) {
+      return { notifications, ttStatus: 'failed' as TtPublishStatus };
+    }
     const ttStatus = await this.publishToTt(uniqueUserIds, notification, options);
     return { notifications, ttStatus };
+  }
+
+  /**
+   * 持久化站内通知。失败时记录完整上下文并返回空数组——通知投递属于 best-effort，
+   * 不应阻断业务事务；调用方可通过返回数组长度判断是否投递成功。
+   */
+  private async persistInApp(
+    userIds: number[],
+    notification: PublishNotificationInput,
+  ) {
+    try {
+      return await this.inApp.createBatch(userIds, notification);
+    } catch (error) {
+      logger.error({
+        err: error,
+        notificationType: notification.type,
+        targetType: notification.targetType,
+        targetId: notification.targetId,
+        audienceSize: userIds.length,
+      }, '站内通知持久化失败，已跳过 TT 推送');
+      return [];
+    }
   }
 
   /** 仅发送 TT，不创建站内通知，适用于公告和定时提醒等已有独立站内载体的功能。 */
@@ -192,7 +217,13 @@ export class NotificationPublisher {
       await this.tt.batchSendMessages(employeeIds, message);
       return 'sent';
     } catch (error) {
-      logger.warn({ err: error, userCount: userIds.length }, 'TT 通知发送失败，已保留站内通知');
+      logger.warn({
+        err: error,
+        notificationType: notification.type,
+        targetType: notification.targetType,
+        targetId: notification.targetId,
+        audienceSize: userIds.length,
+      }, 'TT 通知发送失败，已保留站内通知');
       if (options.throwOnTtFailure) throw error;
       return 'failed';
     }

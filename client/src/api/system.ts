@@ -33,6 +33,12 @@ export interface TimesheetReminderConfig {
   message: string;
 }
 
+export interface HolidayItem {
+  date: string; // YYYY-MM-DD
+  name: string;
+  isWorkday: boolean; // false=法定休息日/节假日；true=调休补班日
+}
+
 export const systemApi = {
   // 部门
   getDepartments: () => request.get<any, { code: number; data: Department[] }>('/system/departments'),
@@ -97,4 +103,9 @@ export const systemApi = {
   // 系统设置
   getSettings: () => request.get<any, { code: number; data: { list: any[]; settings: Record<string, string> } }>('/system/settings'),
   updateSetting: (key: string, value: string) => request.put<any, { code: number }>(`/system/settings/${key}`, { value }),
+
+  // 节假日日历
+  getHolidays: (year?: number) => request.get<any, { code: number; data: HolidayItem[] }>('/system/holidays', { params: { year } }),
+  setHolidays: (year: number, items: HolidayItem[]) => request.put<any, { code: number }>('/system/holidays', { year, items }),
+  deleteHoliday: (date: string) => request.delete<any, { code: number }>(`/system/holidays/${date}`),
 };

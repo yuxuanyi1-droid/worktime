@@ -144,14 +144,28 @@ export class TimesheetReminderScheduler {
       if (config.time !== local.time || !config.weekdays.includes(local.weekday)) return;
       if (!await this.claimSlot(local.slot)) return;
 
-      const userIds = await new UserAudienceService().resolveUserIds(config);
-      const ttStatus = await new NotificationPublisher().publishTtOnly(userIds, {
-        type: 'timesheet_reminder',
-        title: '工时填写提醒',
-        content: config.message,
-        targetType: 'timesheet',
-      });
-      logger.info({ slot: local.slot, targetCount: userIds.length, ttStatus }, '[timesheet-reminder] 提醒任务执行完成');
+      try {
+        const userIds = await new UserAudienceService().resolveUserIds(config);
+        // 站内通知（可靠载体）+ best-effort TT：未绑 SIAM 或 TT 失败时用户仍可在站内收到，
+        // 同时形成可审计的提醒记录（原 publishTtOnly 不建站内通知，失败即无痕）。
+        const result = await new NotificationPublisher().publishToUsers(userIds, {
+          type: 'timesheet_reminder',
+          title: '工时填写提醒',
+          content: config.message,
+          targetType: 'timesheet',
+        });
+        if (userIds.length && !result.notifications?.length) {
+          // 站内投递失败：释放槽位以便下一 tick 重试，避免该周提醒永久丢失
+          await this.releaseSlot(local.slot);
+          logger.warn({ slot: local.slot, targetCount: userIds.length, ttStatus: result.ttStatus }, '[timesheet-reminder] 站内通知投递失败，已释放槽位待重试');
+          return;
+        }
+        logger.info({ slot: local.slot, targetCount: userIds.length, ttStatus: result.ttStatus }, '[timesheet-reminder] 提醒任务执行完成');
+      } catch (error) {
+        // 发送过程异常：释放槽位以便重试（错误由外层 catch 记录）
+        await this.releaseSlot(local.slot).catch(() => undefined);
+        throw error;
+      }
     } catch (error) {
       logger.error({ err: error }, '[timesheet-reminder] 提醒任务执行失败');
     } finally {
@@ -180,6 +194,15 @@ export class TimesheetReminderScheduler {
       await repo.save(setting);
       return true;
     });
+  }
+
+  /** 释放已占用的槽位，使下一 tick 可重试（仅在投递失败时调用）。 */
+  private async releaseSlot(slot: string): Promise<void> {
+    try {
+      await AppDataSource.getRepository(SystemSetting).delete({ key: LAST_SLOT_SETTING_KEY });
+    } catch (err) {
+      logger.warn({ err, slot }, '[timesheet-reminder] 释放槽位失败');
+    }
   }
 }
 

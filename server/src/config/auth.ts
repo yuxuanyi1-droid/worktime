@@ -1,4 +1,5 @@
 import './env'; // 加载根 .env（端口）+ server/.env（含 JWT_SECRET）
+import crypto from 'node:crypto';
 
 const jwtSecret = process.env.JWT_SECRET;
 
@@ -17,13 +18,24 @@ const WEAK_SECRETS = new Set([
 if (WEAK_SECRETS.has(jwtSecret)) {
   throw new Error('JWT_SECRET 是已知的弱密钥或占位符，请生成一个至少 32 字符的随机密钥');
 }
-if (jwtSecret.length < 16) {
+if (jwtSecret.length < 32) {
   throw new Error(`JWT_SECRET 长度不足（${jwtSecret.length} 字符），请使用至少 32 字符的随机密钥`);
 }
 
 export const authConfig = {
   jwtSecret,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '24h',
+  /**
+   * Refresh token 签名密钥。优先用独立的 JWT_REFRESH_SECRET（运维隔离两种 token 的签名密钥）；
+   * 未配置时从 jwtSecret 派生（HMAC-sha256，域分离标签 'refresh-v1'），保证派生密钥足够强且与
+   * access token / OIDC state 密钥互不相同——即使其中一项泄漏，攻击者也无法直接伪造另一种 token。
+   * jwtSecret 已通过上方的强度校验（≥32 字符、非弱占位符），派生出的 HMAC 同样满足长度与熵要求，
+   * 此处无需再重复 throw。
+   */
+  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET
+    || crypto.createHmac('sha256', jwtSecret).update('refresh-v1').digest('hex'),
+  /** Refresh token 有效期，默认 7 天（远长于 access token 的 24h，保证长表单编辑中途不丢会话） */
+  refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
 };
 
 // ==================== OIDC / 第三方登录配置 ====================
@@ -81,8 +93,11 @@ function parseProviders(): Record<string, OidcProviderConfig> {
 export const oidcConfig = {
   /** 所有 provider 定义（环境变量层） */
   providers: parseProviders(),
-  /** state HMAC 签名密钥（未配置时回退到 jwtSecret） */
-  stateSecret: process.env.OIDC_STATE_SECRET || jwtSecret,
+  /**
+   * state HMAC 签名密钥。优先用独立的 OIDC_STATE_SECRET；
+   * 未配置时从 jwtSecret 派生（HMAC），实现密钥用途隔离，避免与 JWT 签名共用同一原值。
+   */
+  stateSecret: process.env.OIDC_STATE_SECRET || crypto.createHmac('sha256', jwtSecret).update('oidc-state-v1').digest('hex'),
   /** state 有效期（毫秒），默认 10 分钟 */
   stateTtlMs: 10 * 60 * 1000,
 };

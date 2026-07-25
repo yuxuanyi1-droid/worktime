@@ -75,7 +75,7 @@ export default function OidcCallbackPage() {
 
       // 登录模式：响应里有 token + user
       if ('token' in res.data && typeof res.data.token === 'string') {
-        setAuth(res.data.token, res.data.user);
+        setAuth(res.data.token, res.data.user, res.data.refreshToken);
         message.success('登录成功');
         const serverRedirect = 'redirect' in res.data && typeof res.data.redirect === 'string'
           ? res.data.redirect

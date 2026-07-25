@@ -95,10 +95,10 @@ describe('认证路由安全契约', () => {
   it('修改密码保留原始空格并记录审计', async () => {
     const change = vi.spyOn(AuthService.prototype, 'changePassword').mockResolvedValue(undefined);
     const response = await request(app).put('/auth/change-password').send({
-      oldPassword: ' old password ', newPassword: ' new password ',
+      oldPassword: ' old password ', newPassword: ' NewPass 1 ',
     });
     expect(response.status).toBe(200);
-    expect(change).toHaveBeenCalledWith(7, ' old password ', ' new password ');
+    expect(change).toHaveBeenCalledWith(7, ' old password ', ' NewPass 1 ');
     expect(AuditService.prototype.log).toHaveBeenCalledWith(expect.objectContaining({
       action: 'change_password', targetId: 7,
     }));

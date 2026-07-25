@@ -117,6 +117,21 @@ router.put('/:id', requirePermission('overtime:update:self'), async (req: AuthRe
   }
 });
 
+// 编辑后原子重新提交审批（update + submit 单事务）
+router.post('/update-submit/:id', requireAllPermissions('overtime:update:self', 'overtime:submit:self'), async (req: AuthRequest, res, next) => {
+  try {
+    const body = req.body as Record<string, unknown>;
+    const data = await overtimeService.updateAndSubmit(
+      parsePositiveInt(req.params.id, 'id'),
+      req.user!.id,
+      parseOvertimePayload(body, true),
+    );
+    res.json({ code: 0, data, message: '提交成功' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // 删除加班
 router.delete('/:id', requirePermission('overtime:delete:self'), async (req: AuthRequest, res, next) => {
   try {

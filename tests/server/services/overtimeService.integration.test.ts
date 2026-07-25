@@ -159,8 +159,9 @@ describe('OvertimeService 集成', () => {
     await expect(service.update(approved.id, 1, { reason: 'x' })).rejects.toThrow('不可修改');
     await expect(service.update(draft.id, 1, { projectId: 2 })).rejects.toThrow('已停用');
     await expect(service.update(draft.id, 1, {
-      date: '2026-07-22', overtimeType: 'weekend', days: 1, reason: '新原因', projectId: 1,
-    })).resolves.toMatchObject({ date: '2026-07-22', overtimeType: 'weekend', days: 1, reason: '新原因' });
+      // 2026-07-25 是周六；加班类型由服务端按日期自动判定，weekend 与日期一致。
+      date: '2026-07-25', overtimeType: 'weekend', days: 1, reason: '新原因', projectId: 1,
+    })).resolves.toMatchObject({ date: '2026-07-25', overtimeType: 'weekend', days: 1, reason: '新原因' });
 
     await expect(service.delete(999, 1)).rejects.toThrow('记录不存在');
     await expect(service.delete(foreign.id, 1)).rejects.toThrow('只能删除自己的');

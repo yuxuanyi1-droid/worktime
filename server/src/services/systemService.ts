@@ -27,6 +27,7 @@ import {
   permissionImplications,
 } from '../config/permissionDefinitions';
 import { BusinessError } from '../utils/errors';
+import { AccessPolicyService } from './accessPolicyService';
 import {
   CacheKeys,
   CacheTtl,
@@ -156,11 +157,12 @@ export class SystemService {
       if (data.leaderId === null) {
         updateData.leader = null;
       } else {
-        const leader = await this.requireActiveUser(data.leaderId, '部门负责人');
-        if (leader.department?.id !== id) {
-          const member = await this.userRepo.findOne({ where: { id: data.leaderId }, relations: ['department'] });
-          if (member?.department?.id !== id) throw new BusinessError('部门负责人必须是该部门成员');
-        }
+        // 一次查询同时完成存在/启用/部门归属校验。requireActiveUser 不加载 department 关系，
+        // 若先调它再判归属，department?.id 恒为 undefined 会每次都触发冗余的二次查询。
+        const leader = await this.userRepo.findOne({ where: { id: data.leaderId }, relations: ['department'] });
+        if (!leader) throw new BusinessError('部门负责人不存在');
+        if (Number(leader.status) !== 1) throw new BusinessError('部门负责人已被禁用');
+        if (leader.department?.id !== id) throw new BusinessError('部门负责人必须是该部门成员');
         updateData.leader = { id: data.leaderId };
       }
     }
@@ -301,6 +303,7 @@ export class SystemService {
       return txService.groupRepo.save(saved);
     });
     await invalidateOrgCatalog();
+    AccessPolicyService.invalidateGroupTreeCache();
     return result;
   }
 
@@ -312,19 +315,25 @@ export class SystemService {
 
       const nextParentId = data.parentId !== undefined ? data.parentId : group.parentId;
 
-      // 防止循环引用
+      // 一次性加载全部分组，用于循环引用检测与（若跨部门）子树成员校验，避免逐级 N+1 查库。
+      // updateGroup 是低频管理操作，单次全表扫描远优于沿父链逐级查询，且此处复用于下方子树校验。
+      const allGroups = await txService.groupRepo.find();
+      const groupById = new Map(allGroups.map(g => [g.id, g]));
+
+      // 防止循环引用：沿父链在内存中向上走，若回到自身则形成环。
       if (nextParentId) {
         if (nextParentId === id) throw new BusinessError('不能将自己设为父级');
+        if (!groupById.has(nextParentId)) throw new BusinessError('父级分组不存在');
         let checkId: number | null = nextParentId;
         while (checkId) {
           if (checkId === id) throw new BusinessError('不能形成循环引用');
-          const p = await txService.groupRepo.findOne({ where: { id: checkId } });
+          const p = groupById.get(checkId);
           if (!p) throw new BusinessError('父级分组不存在');
-          checkId = p?.parentId ?? null;
+          checkId = p.parentId ?? null;
         }
       }
 
-      const parent = nextParentId ? await txService.requireGroup(nextParentId) : null;
+      const parent = nextParentId ? groupById.get(nextParentId) ?? null : null;
       if (parent && data.departmentId != null && data.departmentId !== parent.departmentId) {
         throw new BusinessError('子分组必须与父级分组属于同一部门');
       }
@@ -333,12 +342,11 @@ export class SystemService {
       if (!nextDepartmentId) throw new BusinessError('顶级分组必须指定所属部门');
       await txService.requireDepartment(nextDepartmentId);
       if (nextDepartmentId !== group.departmentId) {
-        const groups = await txService.groupRepo.find();
         const subtreeIds = new Set<number>([id]);
         let changed = true;
         while (changed) {
           changed = false;
-          for (const candidate of groups) {
+          for (const candidate of allGroups) {
             if (candidate.parentId && subtreeIds.has(candidate.parentId) && !subtreeIds.has(candidate.id)) {
               subtreeIds.add(candidate.id);
               changed = true;
@@ -382,6 +390,7 @@ export class SystemService {
       return txService.groupRepo.findOne({ where: { id }, relations: ['leader', 'parent', 'department'] });
     });
     await invalidateOrgCatalog();
+    AccessPolicyService.invalidateGroupTreeCache();
     return result;
   }
 
@@ -442,6 +451,7 @@ export class SystemService {
       return txService.groupRepo.delete(id);
     });
     await invalidateOrgCatalog();
+    AccessPolicyService.invalidateGroupTreeCache();
     return result;
   }
 
@@ -968,14 +978,15 @@ export class SystemService {
   /**
    * 统计某组在某项目的已消耗工时（人/天）。
    * 消耗口径：status IN ('submitted','approved')（审批中 + 已通过），排除 draft/deprecated/rejected。
-   * 统计范围：该组所有成员在该项目的工时总和（配额是组级共享额度）。
+   * 统计范围：按工时提交时冻结的 groupSnapshotId 归组（与 reportService 报表口径一致），
+   *           而非用户当前所属组——否则用户跨组调动后历史工时会被算进新组，与报表数字不一致。
    */
   async getGroupProjectConsumption(projectId: number, groupId: number): Promise<number> {
+    // 口径与 reportService 一致：按 t.groupSnapshotId 统计，不再 join users 取当前 groupId。
     const result = await this.timesheetRepo
       .createQueryBuilder('t')
-      .innerJoin('users', 'u', 'u.id = t.userId')
       .where('t.projectId = :projectId', { projectId })
-      .andWhere('u.groupId = :groupId', { groupId })
+      .andWhere('t.groupSnapshotId = :groupId', { groupId })
       .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
       .select('COALESCE(SUM(t.days), 0)', 'total')
       .getRawOne();

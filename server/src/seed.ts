@@ -1,6 +1,7 @@
 import './config/env'; // 加载根 .env（与 app.ts 一致），使 NODE_ENV / ALLOW_PROD_SEED 等配置生效
 import 'reflect-metadata';
 import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 import { AppDataSource, ensureSchema } from './config/database';
 import { User } from './entities/User';
 import { Department } from './entities/Department';
@@ -102,19 +103,28 @@ async function seed() {
   const userRepo = AppDataSource.getRepository(User);
   const hash = (pw: string) => bcrypt.hash(pw, 10);
   let adminUser = await userRepo.findOne({ where: { username: 'admin' } });
+  let newAdminPassword: string | null = null;
   if (!adminUser) {
+    // 生产环境使用随机临时密码（仅在终端打印一次），避免公开已知默认凭据 admin/123456 被利用
+    newAdminPassword = isProduction ? crypto.randomBytes(12).toString('hex') : '123456';
     adminUser = userRepo.create({
-      username: 'admin', password: await hash('123456'), realName: '系统管理员',
+      username: 'admin', password: await hash(newAdminPassword), realName: '系统管理员',
       roles: [adminRole],
     });
     await userRepo.save(adminUser);
   }
-  console.log('✅ 管理员账号初始化完成 (admin / 123456)');
+  if (newAdminPassword) {
+    console.log(`✅ 管理员账号初始化完成 (admin / ${newAdminPassword})`);
+  } else {
+    console.log('✅ 管理员账号已存在，跳过创建');
+  }
 
   // 生产模式到此为止——不创建部门/分组/示例用户/项目/审批流程
   if (isProduction) {
     console.log('\n🎉 生产环境种子数据初始化完成（仅权限/角色/admin 用户）');
-    console.log('📝 默认账号：admin / 123456（请尽快修改密码）');
+    if (newAdminPassword) {
+      console.log(`⚠️  请立即用 admin / ${newAdminPassword} 登录并修改密码（此密码仅显示一次）`);
+    }
     console.log('📝 组织架构和用户将通过 Authentik OIDC 自动同步');
     await AppDataSource.destroy();
     return;

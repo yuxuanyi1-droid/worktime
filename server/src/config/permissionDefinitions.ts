@@ -12,7 +12,7 @@ export type PermissionDefinition = {
 };
 
 // 权限推导规则变更时递增，使按旧规则展开的登录缓存自动失效。
-export const PERMISSION_MODEL_VERSION = 3;
+export const PERMISSION_MODEL_VERSION = 4;
 
 const selfScopes = ['self'];
 const managedScopes = ['group', 'department', 'project', 'global'];
@@ -57,6 +57,8 @@ export const permissionDefinitions: PermissionDefinition[] = [
   { code: 'report:view:project', name: '报表中心-查看负责项目报表', requestName: '报表中心-查看指定项目报表', module: 'report', action: 'view:project', grantable: true, scopeTypes: ['project'] },
   { code: 'report:view:all', name: '报表中心-全局报表', module: 'report', action: 'view:all', grantable: true, scopeTypes: ['global'] },
   { code: 'report:view:overtime', name: '报表中心-查看职责范围内加班统计', requestName: '报表中心-查看指定范围加班统计', module: 'report', action: 'view:overtime', grantable: true, scopeTypes: managedScopes },
+  { code: 'report:custom:view', name: '报表中心-运行自定义报表', description: '运行、查看自定义报表定义；可见数据范围受其它 report:view:* 权限约束，仅有此权限时仅能查看本人数据。', module: 'report', action: 'custom:view' },
+  { code: 'report:custom:manage', name: '报表中心-管理自定义报表定义', description: '创建、编辑、删除自定义报表定义并设置共享范围。', module: 'report', action: 'custom:manage', grantable: true },
   { code: 'report:export', name: '报表中心-导出可见报表', requestName: '报表中心-导出指定范围报表', description: '导出范围不会超过同时拥有的报表查看权限。', module: 'report', action: 'export', grantable: true, scopeTypes: managedScopes },
 
   { code: 'project:access', name: '项目管理-显示入口', description: '控制项目菜单和页面入口，可查看或维护的项目范围需单独授予。', module: 'project', action: 'access' },
@@ -92,6 +94,7 @@ export const permissionDefinitionMap = new Map(permissionDefinitions.map((defini
 
 export const permissionImplications: Record<string, string[]> = {
   'report:view:all': ['report:view:self', 'report:view:group', 'report:view:department', 'report:view:project', 'report:view:overtime'],
+  'report:custom:manage': ['report:custom:view'],
   'project:view:all': ['project:view:managed'],
   'system:announcement:create': ['system:announcement:view'],
   'system:announcement:update': ['system:announcement:view'],

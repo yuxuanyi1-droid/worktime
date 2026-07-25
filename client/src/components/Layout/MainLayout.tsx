@@ -36,7 +36,7 @@ import {
 } from '../../api/notification';
 import { systemApi } from '../../api/system';
 import { authApi } from '../../api/auth';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 
 interface MenuItem {
   key: string;
@@ -75,7 +75,6 @@ export default function MainLayout() {
   const [notifError, setNotifError] = useState<string | null>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [notifTab, setNotifTab] = useState('notif');
-  const pollRef = useRef<ReturnType<typeof setInterval>>();
 
   const totalUnread = notifUnread + announUnread;
 
@@ -187,10 +186,27 @@ export default function MainLayout() {
     }
   }, [hasProjectAccess, isAdmin]);
 
+  // 未读数 30s 轮询：按页面可见性暂停——隐藏时不轮询、可见时恢复，避免后台空跑浪费请求。
   useEffect(() => {
-    loadUnreadCounts();
-    pollRef.current = setInterval(loadUnreadCounts, 30000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const start = () => {
+      if (interval) return;
+      loadUnreadCounts();
+      interval = setInterval(loadUnreadCounts, 30000);
+    };
+    const stop = () => {
+      if (interval) { clearInterval(interval); interval = undefined; }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') start();
+      else stop();
+    };
+    if (document.visibilityState !== 'hidden') start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      stop();
+    };
   }, [loadUnreadCounts]);
 
   useEffect(() => {

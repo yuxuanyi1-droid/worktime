@@ -54,7 +54,7 @@ describe('WeeklyReportService 集成', () => {
       totalDays: 7,
     });
 
-    expect(Number(report.totalDays)).toBe(1);
+    expect(Number(report.totalDays)).toBe(0.5); // 周报审批口径仅统计 approved（0.5 approved；0.5 submitted 不计入）
   });
 
   it.each(['rejected', 'withdrawn'] as const)('允许 %s 周报修改后恢复为草稿', async (status) => {

@@ -3,13 +3,14 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
+import crypto from 'crypto';
 import type { Server } from 'node:http';
 import './config/env'; // 加载根 .env（端口）+ server/.env（业务配置）
 import pinoHttp from 'pino-http';
 import { AppDataSource, ensureSchema, databaseType } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 import { globalLimiter, loginLimiter, oidcCallbackLimiter, agentLimiter, activateRateLimiters } from './middleware/security';
-import { closeRedis, initRedis, syncSubmissionGroupIdFromDb } from './config/redis';
+import { closeRedis, initRedis, syncSubmissionGroupIdFromDb, setRedisReadyHandler } from './config/redis';
 import { startApprovalQueueWorker, stopApprovalQueueWorker } from './services/approvalQueue';
 import { TimesheetService } from './services/timesheetService';
 import { metricsMiddleware, metricsHandler } from './middleware/metrics';
@@ -61,8 +62,9 @@ let httpServer: Server | null = null;
 let shuttingDown = false;
 
 // 中间件（顺序重要）
-// 反向代理后取真实 IP（限流依赖此设置）
-app.set('trust proxy', 1);
+// 反向代理后取真实 IP（限流依赖此设置）。多级代理时通过 TRUST_PROXY_HOPS 指明跳数，
+// 否则 req.ip / X-Forwarded-For 解析错位，影响限流与登录失败锁定的准确性。
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
 app.disable('x-powered-by');
 app.use(helmet({
   // 开发期需要 Vite 的动态脚本；生产静态站点使用严格同源策略。
@@ -179,18 +181,23 @@ app.get(`${apiBase}/metrics`, async (req, res) => {
     return res.status(404).json({ code: 404, message: 'Not Found' });
   }
   if (metricsToken) {
-    const auth = req.headers.authorization;
-    if (auth !== `Bearer ${metricsToken}`) {
+    const auth = String(req.headers.authorization || '');
+    const expected = `Bearer ${metricsToken}`;
+    const authBuf = Buffer.from(auth);
+    const expBuf = Buffer.from(expected);
+    // 恒定时间比较，避免时序侧信道逐字节逼近 METRICS_TOKEN。
+    if (authBuf.length !== expBuf.length || !crypto.timingSafeEqual(authBuf, expBuf)) {
       return res.status(401).json({ code: 401, message: 'Unauthorized' });
     }
   }
   await metricsHandler(req, res);
 });
 
-// 健康检查（包含数据库状态）
+// 健康检查（包含数据库状态）。DB 未连接时返回 503/degraded，便于负载均衡 readiness 摘除实例。
 app.get(`${apiBase}/health`, (req, res) => {
-  res.json({
-    status: 'ok',
+  const status = dbConnected ? 'ok' : 'degraded';
+  res.status(dbConnected ? 200 : 503).json({
+    status,
     dbConnected,
     timestamp: new Date().toISOString(),
   });
@@ -235,6 +242,14 @@ export async function startServer(): Promise<Server> {
   try {
     await AppDataSource.initialize();
     await ensureSchema();
+    // Redis（重）连就绪时把 DB 最大 submissionGroupId 重新校准到 Redis，
+    // 防止 Redis 重启丢 key 后从旧值/0 重新发号与已用序号碰撞。
+    setRedisReadyHandler(async () => {
+      const maxRow = await AppDataSource.query(
+        `SELECT COALESCE(MAX("submissionGroupId"), 0) AS "maxId" FROM timesheets`,
+      ).catch(() => [{ maxId: 0 }]);
+      await syncSubmissionGroupIdFromDb(Number(maxRow?.[0]?.maxId ?? 0));
+    });
     const redisOk = await initRedis();
     activateRateLimiters();
     if (redisOk) {
@@ -268,7 +283,13 @@ export async function startServer(): Promise<Server> {
     });
   } catch (error) {
     logger.error({ err: error }, '数据库连接失败，请检查根 .env 中的数据库配置');
-    // 即使数据库连接失败也启动服务，方便调试
+    if (isProduction) {
+      // 生产环境数据库初始化失败应直接退出，让编排系统重启；
+      // 避免“端口存活但全 API 503、worker/调度器未启动”的静默僵死。
+      logger.error('生产环境数据库初始化失败，退出进程以触发编排系统重启');
+      process.exit(1);
+    }
+    // 开发环境即使数据库连接失败也启动服务，方便调试
     await initRedis().catch(() => false);
     activateRateLimiters();
     httpServer = app.listen(PORT, API_HOST, () => {
@@ -307,9 +328,17 @@ export async function gracefulShutdown(signal: string, exitProcess = true): Prom
   if (exitProcess) process.exit(0);
 }
 
-export function registerShutdownSignals(target: Pick<NodeJS.Process, 'once'> = process) {
+export function registerShutdownSignals(target: Pick<NodeJS.Process, 'once' | 'on'> = process) {
   target.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
   target.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+  // 兜底未捕获异常：记录并触发优雅关闭，避免进程带病运行或静默丢失上下文。
+  target.on('uncaughtException', (err) => {
+    logger.error({ err }, 'uncaughtException，触发优雅退出');
+    void gracefulShutdown('uncaughtException');
+  });
+  target.on('unhandledRejection', (reason) => {
+    logger.error({ reason }, 'unhandledRejection');
+  });
 }
 
 if (process.env.WORKTIME_DISABLE_AUTO_START !== '1'

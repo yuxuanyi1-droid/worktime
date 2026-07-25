@@ -37,6 +37,9 @@ vi.mock('@client/api/system', () => ({
     deleteApprovalFlow: vi.fn(),
     getSettings: vi.fn(),
     updateSetting: vi.fn(),
+    getHolidays: vi.fn().mockResolvedValue({ code: 0, data: [] }),
+    setHolidays: vi.fn().mockResolvedValue({ code: 0 }),
+    deleteHoliday: vi.fn().mockResolvedValue({ code: 0 }),
   },
 }));
 

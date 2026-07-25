@@ -16,3 +16,6 @@ export { PermissionRequest } from './PermissionRequest';
 export { UserPermissionGrant } from './UserPermissionGrant';
 export { SubmissionSequence } from './SubmissionSequence';
 export { UserExternalIdentity } from './UserExternalIdentity';
+export { Holiday } from './Holiday';
+export { ReportDefinition } from './ReportDefinition';
+export type { ReportDefinitionScope } from './ReportDefinition';

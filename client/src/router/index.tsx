@@ -58,22 +58,6 @@ export function PermissionRoute({ children, permission }: { children: React.Reac
   return <>{children}</>;
 }
 
-/** 角色路由守卫 */
-function RoleRoute({ children, roles }: { children: React.ReactNode; roles: string[] }) {
-  const { hasRole } = usePermission();
-  if (!hasRole(...roles)) {
-    return (
-      <Result
-        status="403"
-        title="无权限"
-        subTitle="您没有访问此页面的权限，请联系管理员"
-        extra={<Button type="primary" onClick={() => window.history.back()}>返回</Button>}
-      />
-    );
-  }
-  return <>{children}</>;
-}
-
 export default function AppRouter() {
   return (
     <Suspense fallback={<div style={{ padding: 48, textAlign: 'center' }}><Spin /></div>}>

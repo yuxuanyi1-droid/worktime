@@ -198,8 +198,8 @@ export default function TimesheetPage() {
       });
       if (reqId !== weekLoadReqId.current) return; // 已有更新的请求，丢弃本次响应
       if (res.data && res.data.list.length > 0) {
-        // 过滤掉已驳回/已撤回的记录——这些工时不在周表格中展示/编辑，仅保留在历史记录中查看详情
-        const allItems = res.data.list.filter(item => item.status !== 'rejected' && item.status !== 'withdrawn');
+        // 保留被驳回(rejected)记录以便用户在周表格内修改后重新提交；仅过滤已撤回(withdrawn)
+        const allItems = res.data.list.filter(item => item.status !== 'withdrawn');
         // 按 projectId 分组（合并所有状态）
         const byProject: Record<number, { items: TimesheetData[]; status: string; originalStatus: string }> = {};
         for (const item of allItems) {

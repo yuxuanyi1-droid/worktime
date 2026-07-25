@@ -2,23 +2,33 @@ import { Router } from 'express';
 import ExcelJS from 'exceljs';
 import { AppDataSource } from '../config/database';
 import { Timesheet } from '../entities/Timesheet';
+import { ReportDefinition, ReportDefinitionScope } from '../entities/ReportDefinition';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { requireAllPermissions, requirePermission } from '../middleware/permission';
 import { AccessPolicyService } from '../services/accessPolicyService';
 import { ReportService } from '../services/reportService';
+import { ReportQueryEngine, validateReportQueryConfig } from '../services/reportQueryEngine';
+import { AuditService } from '../services/auditService';
 import { BusinessError } from '../utils/errors';
 import {
   assertDateRange,
   firstQueryValue,
   parseDateString,
+  parseEnum,
   parseOptionalPositiveInt,
   parsePositiveInt,
+  parseString,
 } from '../utils/validation';
 
 const router = Router();
 const reportService = new ReportService();
 const accessPolicy = new AccessPolicyService();
+const reportEngine = new ReportQueryEngine();
+const auditService = new AuditService();
 const timesheetRepo = () => AppDataSource.getRepository(Timesheet);
+const reportDefinitionRepo = () => AppDataSource.getRepository(ReportDefinition);
+
+const REPORT_DEFINITION_SCOPES = ['private', 'group', 'department', 'public'] as const;
 
 type Viewer = NonNullable<AuthRequest['user']>;
 
@@ -707,6 +717,211 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
     res.setHeader('Content-Disposition', `attachment; filename=overtime-report-${startDate}-${endDate}.xlsx`);
     await workbook.xlsx.write(res);
     res.end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===================== 自定义报表 =====================
+
+function parseReportDefinitionPayload(body: Record<string, unknown>) {
+  const name = parseString(body.name, 'name', { required: true, max: 100 })!;
+  // config 以 JSON 字符串形式提交：先校验为字符串，再 parse 并走引擎校验确保结构合法
+  const configStr = parseString(body.config, 'config', { required: true })!;
+  let parsedConfig: unknown;
+  try {
+    parsedConfig = JSON.parse(configStr);
+  } catch {
+    throw new BusinessError('config 必须是合法 JSON');
+  }
+  validateReportQueryConfig(parsedConfig);
+  const scope = parseEnum(body.scope ?? 'private', 'scope', REPORT_DEFINITION_SCOPES);
+  const scopeGroupId = scope === 'group'
+    ? parsePositiveInt(body.scopeGroupId, 'scopeGroupId')
+    : parseOptionalPositiveInt(body.scopeGroupId, 'scopeGroupId');
+  const scopeDepartmentId = scope === 'department'
+    ? parsePositiveInt(body.scopeDepartmentId, 'scopeDepartmentId')
+    : parseOptionalPositiveInt(body.scopeDepartmentId, 'scopeDepartmentId');
+  return { name, config: configStr, scope, scopeGroupId, scopeDepartmentId };
+}
+
+function serializeReportDefinition(def: ReportDefinition) {
+  let parsedConfig: unknown = null;
+  try {
+    parsedConfig = JSON.parse(def.config);
+  } catch {
+    parsedConfig = null;
+  }
+  return {
+    id: def.id,
+    name: def.name,
+    scope: def.scope,
+    scopeGroupId: def.scopeGroupId,
+    scopeDepartmentId: def.scopeDepartmentId,
+    owner: def.owner ? { id: def.owner.id, realName: def.owner.realName } : null,
+    ownerId: def.ownerId,
+    config: parsedConfig,
+    createdAt: def.createdAt,
+    updatedAt: def.updatedAt,
+  };
+}
+
+/**
+ * 自定义报表定义可见性：
+ * - 创建者本人；或
+ * - scope=public；或
+ * - scope=department 且目标部门为 viewer 所属部门；或
+ * - scope=group 且目标组别为 viewer 所属组别。
+ */
+async function canViewReportDefinition(
+  viewer: Viewer,
+  def: ReportDefinition,
+): Promise<boolean> {
+  if (def.ownerId === viewer.id) return true;
+  if (def.scope === 'public') return true;
+  if (def.scope === 'department' && def.scopeDepartmentId != null) {
+    const org = await accessPolicy.getOrgSnapshot(viewer.id);
+    return org.departmentSnapshotId === def.scopeDepartmentId;
+  }
+  if (def.scope === 'group' && def.scopeGroupId != null) {
+    const org = await accessPolicy.getOrgSnapshot(viewer.id);
+    return org.groupSnapshotId === def.scopeGroupId;
+  }
+  return false;
+}
+
+// 运行自定义报表（body 即引擎 config）
+router.post('/custom/run', requirePermission('report:custom:view'), async (req: AuthRequest, res, next) => {
+  try {
+    const data = await reportEngine.run(req.body, req.user!);
+    res.json({ code: 0, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 获取自定义报表定义列表（自己的 + 可见共享）
+router.get('/custom/definitions', requirePermission('report:custom:view'), async (req: AuthRequest, res, next) => {
+  try {
+    const viewer = req.user!;
+    const org = await accessPolicy.getOrgSnapshot(viewer.id);
+    const qb = reportDefinitionRepo().createQueryBuilder('ReportDefinition')
+      .leftJoinAndSelect('ReportDefinition.owner', 'owner')
+      .where('ReportDefinition.ownerId = :userId', { userId: viewer.id })
+      .orWhere('ReportDefinition.scope = :public', { public: 'public' });
+    if (org.departmentSnapshotId != null) {
+      qb.orWhere(
+        '(ReportDefinition.scope = :deptScope AND ReportDefinition.scopeDepartmentId = :deptId)',
+        { deptScope: 'department', deptId: org.departmentSnapshotId },
+      );
+    }
+    if (org.groupSnapshotId != null) {
+      qb.orWhere(
+        '(ReportDefinition.scope = :groupScope AND ReportDefinition.scopeGroupId = :groupId)',
+        { groupScope: 'group', groupId: org.groupSnapshotId },
+      );
+    }
+    qb.orderBy('ReportDefinition.createdAt', 'DESC');
+    const list = await qb.getMany();
+    res.json({ code: 0, data: list.map(serializeReportDefinition) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 创建自定义报表定义
+router.post('/custom/definitions', requirePermission('report:custom:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const payload = parseReportDefinitionPayload(req.body as Record<string, unknown>);
+    const def = reportDefinitionRepo().create({
+      ...payload,
+      ownerId: req.user!.id,
+    });
+    const saved = await reportDefinitionRepo().save(def);
+    auditService.log({
+      userId: req.user!.id,
+      action: 'report_definition.create',
+      target: 'report_definition',
+      targetId: saved.id,
+      detail: JSON.stringify({ name: payload.name, scope: payload.scope }),
+      ip: req.ip,
+    });
+    const reloaded = await reportDefinitionRepo().findOne({
+      where: { id: saved.id },
+      relations: ['owner'],
+    });
+    res.json({ code: 0, data: serializeReportDefinition(reloaded!) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 获取单条自定义报表定义
+router.get('/custom/definitions/:id', requirePermission('report:custom:view'), async (req: AuthRequest, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    const def = await reportDefinitionRepo().findOne({
+      where: { id },
+      relations: ['owner'],
+    });
+    if (!def) return res.status(404).json({ code: 404, message: '报表定义不存在' });
+    if (!await canViewReportDefinition(req.user!, def)) {
+      return res.status(403).json({ code: 403, message: '无权查看该报表定义' });
+    }
+    res.json({ code: 0, data: serializeReportDefinition(def) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 更新自定义报表定义（仅 owner）
+router.put('/custom/definitions/:id', requirePermission('report:custom:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    const def = await reportDefinitionRepo().findOne({ where: { id } });
+    if (!def) return res.status(404).json({ code: 404, message: '报表定义不存在' });
+    if (def.ownerId !== req.user!.id) {
+      return res.status(403).json({ code: 403, message: '只能编辑自己创建的报表定义' });
+    }
+    const payload = parseReportDefinitionPayload(req.body as Record<string, unknown>);
+    Object.assign(def, payload);
+    const saved = await reportDefinitionRepo().save(def);
+    auditService.log({
+      userId: req.user!.id,
+      action: 'report_definition.update',
+      target: 'report_definition',
+      targetId: id,
+      detail: JSON.stringify({ name: payload.name, scope: payload.scope }),
+      ip: req.ip,
+    });
+    const reloaded = await reportDefinitionRepo().findOne({
+      where: { id: saved.id },
+      relations: ['owner'],
+    });
+    res.json({ code: 0, data: serializeReportDefinition(reloaded!) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 删除自定义报表定义（仅 owner）
+router.delete('/custom/definitions/:id', requirePermission('report:custom:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, 'id');
+    const def = await reportDefinitionRepo().findOne({ where: { id } });
+    if (!def) return res.status(404).json({ code: 404, message: '报表定义不存在' });
+    if (def.ownerId !== req.user!.id) {
+      return res.status(403).json({ code: 403, message: '只能删除自己创建的报表定义' });
+    }
+    await reportDefinitionRepo().delete(id);
+    await auditService.log({
+      userId: req.user!.id,
+      action: 'report_definition.delete',
+      target: 'report_definition',
+      targetId: id,
+      ip: req.ip,
+    });
+    res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
   }

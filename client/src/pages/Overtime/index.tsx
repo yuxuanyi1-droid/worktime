@@ -25,6 +25,7 @@ export default function Overtime() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<OvertimeApplication | null>(null);
   const [projects, setProjects] = useState<{ id: number; name: string; code: string }[]>([]);
+  const [holidays, setHolidays] = useState<Map<string, boolean>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [form] = Form.useForm();
   const { hasPermission } = usePermission();
@@ -46,6 +47,40 @@ export default function Overtime() {
   useEffect(() => {
     if (canSubmit && (canCreate || canUpdate)) void loadProjects();
   }, [canCreate, canSubmit, canUpdate]);
+
+  // 加载节假日日历用于客户端预览加班类型（服务端写入时会权威推断，此处仅为展示）
+  useEffect(() => {
+    const now = new Date();
+    const years = [now.getFullYear(), now.getFullYear() + 1];
+    Promise.all(years.map(y => systemApi.getHolidays(y).catch(() => ({ code: 0, data: [] }))))
+      .then((results) => {
+        const map = new Map<string, boolean>();
+        results.forEach(res => {
+          (res.data || []).forEach((h: { date: string; isWorkday: boolean }) => map.set(h.date, !!h.isWorkday));
+        });
+        setHolidays(map);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  /** 客户端预判加班类型（节假日日历 + 自然周周末；最终以服务端写入为准） */
+  const inferOvertimeType = (date: dayjs.Dayjs | undefined): string => {
+    if (!date) return '';
+    const dateStr = date.format('YYYY-MM-DD');
+    const flag = holidays.get(dateStr);
+    if (flag === false) return 'holiday';
+    if (flag === true) return 'weekday';
+    const dow = date.day();
+    return dow === 0 || dow === 6 ? 'weekend' : 'weekday';
+  };
+
+  // 日期或节假日日历变更时，自动刷新加班类型（只读展示）
+  const watchedDate = Form.useWatch('date', form);
+  useEffect(() => {
+    if (watchedDate) {
+      form.setFieldValue('overtimeType', inferOvertimeType(watchedDate));
+    }
+  }, [watchedDate, holidays]);
 
   const loadData = async (targetPage = page) => {
     if (!canViewSelf) {
@@ -99,8 +134,7 @@ export default function Overtime() {
         setSubmitting(true);
         try {
           if (editingRecord) {
-            await overtimeApi.update(editingRecord.id, payload);
-            await overtimeApi.submit([editingRecord.id]);
+            await overtimeApi.updateAndSubmit(editingRecord.id, payload);
           } else {
             await overtimeApi.createAndSubmit(payload);
           }
@@ -260,8 +294,9 @@ export default function Overtime() {
             <Select placeholder="请选择加班项目" showSearch optionFilterProp="label"
               options={projects.map(p => ({ label: p.name, value: p.id }))} />
           </Form.Item>
-          <Form.Item name="overtimeType" label="加班类型" rules={[{ required: true }]}>
-            <Select placeholder="请选择" options={[
+          <Form.Item name="overtimeType" label="加班类型" rules={[{ required: true }]}
+            extra="类型由系统按节假日日历自动判定，选择日期后自动填充。">
+            <Select disabled placeholder="选择日期后自动判定" options={[
               { label: '周末加班', value: 'weekend' },
               { label: '节假日加班', value: 'holiday' },
               { label: '工作日加班', value: 'weekday' },

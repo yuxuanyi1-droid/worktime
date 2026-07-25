@@ -15,6 +15,9 @@ function createConfig(overrides: Partial<TtRobotConfig> = {}): TtRobotConfig {
     envId: 'UAT',
     timeoutMs: 5000,
     batchSize: 2000,
+    maxRetries: 3,
+    retryBaseDelayMs: 300,
+    batchIntervalMs: 200,
     ...overrides,
   };
 }
@@ -85,6 +88,7 @@ describe('TtRobotClient', () => {
       fetch: fetchMock,
       now: () => 1700000000000,
       nonce: () => '123456',
+      sleep: vi.fn(async () => undefined),
     });
 
     await client.batchSendText(['8001', '8002', '8001', '8003'], '待审批');

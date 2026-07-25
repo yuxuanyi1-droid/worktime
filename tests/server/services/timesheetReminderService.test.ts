@@ -105,7 +105,7 @@ describe('工时定时提醒配置', () => {
       findOne: vi.fn().mockResolvedValue({ value: JSON.stringify(config) }),
     } as any);
     vi.spyOn(UserAudienceService.prototype, 'resolveUserIds').mockResolvedValue([2, 4]);
-    const publish = vi.spyOn(NotificationPublisher.prototype, 'publishTtOnly').mockResolvedValue('sent');
+    const publish = vi.spyOn(NotificationPublisher.prototype, 'publishToUsers').mockResolvedValue({ notifications: [{ id: 1 }], ttStatus: 'sent' });
     const scheduler = new TimesheetReminderScheduler();
     vi.spyOn(scheduler as any, 'claimSlot').mockResolvedValue(true);
 
@@ -132,7 +132,7 @@ describe('工时定时提醒配置', () => {
         message: '提醒',
       }) }),
     } as any);
-    const publish = vi.spyOn(NotificationPublisher.prototype, 'publishTtOnly');
+    const publish = vi.spyOn(NotificationPublisher.prototype, 'publishToUsers');
     const scheduler = new TimesheetReminderScheduler();
     const claim = vi.spyOn(scheduler as any, 'claimSlot').mockResolvedValue(false);
 

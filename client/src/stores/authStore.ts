@@ -3,8 +3,14 @@ import { UserInfo } from '../types';
 
 interface AuthState {
   token: string | null;
+  refreshToken: string | null;
   user: UserInfo | null;
-  setAuth: (token: string, user: UserInfo) => void;
+  /**
+   * 写入登录态。refreshToken 为可选：
+   *  - 登录/SSO 回调传入新签发的 refreshToken → 一起持久化；
+   *  - 个人信息更新、挂载时拉取 profile 等只更新 user 的场景不传 → 保留现有 refreshToken，避免被误清。
+   */
+  setAuth: (token: string, user: UserInfo, refreshToken?: string | null) => void;
   clearAuth: () => void;
   isLoggedIn: () => boolean;
 }
@@ -17,6 +23,7 @@ function getStoredUser(): UserInfo | null {
     return JSON.parse(raw) as UserInfo;
   } catch {
     localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
     localStorage.removeItem('user');
     return null;
   }
@@ -24,18 +31,25 @@ function getStoredUser(): UserInfo | null {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   token: localStorage.getItem('token'),
+  refreshToken: localStorage.getItem('refreshToken'),
   user: getStoredUser(),
 
-  setAuth: (token, user) => {
+  setAuth: (token, user, refreshToken) => {
     localStorage.setItem('token', token);
     localStorage.setItem('user', JSON.stringify(user));
-    set({ token, user });
+    // 仅在显式传入 refreshToken 时更新；否则保留现有值（profile 更新等场景不应清掉它）
+    const nextRefresh = typeof refreshToken === 'string' ? refreshToken : get().refreshToken;
+    if (nextRefresh) {
+      localStorage.setItem('refreshToken', nextRefresh);
+    }
+    set({ token, user, refreshToken: nextRefresh });
   },
 
   clearAuth: () => {
     localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
     localStorage.removeItem('user');
-    set({ token: null, user: null });
+    set({ token: null, refreshToken: null, user: null });
   },
 
   isLoggedIn: () => !!get().token,
@@ -48,10 +62,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
  */
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
-    if (e.key === 'token' || e.key === 'user') {
+    if (e.key === 'token' || e.key === 'user' || e.key === 'refreshToken') {
       const token = localStorage.getItem('token');
       const user = getStoredUser();
-      useAuthStore.setState({ token, user });
+      const refreshToken = localStorage.getItem('refreshToken');
+      useAuthStore.setState({ token, user, refreshToken });
     }
   });
 }

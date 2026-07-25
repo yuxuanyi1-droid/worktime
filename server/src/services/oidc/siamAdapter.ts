@@ -98,6 +98,9 @@ export class SiamAdapter implements OidcProvider {
     const { clientId, clientSecret } = this.requireConfig();
 
     // 1. code 换 access_token（GET + Query，client_secret 通过 query 传，仅后端调用）
+    // 安全说明：OPPO SIAM 协议强制 GET+Query（不支持 POST/头部传 client_secret），
+    // 故 client_secret/access_token 必须经 query。缓解：仅后端发起、走 HTTPS、
+    // 失败时只记 HTTP status 不记 URL/正文（见下），避免 secret 进入日志。
     const tokenUrl = new URL(`${this.ssoBaseUrl}/siam/oauth2.0/accessTokenByJson`);
     tokenUrl.searchParams.set('grant_type', 'authorization_code');
     tokenUrl.searchParams.set('code', params.code);

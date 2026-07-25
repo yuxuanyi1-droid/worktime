@@ -21,6 +21,7 @@ export default function WeeklyReportPage() {
   const [content, setContent] = useState('');
   const [summary, setSummary] = useState('');
   const [weekHours, setWeekHours] = useState<any>(null);
+  const [draftDays, setDraftDays] = useState(0);
   const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -62,6 +63,7 @@ export default function WeeklyReportPage() {
       setContent('');
       setSummary('');
       setWeekHours(null);
+      setDraftDays(0);
       return;
     }
     const requestId = ++loadRequestId.current;
@@ -74,6 +76,7 @@ export default function WeeklyReportPage() {
     setContent('');
     setSummary('');
     setWeekHours(null);
+    setDraftDays(0);
     try {
       const res = await weeklyReportApi.getByWeek(ws);
       if (requestId !== loadRequestId.current) return;
@@ -97,6 +100,23 @@ export default function WeeklyReportPage() {
       try {
         const hoursRes = await timesheetApi.getWeeklySummary(ws, we);
         if (requestId === loadRequestId.current && hoursRes.data) setWeekHours(hoursRes.data);
+        // getWeeklySummary 内部按 (projectId,date) 取最新 submissionGroupId 去重，
+        // 而未提交草稿的 submissionGroupId 为空会被过滤——因此"仅有草稿"时 totalDays 显示 0。
+        // 这里额外用本页已在使用的 getMy 接口统计草稿天数，作为辅助说明，避免误以为本周无工时。
+        if (requestId === loadRequestId.current && !(hoursRes.data?.totalDays > 0)) {
+          try {
+            const myRes = await timesheetApi.getMy({ startDate: ws, endDate: we, pageSize: 200 });
+            const drafts = (myRes.data?.list || []) as Timesheet[];
+            const dDays = drafts
+              .filter((r) => r.status === 'draft')
+              .reduce((sum, r) => sum + (Number(r.days) || 0), 0);
+            if (requestId === loadRequestId.current) {
+              setDraftDays(Math.round(dDays * 100) / 100);
+            }
+          } catch {
+            // 草稿统计为辅助信息，失败不阻断主流程
+          }
+        }
       } catch (e: any) {
         if (requestId === loadRequestId.current) {
           setHoursError(e?.response?.data?.message || '本周工时汇总加载失败');
@@ -282,6 +302,8 @@ export default function WeeklyReportPage() {
               disabled={!isEditable || !canUpdate}
               placeholder="请编写本周工作总结..."
               autoSize={{ minRows: 14, maxRows: 24 }}
+              maxLength={20000}
+              showCount
             />
             <Divider />
             <Title level={5}>工作摘要</Title>
@@ -291,6 +313,8 @@ export default function WeeklyReportPage() {
               rows={3}
               placeholder="简要概述本周工作..."
               disabled={!isEditable || !canUpdate}
+              maxLength={2000}
+              showCount
             />
           </Card>
         </Col>
@@ -303,6 +327,11 @@ export default function WeeklyReportPage() {
               <Alert type="info" showIcon message="当前角色没有工时查看权限，无法展示工时汇总" style={{ marginBottom: 12 }} />
             )}
             <Statistic title="总工时" value={weekHours?.totalDays || 0} suffix="天" />
+            {draftDays > 0 && (
+              <div style={{ marginTop: 4, fontSize: 12, color: '#9A9080' }}>
+                另含未提交草稿 {draftDays} 天（草稿不计入已提交汇总）
+              </div>
+            )}
             <Divider />
             <Title level={5}>项目分布</Title>
             <List

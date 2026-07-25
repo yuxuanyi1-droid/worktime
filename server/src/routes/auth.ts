@@ -22,6 +22,11 @@ function getLoginKey(req: Request, username: string) {
     .digest('hex');
 }
 
+/** 仅按用户名的锁定 key：防止攻击者轮换 X-Forwarded-For 绕过 IP 维度锁定、针对单一账号爆破。 */
+function getUsernameKey(username: string) {
+  return crypto.createHash('sha256').update(`u\0${username.toLowerCase()}`).digest('hex');
+}
+
 function pruneLoginFailures(now = Date.now()) {
   for (const [key, failure] of loginFailures.entries()) {
     if (now - failure.lastFailedAt > LOGIN_LOCK_MS) {
@@ -70,20 +75,25 @@ router.post('/login', async (req, res, next) => {
     const password = parseString(req.body?.password, '密码', { required: true, max: 128, trim: false })!;
 
     const loginKey = getLoginKey(req, username);
-    if (await getLoginFailureCount(loginKey) >= MAX_LOGIN_FAILURES) {
+    const userKey = getUsernameKey(username);
+    // 双 key 锁定：IP+username 防分散爆破，username-only 防针对单一账号的 XFF 轮换绕过
+    if ((await getLoginFailureCount(loginKey)) >= MAX_LOGIN_FAILURES
+      || (await getLoginFailureCount(userKey)) >= MAX_LOGIN_FAILURES) {
       return res.status(429).json({ code: 429, message: '登录失败次数过多，请稍后再试' });
     }
 
     const result = await authService.login(username, password);
-    await clearLoginFailures(loginKey);
+    await Promise.all([clearLoginFailures(loginKey), clearLoginFailures(userKey)]);
     // 审计日志
     auditService.log({ userId: result.user.id, action: 'login', target: 'system', ip: req.ip });
     res.json({ code: 0, data: result, message: '登录成功' });
   } catch (error: any) {
     const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
     if (username && isBusinessError(error) && error.statusCode < 500) {
-      const loginKey = getLoginKey(req, username);
-      await recordLoginFailure(loginKey);
+      await Promise.all([
+        recordLoginFailure(getLoginKey(req, username)),
+        recordLoginFailure(getUsernameKey(username)),
+      ]);
     }
     next(error);
   }
@@ -94,6 +104,23 @@ router.post('/logout', authMiddleware, async (req: AuthRequest, res, next) => {
     await authService.logout(req.user!.id);
     auditService.log({ userId: req.user!.id, action: 'logout', target: 'system', ip: req.ip });
     res.json({ code: 0, message: '已登出' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * 刷新 Access Token：用 Refresh Token 换取新的短期 Access Token。
+ *
+ * - 不走 authMiddleware（refresh token 自带身份+版本，无需 access token 鉴权）。
+ * - 不走登录失败锁定逻辑（/refresh 与 /login 是不同路径，锁定仅作用在 /login）。
+ * - 校验失败（过期/版本不符/用户禁用）由 authService 抛 BusinessError(401)，经 next(error) 统一处理。
+ */
+router.post('/refresh', async (req, res, next) => {
+  try {
+    const refreshToken = parseString(req.body?.refreshToken, 'refreshToken', { required: true, max: 2048, trim: false })!;
+    const token = await authService.refreshAccessToken(refreshToken);
+    res.json({ code: 0, data: { token } });
   } catch (error) {
     next(error);
   }
@@ -126,6 +153,11 @@ router.put('/change-password', authMiddleware, async (req: AuthRequest, res, nex
   try {
     const oldPassword = parseString(req.body?.oldPassword, '原密码', { required: true, max: 128, trim: false })!;
     const newPassword = parseString(req.body?.newPassword, '新密码', { required: true, min: 8, max: 128, trim: false })!;
+    // 密码复杂度：至少包含大写、小写、数字、特殊字符中的 3 类，避免弱口令
+    const categories = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((re) => re.test(newPassword)).length;
+    if (categories < 3) {
+      return res.status(400).json({ code: 400, message: '新密码需至少包含大写字母、小写字母、数字、特殊字符中的 3 种' });
+    }
     await authService.changePassword(req.user!.id, oldPassword, newPassword);
     auditService.log({ userId: req.user!.id, action: 'change_password', target: 'user', targetId: req.user!.id, ip: req.ip });
     res.json({ code: 0, message: '密码修改成功' });

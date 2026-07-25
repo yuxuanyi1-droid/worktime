@@ -490,10 +490,10 @@ describe('SystemService 集成', () => {
       name: '配额项目', code: 'CONSUMPTION', status: 'active', managers: [user],
     });
     await dataSource.getRepository(Timesheet).save([
-      { userId: user.id, projectId: project.id, date: '2026-07-20', days: 1, status: 'submitted' },
-      { userId: user.id, projectId: project.id, date: '2026-07-21', days: 0.5, status: 'approved' },
-      { userId: user.id, projectId: project.id, date: '2026-07-22', days: 1, status: 'draft' },
-      { userId: user.id, projectId: project.id, date: '2026-07-23', days: 1, status: 'deprecated' },
+      { userId: user.id, projectId: project.id, date: '2026-07-20', days: 1, status: 'submitted', groupSnapshotId: group.id, departmentSnapshotId: departmentA.id },
+      { userId: user.id, projectId: project.id, date: '2026-07-21', days: 0.5, status: 'approved', groupSnapshotId: group.id, departmentSnapshotId: departmentA.id },
+      { userId: user.id, projectId: project.id, date: '2026-07-22', days: 1, status: 'draft', groupSnapshotId: group.id, departmentSnapshotId: departmentA.id },
+      { userId: user.id, projectId: project.id, date: '2026-07-23', days: 1, status: 'deprecated', groupSnapshotId: group.id, departmentSnapshotId: departmentA.id },
     ]);
     await expect(new SystemService(dataSource.manager).getGroupProjectConsumption(project.id, group.id))
       .resolves.toBe(1.5);

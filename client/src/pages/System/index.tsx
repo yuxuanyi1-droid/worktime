@@ -12,7 +12,7 @@ import {
   ExclamationCircleOutlined, CopyOutlined, LockOutlined, SearchOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons';
-import { systemApi, UserListItem, SimpleUser, TimesheetReminderConfig } from '../../api/system';
+import { systemApi, UserListItem, SimpleUser, TimesheetReminderConfig, HolidayItem } from '../../api/system';
 import { Department, Group, Role, Permission, ApprovalFlow, ApprovalFlowStep, stepTypeMap } from '../../types';
 import { announcementApi, AnnouncementItem, AnnouncementStats } from '../../api/notification';
 import { useAppStore } from '../../stores/appStore';
@@ -24,6 +24,8 @@ import {
   parseStoredTimesheetReminderConfig,
   validateTimesheetReminderConfig,
 } from '../../utils/timesheetReminderConfig';
+import dayjs from 'dayjs';
+import { CalendarOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 
@@ -39,6 +41,7 @@ const systemTabOptions = [
   { key: 'permission', label: '\u6743\u9650\u76ee\u5f55', permission: 'system:permission:manage' },
   { key: 'approval-flow', label: '\u5ba1\u6279\u6d41\u7a0b', permission: 'system:approval_flow:manage' },
   { key: 'announcement', label: '\u516c\u544a\u7ba1\u7406', permission: 'system:announcement:view' },
+  { key: 'holiday', label: '节假日日历', permission: 'system:org:manage' },
   { key: 'audit', label: '审计日志', permission: 'system:audit:view' },
   { key: 'settings', label: '\u7cfb\u7edf\u8bbe\u7f6e', permission: 'system:settings:manage' },
 ];
@@ -71,6 +74,7 @@ export default function System() {
         {activeTabKey === 'permission' && <PermissionCatalogTab />}
         {activeTabKey === 'approval-flow' && <ApprovalFlowTab />}
         {activeTabKey === 'announcement' && <AnnouncementTab />}
+        {activeTabKey === 'holiday' && <HolidayTab />}
         {activeTabKey === 'audit' && <AuditTab />}
         {activeTabKey === 'settings' && <SettingsTab />}
       </Card>
@@ -1586,6 +1590,8 @@ function AuditTab() {
     'announcement.create': '发布公告',
     'announcement.update': '编辑公告',
     'announcement.delete': '删除公告',
+    'holiday.upsert': '保存节假日日历',
+    'holiday.delete': '删除节假日',
     'settings.update': '更新系统设置',
   };
 
@@ -1604,6 +1610,7 @@ function AuditTab() {
     project: '项目',
     approval_flow: '审批流程',
     announcement: '公告',
+    holiday: '节假日',
     system_setting: '系统设置',
   };
 
@@ -2504,6 +2511,221 @@ function SettingsTab() {
       </Card>
 
       {/* OIDC 提供商由环境变量配置，无需在此开关；如需增减请编辑 server/.env 的 OIDC_PROVIDERS */}
+    </div>
+  );
+}
+
+// ==================== 节假日日历 ====================
+function HolidayTab() {
+  const { hasPermission } = usePermission();
+  const canManage = hasPermission('system:org:manage');
+  const currentYear = new Date().getFullYear();
+  const [year, setYear] = useState(currentYear);
+  const [items, setItems] = useState<HolidayItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadRequestId = useRef(0);
+
+  const load = async () => {
+    const requestId = ++loadRequestId.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const res = await systemApi.getHolidays(year);
+      if (requestId !== loadRequestId.current) return;
+      setItems((res.data || []).map(h => ({ ...h })));
+    } catch (error: any) {
+      if (requestId === loadRequestId.current) {
+        setLoadError(error?.response?.data?.message || '节假日日历加载失败');
+      }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    return () => { loadRequestId.current += 1; };
+  }, [year]);
+
+  const updateRow = (index: number, patch: Partial<HolidayItem>) => {
+    setItems(prev => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+  };
+
+  const addRow = () => {
+    setItems(prev => [...prev, { date: `${year}-01-01`, name: '', isWorkday: false }]);
+  };
+
+  const removeRow = (index: number) => {
+    setItems(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSave = async () => {
+    for (const item of items) {
+      if (!item.date || !item.name?.trim()) {
+        message.warning('每行必须填写日期和名称');
+        return;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(item.date)) {
+        message.warning(`日期格式无效：${item.date}（需 YYYY-MM-DD）`);
+        return;
+      }
+    }
+    setSaving(true);
+    try {
+      await systemApi.setHolidays(
+        year,
+        items.map(i => ({ date: i.date, name: i.name.trim(), isWorkday: !!i.isWorkday })),
+      );
+      message.success('节假日日历已保存');
+      await load();
+    } catch {
+      // 请求拦截器统一展示服务端错误。
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteSingle = async (date: string) => {
+    setSaving(true);
+    try {
+      await systemApi.deleteHoliday(date);
+      message.success('删除成功');
+      await load();
+    } catch {
+      // 请求拦截器统一展示服务端错误。
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const columns = [
+    {
+      title: '日期',
+      dataIndex: 'date',
+      width: 200,
+      render: (_: unknown, _r: HolidayItem, index: number) => canManage ? (
+        <DatePicker
+          value={items[index]?.date ? dayjs(items[index].date) : null}
+          onChange={(d) => updateRow(index, { date: d ? d.format('YYYY-MM-DD') : '' })}
+          allowClear={false}
+          style={{ width: '100%' }}
+        />
+      ) : (items[index]?.date || '-'),
+    },
+    {
+      title: '名称',
+      dataIndex: 'name',
+      render: (_: unknown, _r: HolidayItem, index: number) => canManage ? (
+        <Input
+          value={items[index]?.name || ''}
+          onChange={(e) => updateRow(index, { name: e.target.value })}
+          maxLength={100}
+          placeholder="如：国庆节"
+        />
+      ) : (items[index]?.name || '-'),
+    },
+    {
+      title: '类型',
+      dataIndex: 'isWorkday',
+      width: 160,
+      render: (_: unknown, _r: HolidayItem, index: number) => {
+        const isWorkday = !!items[index]?.isWorkday;
+        if (!canManage) {
+          return <Tag color={isWorkday ? 'blue' : 'red'}>{isWorkday ? '调休补班日' : '法定休息日/节假日'}</Tag>;
+        }
+        return (
+          <Switch
+            checked={isWorkday}
+            onChange={(v) => updateRow(index, { isWorkday: v })}
+            checkedChildren="补班"
+            unCheckedChildren="休息"
+          />
+        );
+      },
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 100,
+      render: (_: unknown, _r: HolidayItem, index: number) => (
+        <Space>
+          {canManage && (
+            <Button type="link" size="small" danger icon={<DeleteOutlined />} onClick={() => removeRow(index)}>
+              移除
+            </Button>
+          )}
+          {!canManage && items[index]?.date && (
+            <Popconfirm
+              title={`删除 ${items[index].date}？`}
+              onConfirm={() => handleDeleteSingle(items[index].date)}
+              disabled={!hasPermission('system:org:manage')}
+            >
+              <Button type="link" size="small" danger disabled={!hasPermission('system:org:manage')}>
+                删除
+              </Button>
+            </Popconfirm>
+          )}
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="节假日日历决定加班类型（工作日/周末/节假日）的自动判定"
+        description="isWorkday=false 标记法定休息日和节假日（加班按「节假日」计）；isWorkday=true 标记调休补班日（加班按「工作日」计）。未列出的日期按自然周周末判定。加班类型由服务端写入时自动推断，不受客户端影响。"
+      />
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message={loadError}
+          action={<Button size="small" onClick={() => void load()}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        <Space>
+          <CalendarOutlined />
+          <Text strong>年份：</Text>
+          <InputNumber
+            min={2000}
+            max={2100}
+            value={year}
+            onChange={(v) => setYear(v || currentYear)}
+            style={{ width: 100 }}
+          />
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} />
+        </Space>
+        <Space>
+          {canManage && (
+            <>
+              <Button icon={<PlusOutlined />} onClick={addRow}>新增行</Button>
+              <Button type="primary" loading={saving} onClick={handleSave}>保存该年</Button>
+            </>
+          )}
+        </Space>
+      </div>
+      <Table
+        rowKey={(r: HolidayItem, i: number | undefined) => r.date || `row-${i ?? 0}`}
+        columns={columns}
+        dataSource={items}
+        loading={loading}
+        size="middle"
+        pagination={false}
+        scroll={{ y: 480 }}
+      />
+      {canManage && items.length > 0 && (
+        <div style={{ marginTop: 12, color: '#888', fontSize: 12 }}>
+          共 {items.length} 条记录。「保存该年」将覆盖 {year} 年的全部节假日配置。
+        </div>
+      )}
     </div>
   );
 }

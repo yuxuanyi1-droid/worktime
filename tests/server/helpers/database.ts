@@ -29,6 +29,18 @@ export async function setupTestDb(): Promise<DataSource> {
     name: 'version',
     implementation: () => 'PostgreSQL 16.0 (pg-mem)',
   });
+  // pg-mem 未内置 SUBSTR（PostgreSQL/SQLite 标准函数），报表引擎的 month 维度依赖它。
+  // PG 的 SUBSTR(str, start, len) 从 1 开始计数。
+  memoryDb.public.registerFunction({
+    name: 'substr',
+    args: ['text', 'int4', 'int4'],
+    returns: 'text',
+    implementation: (str: unknown, start: unknown, len: unknown) => {
+      const s = String(str ?? '');
+      const from = Number(start) - 1;
+      return s.substring(from, from + Number(len));
+    },
+  });
   dataSource = memoryDb.adapters.createTypeormDataSource({
     type: 'postgres',
     entities,
@@ -80,6 +92,8 @@ async function loadEntities() {
   const { UserPermissionGrant } = await import('@server/entities/UserPermissionGrant');
   const { UserExternalIdentity } = await import('@server/entities/UserExternalIdentity');
   const { PersonalAccessToken } = await import('@server/entities/PersonalAccessToken');
+  const { Holiday } = await import('@server/entities/Holiday');
+  const { ReportDefinition } = await import('@server/entities/ReportDefinition');
   return [
     User, Department, Group, Role, Permission, Project,
     Timesheet, OvertimeApplication, WeeklyReport,
@@ -89,5 +103,7 @@ async function loadEntities() {
     PermissionRequest, UserPermissionGrant, SubmissionSequence,
     UserExternalIdentity,
     PersonalAccessToken,
+    Holiday,
+    ReportDefinition,
   ];
 }

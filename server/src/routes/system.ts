@@ -8,6 +8,7 @@ import { requirePermission } from '../middleware/permission';
 import { AppDataSource } from '../config/database';
 import { SystemSetting } from '../entities/SystemSetting';
 import { AccessPolicyService } from '../services/accessPolicyService';
+import { HolidayService } from '../services/holidayService';
 import { BusinessError } from '../utils/errors';
 import {
   normalizeTimesheetReminderConfig,
@@ -58,6 +59,15 @@ function presentDepartment(department: any) {
   return {
     ...safe,
     leader: department.leader ? { id: department.leader.id, realName: department.leader.realName } : null,
+  };
+}
+
+/** 非管理员可见的精简部门视图：仅暴露 id/name/description，剥离负责人等 PII。 */
+function presentDepartmentPublic(department: any) {
+  return {
+    id: department.id,
+    name: department.name,
+    description: department.description,
   };
 }
 
@@ -331,10 +341,13 @@ function parseProjectAllocationPayload(body: Record<string, unknown>) {
 router.use(authMiddleware);
 
 // ========== 部门 ==========
-router.get('/departments', async (req, res, next) => {
+router.get('/departments', async (req: AuthRequest, res, next) => {
   try {
     const data = await systemService.getDepartments();
-    res.json({ code: 0, data: data.map(presentDepartment) });
+    // 无组织/用户管理权限的用户（如权限申请页）仅得精简视图，剥离负责人等 PII
+    const canManage = !!req.userPermissions?.has('system:org:manage') || !!req.userPermissions?.has('system:user:manage');
+    const present = canManage ? presentDepartment : presentDepartmentPublic;
+    res.json({ code: 0, data: data.map(present) });
   } catch (error) {
     next(error);
   }
@@ -367,7 +380,7 @@ router.delete('/departments/:id', requirePermission('system:org:manage'), async 
   try {
     const id = parsePositiveInt(req.params.id, 'id');
     await systemService.deleteDepartment(id);
-    auditService.log({ userId: req.user!.id, action: 'department.delete', target: 'department', targetId: id, ip: req.ip });
+    await auditService.log({ userId: req.user!.id, action: 'department.delete', target: 'department', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -423,7 +436,7 @@ router.delete('/groups/:id', requirePermission('system:org:manage'), async (req:
   try {
     const id = parsePositiveInt(req.params.id, 'id');
     await systemService.deleteGroup(id);
-    auditService.log({ userId: req.user!.id, action: 'group.delete', target: 'group', targetId: id, ip: req.ip });
+    await auditService.log({ userId: req.user!.id, action: 'group.delete', target: 'group', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -514,7 +527,7 @@ router.delete('/users/:id', requirePermission('system:user:manage'), async (req,
     const id = parsePositiveInt(req.params.id, 'id');
     const actor = (req as AuthRequest).user!;
     await systemService.deleteUser(id, actor.id);
-    auditService.log({ userId: actor.id, action: 'user.delete', target: 'user', targetId: id, ip: req.ip });
+    await auditService.log({ userId: actor.id, action: 'user.delete', target: 'user', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -535,7 +548,7 @@ router.put('/users/:id/reset-password', requirePermission('system:user:manage'),
       generated = true;
     }
     await systemService.resetPassword(id, password);
-    auditService.log({ userId: actor.id, action: 'user.reset_password', target: 'user', targetId: id, ip: req.ip });
+    await auditService.log({ userId: actor.id, action: 'user.reset_password', target: 'user', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '密码重置成功', data: generated ? { password } : undefined });
   } catch (error) {
     next(error);
@@ -593,7 +606,7 @@ router.delete('/roles/:id', requirePermission('system:role:manage'), async (req:
   try {
     const id = parsePositiveInt(req.params.id, 'id');
     await systemService.deleteRole(id);
-    auditService.log({ userId: req.user!.id, action: 'role.delete', target: 'role', targetId: id, ip: req.ip });
+    await auditService.log({ userId: req.user!.id, action: 'role.delete', target: 'role', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '角色删除成功' });
   } catch (error) {
     next(error);
@@ -733,7 +746,7 @@ router.delete('/projects/:id', requirePermission('project:delete'), async (req: 
   try {
     const id = parsePositiveInt(req.params.id, 'id');
     await systemService.deleteProject(id);
-    auditService.log({ userId: req.user!.id, action: 'project.delete', target: 'project', targetId: id, ip: req.ip });
+    await auditService.log({ userId: req.user!.id, action: 'project.delete', target: 'project', targetId: id, ip: req.ip });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);
@@ -908,7 +921,67 @@ router.delete('/approval-flows/:id', requirePermission('system:approval_flow:man
   try {
     const id = parsePositiveInt(req.params.id, 'id');
     await flowEngine.deleteFlow(id);
-    auditService.log({ userId: req.user!.id, action: 'approval_flow.delete', target: 'approval_flow', targetId: id, ip: req.ip });
+    await auditService.log({ userId: req.user!.id, action: 'approval_flow.delete', target: 'approval_flow', targetId: id, ip: req.ip });
+    res.json({ code: 0, message: '删除成功' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ========== 节假日日历 ==========
+const holidayService = new HolidayService();
+
+// 认证用户可读（前端用于展示和加班类型推断预览）
+router.get('/holidays', async (req: AuthRequest, res, next) => {
+  try {
+    const year = parseOptionalPositiveInt(firstQueryValue(req.query.year), 'year', { max: 9999 });
+    const data = await holidayService.list(year);
+    res.json({ code: 0, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/holidays', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const body = req.body as Record<string, unknown>;
+    const year = parsePositiveInt(body.year, 'year', { max: 9999 });
+    const items = parseArray(body.items, 'items', (item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new BusinessError(`items[${index}]格式无效`);
+      }
+      const obj = item as Record<string, unknown>;
+      return {
+        date: parseString(obj.date, `items[${index}].date`, { required: true, min: 10, max: 10 })!,
+        name: parseString(obj.name, `items[${index}].name`, { required: true, max: 100 })!,
+        isWorkday: parseBooleanQuery(obj.isWorkday),
+      };
+    }, { max: 400 });
+    await holidayService.upsertYear(year, items);
+    auditService.log({
+      userId: req.user!.id,
+      action: 'holiday.upsert',
+      target: 'holiday',
+      detail: JSON.stringify({ year, count: items.length }),
+      ip: req.ip,
+    });
+    res.json({ code: 0, message: '节假日日历已保存' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/holidays/:date', requirePermission('system:org:manage'), async (req: AuthRequest, res, next) => {
+  try {
+    const date = parseString(req.params.date, 'date', { required: true, min: 10, max: 10 })!;
+    await holidayService.remove(date);
+    auditService.log({
+      userId: req.user!.id,
+      action: 'holiday.delete',
+      target: 'holiday',
+      detail: JSON.stringify({ date }),
+      ip: req.ip,
+    });
     res.json({ code: 0, message: '删除成功' });
   } catch (error) {
     next(error);

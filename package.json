@@ -32,6 +32,7 @@
     "@types/react-dom": "^18.3.7",
     "@types/supertest": "^6.0.3",
     "@vitest/coverage-v8": "^4.1.10",
+    "better-sqlite3": "^11.10.0",
     "concurrently": "^8.2.2",
     "jsdom": "^26.1.0",
     "pg": "^8.22.0",

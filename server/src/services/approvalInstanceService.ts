@@ -383,7 +383,8 @@ export class ApprovalInstanceService {
       },
     );
     // better-sqlite3 返回 affected 为 number；若已被并发处理则 affected=0
-    const affected = (updateResult as any).affected ?? (updateResult as any).raw?.changes ?? 1;
+    // 注意：affected 缺失时按 0（失败）处理，而非兜底为 1，避免驱动/ORM 行为变化时绕过“已被处理”守卫。
+    const affected = (updateResult as any).affected ?? (updateResult as any).raw?.changes ?? 0;
     if (affected === 0) {
       throw new BusinessError('该审批任务已被处理，请刷新列表');
     }
@@ -464,7 +465,7 @@ export class ApprovalInstanceService {
         { id: instance.id, status: 'pending' },
         { status: 'approved', currentStepOrder: null, finishedAt: now },
       );
-      if (((r as any).affected ?? 1) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
+      if (((r as any).affected ?? 0) === 0) throw new BusinessError('审批实例状态已变更，请刷新');
       instance.status = 'approved';
       instance.currentStepOrder = null;
       instance.finishedAt = now;
@@ -501,7 +502,7 @@ export class ApprovalInstanceService {
       { id: instance.id, status: 'pending' },
       { status: 'withdrawn', currentStepOrder: null, finishedAt: now },
     );
-    const affected = (result as any).affected ?? 1;
+    const affected = (result as any).affected ?? 0;
     if (affected === 0) throw new BusinessError('审批已被处理，无法撤回');
 
     instance.status = 'withdrawn';

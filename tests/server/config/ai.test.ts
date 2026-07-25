@@ -62,7 +62,7 @@ describe('AI 配置', () => {
 
     expect(ai.ensurePiModelsJson()).toBe(true);
     expect(ai.isAiRuntimeReady()).toBe(true);
-    expect(fsMock.mkdirSync).toHaveBeenCalledWith(expect.stringContaining('/server/data'), { recursive: true, mode: 0o700 });
+    expect(fsMock.mkdirSync).toHaveBeenCalledWith(expect.stringMatching(/[\\/]server[\\/]data/), { recursive: true, mode: 0o700 });
     const content = JSON.parse(fsMock.writeFileSync.mock.calls[0][1] as string);
     expect(content.providers['worktime-llm']).toMatchObject({
       baseUrl: 'https://llm.example/v1',

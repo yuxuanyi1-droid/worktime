@@ -8,6 +8,7 @@ import { Role } from '../entities/Role';
 import { Department } from '../entities/Department';
 import { Group } from '../entities/Group';
 import { UserExternalIdentity } from '../entities/UserExternalIdentity';
+import { PersonalAccessToken } from '../entities/PersonalAccessToken';
 import { AccessPolicyService } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
@@ -28,6 +29,7 @@ export class AuthService {
   private get deptRepo() { return this.source.getRepository(Department); }
   private get groupRepo() { return this.source.getRepository(Group); }
   private get identityRepo() { return this.source.getRepository(UserExternalIdentity); }
+  private get patRepo() { return this.source.getRepository(PersonalAccessToken); }
   private get accessPolicy() { return new AccessPolicyService(this.manager); }
 
   /**
@@ -43,11 +45,69 @@ export class AuthService {
   }
 
   /**
+   * 签发 Refresh Token：用独立的 refresh 密钥 + 较长有效期，payload 携带 tokenVersion(v) 和 purpose='refresh'。
+   * - 独立密钥：即使 access token 签名密钥泄漏，攻击者也无法伪造 refresh token。
+   * - 携带 v：改密/登出时 tokenVersion+1，旧 refresh token 在 refreshAccessToken 校验时因 v 不符而失效，
+   *   与 PAT 吊销（改密时一并过期）联动，形成「一次改密，全链路失效」。
+   * - purpose='refresh'：防止 refresh token 被误当作 access token 通过 authMiddleware
+   *   （authMiddleware 用 jwtSecret 校验签名，refresh token 用 jwtRefreshSecret 签名，签名校验会失败）。
+   */
+  signRefreshToken(user: User): string {
+    return jwt.sign(
+      { id: user.id, v: Number(user.tokenVersion), purpose: 'refresh' },
+      authConfig.jwtRefreshSecret,
+      { expiresIn: authConfig.refreshExpiresIn } as jwt.SignOptions
+    );
+  }
+
+  /**
+   * 用 Refresh Token 换取新的 Access Token。
+   *
+   * 校验链路：
+   * 1. 用 jwtRefreshSecret 校验签名 + 过期（与 access token 的 jwtSecret 隔离，互不通用）。
+   * 2. 必须是 purpose==='refresh'（防止把 access token 当 refresh token 来用）。
+   * 3. 加载用户且 status=1（禁用账号不能刷新）。
+   * 4. 校验 decoded.v === user.tokenVersion：改密/登出后 tokenVersion+1，旧 refresh token 立即作废，
+   *    与 PAT 吊销联动，保证「一次改密，refresh token 也失效」。
+   *
+   * 任意一步失败都抛 BusinessError(401)，由路由 next(error) 交给 errorHandler，前端据此 clearAuth 登出。
+   */
+  async refreshAccessToken(refreshToken: string): Promise<string> {
+    let decoded: any;
+    try {
+      decoded = jwt.verify(refreshToken, authConfig.jwtRefreshSecret);
+    } catch {
+      throw new BusinessError('Refresh token 无效或已过期', 401);
+    }
+
+    if (decoded.purpose !== 'refresh') {
+      // 防止把 access token（无 purpose 或 purpose='agent'）当 refresh token 来刷新——拒绝重放攻击
+      throw new BusinessError('令牌类型错误', 401);
+    }
+
+    const user = await this.userRepo.findOne({
+      where: { id: decoded.id, status: 1 },
+      relations: ['roles', 'roles.permissions', 'department', 'group'],
+    });
+    if (!user) {
+      throw new BusinessError('用户不存在或已禁用', 401);
+    }
+
+    // 版本校验：改密/登出后 tokenVersion+1，旧 refresh token 不再匹配即作废
+    if (Number(decoded.v) !== Number(user.tokenVersion)) {
+      throw new BusinessError('登录已失效，请重新登录', 401);
+    }
+
+    return this.signLocalJwt(user);
+  }
+
+  /**
    * 组装登录响应（token + 含 permissions 的 user 对象）。
    * 供密码登录与 SSO 登录共用，避免重复代码。
    */
   private async buildLoginResponse(user: User, writeCache = true) {
     const token = this.signLocalJwt(user);
+    const refreshToken = this.signRefreshToken(user);
     const permissionSnapshot = await this.accessPolicy.getPermissionSnapshotForLoadedUser(user);
     const permissions = Array.from(permissionSnapshot.permissions);
     if (writeCache) {
@@ -65,6 +125,7 @@ export class AuthService {
     const idpManaged = await this.isIdpManaged(user.id);
     return {
       token,
+      refreshToken,
       user: {
         id: user.id,
         username: user.username,
@@ -446,6 +507,11 @@ export class AuthService {
     user.tokenVersion = Number(user.tokenVersion) + 1;
     await this.userRepo.save(user);
     await invalidateAuthUser(userId);
+    // 改密视为账号泄露应急：同时使该用户已签发的 PAT 立即过期。
+    // PAT 不走 tokenVersion（authenticatePat 跳过版本校验），否则改密后 PAT 仍以全权限有效，形成持久后门。
+    await this.patRepo.update({ userId }, { expiresAt: new Date() }).catch((err) => {
+      logger.error({ err, userId }, '[auth] 改密时吊销 PAT 失败');
+    });
     return true;
   }
 

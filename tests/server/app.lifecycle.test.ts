@@ -35,6 +35,7 @@ vi.mock('@server/config/redis', () => ({
   initRedis: mocks.initRedis,
   closeRedis: mocks.closeRedis,
   syncSubmissionGroupIdFromDb: mocks.syncSequence,
+  setRedisReadyHandler: vi.fn(),
 }));
 
 vi.mock('@server/middleware/security', () => {
@@ -136,7 +137,7 @@ describe('API 入口生命周期', () => {
 
   it('仅在显式调用时注册一次 SIGINT/SIGTERM 监听', () => {
     const once = vi.fn();
-    registerShutdownSignals({ once } as any);
+    registerShutdownSignals({ once, on: vi.fn() } as any);
     expect(once).toHaveBeenCalledWith('SIGINT', expect.any(Function));
     expect(once).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
   });

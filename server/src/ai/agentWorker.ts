@@ -120,6 +120,9 @@ function disposeSession(sessionId: string, record: WorkerSession) {
   record.unsubscribe();
   record.session.dispose?.();
   sessions.delete(sessionId);
+  // 通知主线程该会话已被（空闲 TTL / LRU 容量）淘汰，使其清理 sessionOwners 等跟踪态。
+  // 否则主线程仍认为会话驻留，下次访问命中 owner 直接返回旧 sessionId，进 worker 后抛“会话不存在”且无法自愈。
+  post({ type: 'session-disposed', sessionId });
   postWorkerStats();
 }
 
@@ -482,9 +485,18 @@ async function deleteSession(data: { requestId: string; sessionId: string; userI
   post({ type: 'action-done', requestId: data.requestId });
 }
 
+// 串行化会话创建/打开：消除“配额检查与实际创建之间”的并发竞态
+// （否则并发 create 各自读到相同计数，可突破 MAX_SESSIONS_PER_USER / MAX_RESIDENT_SESSIONS）。
+let createChain: Promise<unknown> = Promise.resolve();
+function serializedCreate(data: Parameters<typeof createOrOpenSession>[0]): Promise<void> {
+  const run = createChain.then(() => createOrOpenSession(data));
+  createChain = run.catch(() => undefined);
+  return run as Promise<void>;
+}
+
 async function handleMessage(message: any) {
   switch (message.type) {
-    case 'create': return createOrOpenSession(message);
+    case 'create': return serializedCreate(message);
     case 'list': return listSessions(message);
     case 'history': return getHistory(message);
     case 'prompt': return promptSession(message);

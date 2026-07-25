@@ -23,9 +23,10 @@ import { DepartmentReport, GroupReport, OvertimeReport, PersonalReport, ProjectR
 import request from '../../utils/request';
 import LazyEChart from '../../components/Charts/LazyEChart';
 import { usePermission } from '../../hooks/usePermission';
+import CustomReportView from './CustomReportView';
 
 const { Title, Text } = Typography;
-type ReportTabKey = 'personal' | 'group' | 'department' | 'project' | 'overtime';
+type ReportTabKey = 'personal' | 'group' | 'department' | 'project' | 'overtime' | 'custom';
 type SummaryValue = { days: number; count?: number };
 
 const palette = ['#4F7B63', '#B7791F', '#B85C5C', '#4F6F8F', '#7A6C5D', '#6D7E3F', '#8C6A9E'];
@@ -321,6 +322,7 @@ export default function Report() {
   const initialQueryStarted = useRef(false);
   const { hasPermission } = usePermission();
   const canExport = hasPermission('report:export');
+  const canViewCustom = hasPermission('report:custom:view');
 
   const startDate = dateRange[0].format('YYYY-MM-DD');
   const endDate = dateRange[1].format('YYYY-MM-DD');
@@ -374,7 +376,8 @@ export default function Report() {
     ...(scope?.canViewDepartment ? [{ key: 'department', label: '部门报表' }] : []),
     ...(scope?.canViewProject ? [{ key: 'project', label: '项目报表' }] : []),
     ...(scope?.canViewOvertime ? [{ key: 'overtime', label: '加班统计' }] : []),
-  ] as { key: ReportTabKey; label: string }[], [scope]);
+    ...(canViewCustom ? [{ key: 'custom', label: '自定义报表' }] : []),
+  ] as { key: ReportTabKey; label: string }[], [scope, canViewCustom]);
 
   const getErrorMessage = (err: any, fallback: string) => err?.response?.data?.message || err?.message || fallback;
 
@@ -544,6 +547,8 @@ export default function Report() {
   };
 
   const queryCurrent = (key: ReportTabKey = tabKey) => {
+    // 自定义报表拥有独立的构建器与查询入口，不走统一查询逻辑
+    if (key === 'custom') return;
     // 标记该 Tab 已加载（无论成功失败，避免切回时反复触发）
     setLoadedTabs((prev) => new Set(prev).add(key));
     if (key === 'group') loadGroup();
@@ -565,6 +570,8 @@ export default function Report() {
     cancelActiveQuery();
     setError(null);
     setTabKey(nextKey);
+    // 自定义报表 Tab 有自己的构建器，不触发固定报表查询
+    if (nextKey === 'custom') return;
     if (!loadedTabs.has(nextKey)) {
       queryCurrent(nextKey);
     }
@@ -628,6 +635,8 @@ export default function Report() {
     <div>
       <Title level={4} style={{ fontWeight: 700 }}>报表中心</Title>
 
+      {/* 固定报表的统一筛选条；自定义报表 Tab 有独立构建器，故隐藏 */}
+      {tabKey !== 'custom' && (
       <Card style={{ borderRadius: 8, marginBottom: 16 }}>
         <Row gutter={[12, 12]} align="middle">
           <Col>
@@ -807,6 +816,7 @@ export default function Report() {
           )}
         </Row>
       </Card>
+      )}
 
       {scopeError && (
         <Alert
@@ -844,6 +854,7 @@ export default function Report() {
           {tabKey === 'department' && <DepartmentView data={deptData} />}
           {tabKey === 'project' && <ProjectView data={projData} />}
           {tabKey === 'overtime' && <OvertimeView data={overtimeData} />}
+          {tabKey === 'custom' && <CustomReportView scope={scope} scopeLoading={scopeLoading} />}
         </Spin>
       </Spin>
     </div>

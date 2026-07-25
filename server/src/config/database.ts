@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import path from 'path';
+import { logger } from '../utils/logger';
 import { User } from '../entities/User';
 import { Department } from '../entities/Department';
 import { Group } from '../entities/Group';
@@ -28,6 +29,8 @@ import { UserPermissionGrant } from '../entities/UserPermissionGrant';
 import { SubmissionSequence } from '../entities/SubmissionSequence';
 import { UserExternalIdentity } from '../entities/UserExternalIdentity';
 import { PersonalAccessToken } from '../entities/PersonalAccessToken';
+import { Holiday } from '../entities/Holiday';
+import { ReportDefinition } from '../entities/ReportDefinition';
 import { InitSchema1700000000000 } from '../migrations/1700000000000-InitSchema';
 import { PrecisionAndIndexes1700000000001 } from '../migrations/1700000000001-PrecisionAndIndexes';
 import { CountersignSupport1700000000002 } from '../migrations/1700000000002-CountersignSupport';
@@ -45,6 +48,8 @@ import { ApprovalFlowDefaultConstraint1700000000013 } from '../migrations/170000
 import { PermissionGrantConsistency1700000000014 } from '../migrations/1700000000014-PermissionGrantConsistency';
 import { OrganizationSiblingConstraint1700000000015 } from '../migrations/1700000000015-OrganizationSiblingConstraint';
 import { ExternalIdentityProviderConstraint1700000000016 } from '../migrations/1700000000016-ExternalIdentityProviderConstraint';
+import { HolidayCalendar1700000000018 } from '../migrations/1700000000018-HolidayCalendar';
+import { ReportDefinitions1700000000019 } from '../migrations/1700000000019-ReportDefinitions';
 
 /**
  * PostgreSQL 是当前唯一生产数据库；保留旧分支仅用于历史代码读取，不再保证 SQLite 兼容。
@@ -63,6 +68,8 @@ const entities = [
   SubmissionSequence,
   UserExternalIdentity,
   PersonalAccessToken,
+  Holiday,
+  ReportDefinition,
 ];
 
 const migrations = [
@@ -81,6 +88,8 @@ const migrations = [
   PermissionGrantConsistency1700000000014,
   OrganizationSiblingConstraint1700000000015,
   ExternalIdentityProviderConstraint1700000000016,
+  HolidayCalendar1700000000018,
+  ReportDefinitions1700000000019,
 ];
 
 /**
@@ -173,7 +182,10 @@ export async function ensureSchema(): Promise<void> {
     await AppDataSource.runMigrations();
   } finally {
     if (dbType === 'postgres' && queryRunner.isReleased === false) {
-      await queryRunner.query('SELECT pg_advisory_unlock($1)', [migrationLockId]).catch(() => undefined);
+      // 解锁失败不能静默吞掉：会话级 advisory lock 一旦泄漏，其他实例启动时将永久阻塞。
+      await queryRunner.query('SELECT pg_advisory_unlock($1)', [migrationLockId]).catch((err: unknown) => {
+        logger.warn({ err, lockId: migrationLockId }, '[database] pg_advisory_unlock 失败，会话级锁可能泄漏');
+      });
     }
     await queryRunner.release();
   }

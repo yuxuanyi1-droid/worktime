@@ -26,6 +26,8 @@ export interface LoginResult {
   user: UserInfo;
   /** OIDC 登录时由服务端签名 state 恢复的站内跳转目标；密码登录不返回。 */
   redirect?: string;
+  /** 用于刷新 access token 的长期令牌（密码登录/SSO 登录返回；改密/登出后失效）。 */
+  refreshToken?: string;
 }
 
 // ==================== OIDC / 第三方登录 ====================

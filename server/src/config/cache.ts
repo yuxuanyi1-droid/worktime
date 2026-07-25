@@ -142,6 +142,7 @@ export async function invalidateAllDefaultFlows(): Promise<void> {
     CacheKeys.defaultFlow('timesheet'),
     CacheKeys.defaultFlow('overtime'),
     CacheKeys.defaultFlow('weekly_report'),
+    CacheKeys.defaultFlow('permission_request'),
   );
 }
 

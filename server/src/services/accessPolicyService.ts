@@ -42,6 +42,37 @@ export class AccessPolicyService {
   private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
   private get grantRepo() { return (this.manager ?? AppDataSource).getRepository(UserPermissionGrant); }
 
+  /**
+   * 分组子树的进程内短期缓存，避免 getGroupAndDescendantIds 在同一请求/突发窗口内反复全表扫描。
+   *
+   * 失效策略：组树仅在 systemService 的 createGroup/updateGroup/deleteGroup 中变更，这些路径已调用
+   * invalidateOrgCatalog() 清理 Redis 侧 org-catalog 缓存；此进程内缓存以短 TTL 兜底，最坏情况下
+   * GROUP_TREE_TTL_MS 后自动过期，不会长期返回陈旧子树。invalidateGroupTreeCache 可在外部主动触发即时失效。
+   */
+  private static groupTreeCache: {
+    loadedAt: number;
+    entries: ReadonlyArray<{ id: number; parentId: number | null }>;
+  } | null = null;
+  private static readonly GROUP_TREE_TTL_MS = 15_000;
+
+  /** 加载分组树（仅 id/parentId）并在进程内缓存短时复用。 */
+  private async loadGroupTree(): Promise<ReadonlyArray<{ id: number; parentId: number | null }>> {
+    const now = Date.now();
+    const cached = AccessPolicyService.groupTreeCache;
+    if (cached && now - cached.loadedAt < AccessPolicyService.GROUP_TREE_TTL_MS) {
+      return cached.entries;
+    }
+    const groups = await this.groupRepo.find({ select: ['id', 'parentId'] });
+    const entries = groups.map((g) => ({ id: g.id, parentId: g.parentId ?? null }));
+    AccessPolicyService.groupTreeCache = { loadedAt: now, entries };
+    return entries;
+  }
+
+  /** 组树变更后清理进程内缓存（由外部在 createGroup/updateGroup/deleteGroup 后调用）。 */
+  static invalidateGroupTreeCache(): void {
+    AccessPolicyService.groupTreeCache = null;
+  }
+
   isAdmin(viewer: AccessViewer) {
     return viewer.roles.includes('admin');
   }
@@ -257,7 +288,8 @@ export class AccessPolicyService {
   async getGroupAndDescendantIds(rootIds: number[]) {
     if (!rootIds.length) return [];
 
-    const allGroups = await this.groupRepo.find();
+    // 复用进程内短期缓存的分组树，避免每次调用都全表扫描。
+    const allGroups = await this.loadGroupTree();
     const visible = new Set(rootIds);
     let changed = true;
 

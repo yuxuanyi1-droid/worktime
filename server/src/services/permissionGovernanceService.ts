@@ -200,15 +200,11 @@ export class PermissionGovernanceService {
             });
           }
         } else {
-          // 保留 SDK 返回类型兼容；当前审批实例服务不允许无流程自动通过。
-          const grant = await txService.activateGrant(request.id, null, null);
-          await txService.requestRepo.update(request.id, {
-            status: 'approved',
-            currentStep: 0,
-            totalSteps: 0,
-            approvalInstanceId: resolved.instance?.id ?? null,
-            grantId: grant.id,
-          });
+          // 防御性失败：审批实例服务（start/startMany）当前只会返回 'submitted'（找不到有效审批人时
+          // 会直接抛 BusinessError），因此本分支正常流程下不可达。此前这里会静默 activateGrant 自动
+          // 授权，属于异常的提权兜底——一旦 start 行为变化会让权限申请绕过审批直接生效。
+          // 这里改为显式抛错（fail-closed）：既不静默授权，也通过事务回滚撤销已写入的申请记录。
+          throw new BusinessError('权限申请审批流程异常，未进入审批环节，已拒绝自动授权');
         }
       });
     } catch (error) {

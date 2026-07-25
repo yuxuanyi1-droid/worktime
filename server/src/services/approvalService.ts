@@ -13,7 +13,7 @@ import { NotificationPublisher } from './notifications';
 import { PermissionRequest } from '../entities/PermissionRequest';
 import { PermissionGovernanceService } from './permissionGovernanceService';
 import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
-import { BusinessError } from '../utils/errors';
+import { BusinessError, isUniqueViolation } from '../utils/errors';
 import { round2 } from '../utils/validation';
 import { invalidateAuthUsers } from '../config/cache';
 
@@ -60,6 +60,9 @@ interface ApprovalTargetLike {
 type PendingNotification =
   | { kind: 'pending'; approverIds: number[]; targetType: string; targetId: number; applicantName: string; title: string }
   | { kind: 'result'; applicantId: number; targetType: string; targetId: number; approved: boolean; comment?: string };
+
+/** 批量审批部分成功时，单条失败项的描述（附加在 approve 返回结构的 failed 字段，向后兼容） */
+type FailedApprovalItem = { targetType: string; targetId: number; action: string; reason: string };
 
 export class ApprovalService {
   constructor(private manager?: EntityManager) {}
@@ -162,7 +165,7 @@ export class ApprovalService {
     };
 
     if (targetType === 'timesheet') {
-      const ts = await this.timesheetRepo.findOne({ where: { id: target.id }, relations: ['project'] });
+      const ts = (target as any).project ? (target as any) : await this.timesheetRepo.findOne({ where: { id: target.id }, relations: ['project'] });
       if (ts?.submissionGroupId) {
         const groupRecords = await this.timesheetRepo.find({
           where: { submissionGroupId: ts.submissionGroupId },
@@ -241,7 +244,7 @@ export class ApprovalService {
       const ids = bucket.map(t => t.targetId);
       const repo = this.getRepoByTargetType(type);
       if (repo && ids.length) {
-        const found = await repo.find({ where: { id: In(ids) } as any });
+        const found = await repo.find({ where: { id: In(ids) } as any, relations: type === 'timesheet' ? ['project'] : undefined });
         for (const t of found) targetMap.set(`${type}_${t.id}`, t);
       }
     }
@@ -294,125 +297,185 @@ export class ApprovalService {
       if (item.action === 'reject' && !item.comment?.trim()) throw new BusinessError('驳回时必须填写原因');
     }
     const isAdmin = await this.isAdminUser(approverId);
-    const notifications: PendingNotification[] = [];
-    const permissionGrantUserIds = new Set<number>();
     const applicantNameCache = new Map<number, string>();
 
-    await this.transaction(async (manager) => {
-      const txService = new ApprovalService(manager);
+    // 已传入事务管理器（被外层事务包裹）时保持原子语义：单条失败必须整批回滚，
+    // 且在外层事务内无法开启独立子事务做部分成功。现有测试与契约依赖此处的抛错行为。
+    if (this.manager) {
+      const notifications: PendingNotification[] = [];
+      const permissionGrantUserIds = new Set<number>();
+      await this.transaction(async (manager) => {
+        for (const item of items) {
+          const res = await this.processOneApproval(manager, item, approverId, approverName, isAdmin, applicantNameCache);
+          notifications.push(...res.notifications);
+          for (const id of res.permissionGrantUserIds) permissionGrantUserIds.add(id);
+        }
+      });
+      await invalidateAuthUsers([...permissionGrantUserIds]);
+      await this.flushNotifications(notifications);
+      return { success: true, failed: [] as FailedApprovalItem[] };
+    }
 
-      for (const item of items) {
-        const { target, repo, applicantId } = await txService.getTargetInfo(item.targetType, item.targetId);
-        if (!target) throw new BusinessError(`审批记录不存在（类型：${item.targetType}，编号：${item.targetId}）`);
-        if (target.status !== 'submitted') throw new BusinessError(`记录 ${item.targetId} 不是待审批状态`);
+    // 顶层调用（无外层事务，对应 HTTP 入口 new ApprovalService()）：部分成功——
+    // 每条独立事务处理，互不影响；成功项正常提交，失败项收集到 failed 列表。
+    const notifications: PendingNotification[] = [];
+    const permissionGrantUserIds = new Set<number>();
+    const failed: FailedApprovalItem[] = [];
+    let firstError: unknown = null;
 
-        const result = await txService.approvalInstanceService.act({
+    for (const item of items) {
+      try {
+        const res = await AppDataSource.transaction(async (manager) =>
+          this.processOneApproval(manager, item, approverId, approverName, isAdmin, applicantNameCache),
+        );
+        notifications.push(...res.notifications);
+        for (const id of res.permissionGrantUserIds) permissionGrantUserIds.add(id);
+      } catch (error) {
+        if (firstError === null) firstError = error;
+        failed.push({
           targetType: item.targetType,
           targetId: item.targetId,
-          approverId,
-          approverName,
           action: item.action,
-          comment: item.comment,
-          isAdmin,
+          reason: error instanceof Error ? error.message : String(error),
         });
-
-        await txService.recordRepo.save(txService.recordRepo.create({
-          targetType: item.targetType as TargetType,
-          targetId: item.targetId,
-          instanceId: result.instance.id,
-          taskId: result.task.id,
-          approverId,
-          approverName,
-          action: item.action,
-          comment: item.comment,
-          stepOrder: result.task.stepOrder,
-          stepType: result.task.stepType,
-          stepLabel: result.task.stepLabel,
-        }));
-
-        const updateData: any = {};
-        if (result.status === 'rejected') {
-          updateData.status = 'rejected';
-          updateData.currentStep = 0;
-        } else if (result.status === 'approved') {
-          updateData.status = 'approved';
-          updateData.currentStep = 0;
-        } else {
-          updateData.currentStep = result.instance.currentStepOrder || 0;
-        }
-
-        if (item.targetType === 'timesheet' && target.submissionGroupId) {
-          // 在目标仍为 submitted 时冻结，确保通过、驳回和撤回三种终态的
-          // consumed 均包含本次申请，快照口径一致。
-          if (result.status === 'approved' || result.status === 'rejected') {
-            await txService.freezeTimesheetQuotaSnapshot(
-              result.instance.id,
-              target.submissionGroupId,
-              applicantId,
-            );
-          }
-          await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
-          if (item.action === 'approve' && result.status === 'approved') {
-            // 新版本审批通过：按 rootGroupId deprecate 整条旧链上所有旧版本（非当前 submissionGroupId）
-            const currentRec = await txService.timesheetRepo.findOne({
-              where: { submissionGroupId: target.submissionGroupId },
-            });
-            const rootGroupId = currentRec?.rootGroupId;
-            if (rootGroupId) {
-              await txService.timesheetRepo.update(
-                { rootGroupId, submissionGroupId: Not(target.submissionGroupId), status: Not('deprecated') },
-                { status: 'deprecated' },
-              );
-            } else if (target.previousGroupId) {
-              // 兜底：无 rootGroupId 时用 previousGroupId（直接前驱）
-              await txService.timesheetRepo.update(
-                { submissionGroupId: target.previousGroupId, userId: target.userId },
-                { status: 'deprecated' },
-              );
-            }
-          }
-        } else if (item.targetType === 'permission_request') {
-          if (result.status === 'approved') {
-            const grant = await txService.permissionGovernanceService.activateGrant(item.targetId, result.instance.id, {
-              id: approverId,
-              name: approverName,
-            });
-            permissionGrantUserIds.add(applicantId);
-            await txService.permissionRequestRepo.update(item.targetId, { ...updateData, grantId: grant.id });
-          } else if (result.status === 'rejected') {
-            await txService.permissionGovernanceService.markRejected(item.targetId);
-          } else {
-            await txService.permissionGovernanceService.markSubmitted(item.targetId, result.instance.currentStepOrder || 0);
-          }
-        } else {
-          await repo!.update(item.targetId, updateData);
-        }
-
-        if (item.action === 'reject') {
-          notifications.push({ kind: 'result', applicantId, targetType: item.targetType, targetId: item.targetId, approved: false, comment: item.comment });
-        } else if (result.status === 'approved') {
-          notifications.push({ kind: 'result', applicantId, targetType: item.targetType, targetId: item.targetId, approved: true });
-        } else if (result.nextApproverIds.length) {
-          let applicantName = applicantNameCache.get(applicantId);
-          if (applicantName === undefined) {
-            applicantName = (await txService.userRepo.findOneBy({ id: applicantId }))?.realName || '申请人';
-            applicantNameCache.set(applicantId, applicantName);
-          }
-          notifications.push({
-            kind: 'pending',
-            approverIds: result.nextApproverIds,
-            targetType: item.targetType,
-            targetId: item.targetId,
-            applicantName,
-            title: `审批流转至步骤${result.instance.currentStepOrder}`,
-          });
-        }
       }
-    });
+    }
 
     await invalidateAuthUsers([...permissionGrantUserIds]);
     await this.flushNotifications(notifications);
-    return { success: true };
+
+    // 全部失败时抛出首个错误，保留「单条/全失败即抛错」语义，兼容现有调用方与测试
+    // （如对单条非待审批记录调用 approve 仍会抛出「不是待审批状态」）。
+    if (failed.length === items.length && firstError) throw firstError;
+
+    return { success: failed.length === 0, failed };
+  }
+
+  /**
+   * 处理单条审批（在给定事务管理器内执行）。抽取自 approve，供原子批量与部分成功两条路径复用。
+   * 返回该条产生的通知与需刷新权限缓存的用户 id；失败时抛出，由调用方决定整批回滚或收集到 failed。
+   */
+  private async processOneApproval(
+    manager: EntityManager,
+    item: { targetType: string; targetId: number; action: 'approve' | 'reject'; comment?: string },
+    approverId: number,
+    approverName: string,
+    isAdmin: boolean,
+    applicantNameCache: Map<number, string>,
+  ): Promise<{ notifications: PendingNotification[]; permissionGrantUserIds: number[] }> {
+    const txService = new ApprovalService(manager);
+    const { target, repo, applicantId } = await txService.getTargetInfo(item.targetType, item.targetId);
+    if (!target) throw new BusinessError(`审批记录不存在（类型：${item.targetType}，编号：${item.targetId}）`);
+    if (target.status !== 'submitted') throw new BusinessError(`记录 ${item.targetId} 不是待审批状态`);
+
+    const result = await txService.approvalInstanceService.act({
+      targetType: item.targetType,
+      targetId: item.targetId,
+      approverId,
+      approverName,
+      action: item.action,
+      comment: item.comment,
+      isAdmin,
+    });
+
+    await txService.recordRepo.save(txService.recordRepo.create({
+      targetType: item.targetType as TargetType,
+      targetId: item.targetId,
+      instanceId: result.instance.id,
+      taskId: result.task.id,
+      approverId,
+      approverName,
+      action: item.action,
+      comment: item.comment,
+      stepOrder: result.task.stepOrder,
+      stepType: result.task.stepType,
+      stepLabel: result.task.stepLabel,
+    }));
+
+    const updateData: any = {};
+    if (result.status === 'rejected') {
+      updateData.status = 'rejected';
+      updateData.currentStep = 0;
+    } else if (result.status === 'approved') {
+      updateData.status = 'approved';
+      updateData.currentStep = 0;
+    } else {
+      updateData.currentStep = result.instance.currentStepOrder || 0;
+    }
+
+    let permissionGrantUserId: number | null = null;
+    if (item.targetType === 'timesheet' && target.submissionGroupId) {
+      // 在目标仍为 submitted 时冻结，确保通过、驳回和撤回三种终态的
+      // consumed 均包含本次申请，快照口径一致。
+      if (result.status === 'approved' || result.status === 'rejected') {
+        await txService.freezeTimesheetQuotaSnapshot(
+          result.instance.id,
+          target.submissionGroupId,
+          applicantId,
+        );
+      }
+      await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
+      if (item.action === 'approve' && result.status === 'approved') {
+        // 新版本审批通过：按 rootGroupId deprecate 整条旧链上所有旧版本（非当前 submissionGroupId）
+        const currentRec = await txService.timesheetRepo.findOne({
+          where: { submissionGroupId: target.submissionGroupId },
+        });
+        const rootGroupId = currentRec?.rootGroupId;
+        if (rootGroupId) {
+          await txService.timesheetRepo.update(
+            { rootGroupId, submissionGroupId: Not(target.submissionGroupId), status: Not('deprecated') },
+            { status: 'deprecated' },
+          );
+        } else if (target.previousGroupId) {
+          // 兜底：无 rootGroupId 时用 previousGroupId（直接前驱）
+          await txService.timesheetRepo.update(
+            { submissionGroupId: target.previousGroupId, userId: target.userId },
+            { status: 'deprecated' },
+          );
+        }
+      }
+    } else if (item.targetType === 'permission_request') {
+      if (result.status === 'approved') {
+        const grant = await txService.permissionGovernanceService.activateGrant(item.targetId, result.instance.id, {
+          id: approverId,
+          name: approverName,
+        });
+        permissionGrantUserId = applicantId;
+        await txService.permissionRequestRepo.update(item.targetId, { ...updateData, grantId: grant.id });
+      } else if (result.status === 'rejected') {
+        await txService.permissionGovernanceService.markRejected(item.targetId);
+      } else {
+        await txService.permissionGovernanceService.markSubmitted(item.targetId, result.instance.currentStepOrder || 0);
+      }
+    } else {
+      await repo!.update(item.targetId, updateData);
+    }
+
+    const notifications: PendingNotification[] = [];
+    if (item.action === 'reject') {
+      notifications.push({ kind: 'result', applicantId, targetType: item.targetType, targetId: item.targetId, approved: false, comment: item.comment });
+    } else if (result.status === 'approved') {
+      notifications.push({ kind: 'result', applicantId, targetType: item.targetType, targetId: item.targetId, approved: true });
+    } else if (result.nextApproverIds.length) {
+      let applicantName = applicantNameCache.get(applicantId);
+      if (applicantName === undefined) {
+        applicantName = (await txService.userRepo.findOneBy({ id: applicantId }))?.realName || '申请人';
+        applicantNameCache.set(applicantId, applicantName);
+      }
+      notifications.push({
+        kind: 'pending',
+        approverIds: result.nextApproverIds,
+        targetType: item.targetType,
+        targetId: item.targetId,
+        applicantName,
+        title: `审批流转至步骤${result.instance.currentStepOrder}`,
+      });
+    }
+
+    return {
+      notifications,
+      permissionGrantUserIds: permissionGrantUserId === null ? [] : [permissionGrantUserId],
+    };
   }
 
   /** 事务提交后统一发送通知（失败不影响业务） */
@@ -440,6 +503,17 @@ export class ApprovalService {
     };
     const candidateQueries: string[] = [];
 
+    // 表名取自实体元数据（单一事实来源），避免硬编码物理表名：
+    // 实体 @Entity('xxx') 改名时此处自动同步。列名仍以带引号的实体属性名书写
+    // （TypeORM 默认属性名即列名），属更深层抽象，超出本次「消除表名硬编码」范围。
+    const tableName = {
+      timesheet: this.timesheetRepo.metadata.tableName,
+      overtime: this.overtimeRepo.metadata.tableName,
+      weeklyReport: this.weeklyReportRepo.metadata.tableName,
+      permissionRequest: this.permissionRequestRepo.metadata.tableName,
+      approvalInstance: this.instanceRepo.metadata.tableName,
+    };
+
     if (!targetType || targetType === 'timesheet') {
       const conditions = [`t."userId" = ${bind(userId)}`, `t."status" <> 'deprecated'`];
       if (status) conditions.push(`t."status" = ${bind(status)}`);
@@ -448,8 +522,8 @@ export class ApprovalService {
       candidateQueries.push(`
         SELECT 'timesheet' AS "targetType", MIN(t.id) AS "targetId",
           COALESCE(MAX(i."submittedAt"), MAX(t."updatedAt")) AS "sortAt"
-        FROM timesheets t
-        LEFT JOIN approval_instances i ON i.id = t."approvalInstanceId"
+        FROM ${tableName.timesheet} t
+        LEFT JOIN ${tableName.approvalInstance} i ON i.id = t."approvalInstanceId"
         WHERE ${conditions.join(' AND ')}
         GROUP BY COALESCE(t."submissionGroupId", -t.id)
       `);
@@ -471,14 +545,14 @@ export class ApprovalService {
         SELECT '${type}' AS "targetType", ${alias}.id AS "targetId",
           COALESCE(i."submittedAt", ${alias}."updatedAt") AS "sortAt"
         FROM ${table} ${alias}
-        LEFT JOIN approval_instances i ON i.id = ${alias}."approvalInstanceId"
+        LEFT JOIN ${tableName.approvalInstance} i ON i.id = ${alias}."approvalInstanceId"
         WHERE ${conditions.join(' AND ')}
       `);
     };
-    addSingleRecordQuery('overtime', 'overtime_applications', 'userId', 'date');
-    addSingleRecordQuery('weekly_report', 'weekly_reports', 'userId', 'weekStart');
+    addSingleRecordQuery('overtime', tableName.overtime, 'userId', 'date');
+    addSingleRecordQuery('weekly_report', tableName.weeklyReport, 'userId', 'weekStart');
     // 权限申请没有业务日期字段，日期筛选仍沿用原行为，不对其生效。
-    addSingleRecordQuery('permission_request', 'permission_requests', 'applicantId');
+    addSingleRecordQuery('permission_request', tableName.permissionRequest, 'applicantId');
 
     if (!candidateQueries.length) return { list: [], total: 0, page, pageSize };
     const unionSql = candidateQueries.join(' UNION ALL ');
@@ -643,6 +717,8 @@ export class ApprovalService {
       const { target } = await txService.getTargetInfo(targetType, targetId);
       if (!target) throw new BusinessError('记录不存在');
       if ((target.userId ?? target.applicantId) !== fromUserId) throw new BusinessError('只能抄送自己的申请');
+      // 仅允许对审批中（submitted）的单据抄送：已撤回/已通过/已驳回的单据不应再产生抄送传阅。
+      if (target.status !== 'submitted') throw new BusinessError('只能抄送审批中的申请');
       const instance = await txService.getTargetInstance(targetType, target, targetId);
 
       const recipients = await txService.userRepo.find({
@@ -663,19 +739,26 @@ export class ApprovalService {
       for (const recipient of recipients) {
         if (existingIds.has(recipient.id)) continue;
 
-        await txService.recordRepo.save(txService.recordRepo.create({
-          targetType: targetType as TargetType,
-          targetId,
-          instanceId: instance?.id ?? null,
-          taskId: null,
-          approverId: recipient.id,
-          approverName: recipient.realName,
-          action: 'cc',
-          comment: `${fromUserName} 抄送给您传阅`,
-          stepOrder: 0,
-          stepType: 'cc',
-          stepLabel: '抄送传阅',
-        }));
+        try {
+          await txService.recordRepo.save(txService.recordRepo.create({
+            targetType: targetType as TargetType,
+            targetId,
+            instanceId: instance?.id ?? null,
+            taskId: null,
+            approverId: recipient.id,
+            approverName: recipient.realName,
+            action: 'cc',
+            comment: `${fromUserName} 抄送给您传阅`,
+            stepOrder: 0,
+            stepType: 'cc',
+            stepLabel: '抄送传阅',
+          }));
+        } catch (error) {
+          // 并发抄送：check-then-insert 之间另一事务已为同一收件人写入抄送记录，
+          // 撞唯一约束（若存在）时转友好提示，避免重复 CC 记录后静默成功。
+          if (isUniqueViolation(error)) throw new BusinessError('已抄送，请刷新');
+          throw error;
+        }
         createdCount += 1;
         createdRecipientIds.push(recipient.id);
       }
@@ -715,7 +798,7 @@ export class ApprovalService {
     for (const [type, ids] of targetIdsByType) {
       const repo = this.getRepoByTargetType(type);
       if (repo && ids.length) {
-        const found = await repo.find({ where: { id: In(ids) } as any });
+        const found = await repo.find({ where: { id: In(ids) } as any, relations: type === 'timesheet' ? ['project'] : undefined });
         for (const t of found) targetMap.set(`${type}_${t.id}`, t as ApprovalTargetLike);
       }
     }
@@ -876,9 +959,15 @@ export class ApprovalService {
     groupName?: string;
   } | null> {
     // 1. 沿组层级向上查找配额配置（与 module_se 审批步骤同样的向上继承逻辑）
+    //    visited 集合 + 深度上限防止组 parent 链出现循环引用（互指）时无限循环。
     let allocation: { allocation: number; groupId: number; groupName: string } | null = null;
     let searchGroupId: number | null = groupId;
+    const visited = new Set<number>();
+    const MAX_DEPTH = 32;
+    let depth = 0;
     while (searchGroupId) {
+      if (visited.has(searchGroupId) || depth++ > MAX_DEPTH) break; // 检测到循环引用或超出深度，终止
+      visited.add(searchGroupId);
       const found = await this.allocationRepo.findOne({
         where: { projectId, groupId: searchGroupId },
         relations: ['group'],
@@ -916,6 +1005,8 @@ export class ApprovalService {
     }
 
     // 3. 动态查询配额组及其所有子组成员在该项目的已消耗工时（submitted + approved）
+    // 去重保证：timesheets 上的部分唯一索引 (userId,projectId,date) WHERE 活跃 确保同一用户+项目+日期
+    // 只有一条活跃记录，故 SUM 不会因并发重复提交而双计（历史重复数据会在该索引创建时被暴露）。
     const consumedRaw = await this.timesheetRepo
       .createQueryBuilder('t')
       .innerJoin('users', 'u', 'u.id = t.userId')

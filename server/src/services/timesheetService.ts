@@ -11,7 +11,7 @@ import { User } from '../entities/User';
 import { Project } from '../entities/Project';
 import { ApprovalInstanceService } from './approvalInstanceService';
 import { AccessPolicyService, OrgSnapshot } from './accessPolicyService';
-import { BusinessError } from '../utils/errors';
+import { BusinessError, isUniqueViolation } from '../utils/errors';
 import { round2 } from '../utils/validation';
 import { logger } from '../utils/logger';
 import { CacheKeys, CacheTtl, cacheGet, cacheSet } from '../config/cache';
@@ -22,6 +22,7 @@ import {
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 dayjs.extend(isoWeek);
+import { businessDayjs } from '../utils/time';
 
 function dayjsExt(d: string | dayjs.Dayjs) { return dayjs(d); }
 
@@ -106,11 +107,11 @@ export class TimesheetService {
     if (!raw) return;
     const lockDay = parseInt(raw, 10);
     if (isNaN(lockDay) || lockDay < 1 || lockDay > 28) return;
-    const now = dayjs();
+    const now = businessDayjs();
     const currentMonthStart = now.startOf('month');
     const previousMonthStart = currentMonthStart.subtract(1, 'month');
     for (const date of dates) {
-      const d = dayjs(date);
+      const d = businessDayjs(date);
       const isOlderThanPreviousMonth = d.isBefore(previousMonthStart, 'day');
       const isPreviousMonthAfterLockDay = d.isBefore(currentMonthStart, 'day') && now.date() > lockDay;
       if (isOlderThanPreviousMonth || isPreviousMonthAfterLockDay) {
@@ -280,10 +281,13 @@ export class TimesheetService {
         if (maxGroups.length > 0) {
           qb1.where('t.submissionGroupId IN (:...maxGroups)', { maxGroups })
             .andWhere('t.status NOT IN (:...mainExcl)', { mainExcl: ['deprecated', 'rejected', 'withdrawn'] })
-            .orWhere('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' });
+            .orWhere('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' })
+            // 路径C：被驳回工时需在周填报表可见可改，供用户修改后重新提交（否则形成功能断点）
+            .orWhere('t.status = :rejected', { rejected: 'rejected' });
         } else {
-          // 无已提交版本：只查真草稿
-          qb1.where('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' });
+          // 无已提交版本：真草稿 + 被驳回（均可编辑后重提）
+          qb1.where('t.submissionGroupId IS NULL AND t.status = :draft', { draft: 'draft' })
+            .orWhere('t.status = :rejected', { rejected: 'rejected' });
         }
       }));
       if (status) {
@@ -326,30 +330,43 @@ export class TimesheetService {
     return ids[0];
   }
 
-  /** 一次分配 count 个连续序号，减少多项目提交往返 */
+  /** 一次分配 count 个连续序号，减少多项目提交往返。
+   *  DB 回退路径每次先与 timesheets.MAX(submissionGroupId) 校准，并在事务内对计数器行加写锁，
+   *  消除「Redis 运行期发号、seqRepo 行长期不回写」在 Redis 抖动回退时碰撞已用序号的风险。 */
   private async nextSubmissionGroupIds(count: number): Promise<number[]> {
     if (count <= 0) return [];
     const { redisNextSubmissionGroupIds } = await import('../config/redis');
     const fromRedis = await redisNextSubmissionGroupIds(count);
     if (fromRedis) return fromRedis;
 
-    const out: number[] = [];
-    for (let i = 0; i < count; i++) {
-      const existing = await this.seqRepo.findOneBy({ id: 1 });
-      if (!existing) {
-        const maxGroup = await this.repo.createQueryBuilder('t')
+    // 包入事务以使行锁生效；若已在事务内则复用同一 manager。
+    return this.transaction(async (manager) => {
+      const seqRepo = manager.getRepository(SubmissionSequence);
+      const tsRepo = manager.getRepository(Timesheet);
+      const out: number[] = [];
+      for (let i = 0; i < count; i++) {
+        // 当前 timesheets 中已用最大组号（Redis 期间发号最终都落在这里）
+        const maxRow = await tsRepo.createQueryBuilder('t')
           .select('MAX(t.submissionGroupId)', 'maxId')
           .getRawOne<{ maxId: number | null }>();
-        const nextId = (maxGroup?.maxId ?? 0) + 1;
-        await this.seqRepo.save(this.seqRepo.create({ id: 1, currentValue: nextId }));
-        out.push(nextId);
-        continue;
+        const dbMax = maxRow?.maxId ?? 0;
+
+        // 行锁串行化回退路径，防止并发回退各自读到同一 currentValue 后重复发号
+        const seq = await seqRepo.findOne({ where: { id: 1 }, lock: { mode: 'pessimistic_write' } });
+        if (!seq) {
+          const nextId = Math.max(1, dbMax + 1);
+          await seqRepo.save(seqRepo.create({ id: 1, currentValue: nextId }));
+          out.push(nextId);
+          continue;
+        }
+        // 校准：DB 实际最大组号可能已大于计数器（Redis 期间发号不回写本表）
+        if (dbMax > seq.currentValue) seq.currentValue = dbMax;
+        seq.currentValue += 1;
+        await seqRepo.save(seq);
+        out.push(seq.currentValue);
       }
-      await this.seqRepo.increment({ id: 1 }, 'currentValue', 1);
-      const updated = await this.seqRepo.findOneBy({ id: 1 });
-      out.push(updated!.currentValue);
-    }
-    return out;
+      return out;
+    });
   }
 
   /**
@@ -363,13 +380,16 @@ export class TimesheetService {
       // 同步模式用于测试/诊断，失败必须返回调用方，不能伪装成提交成功。
       return this.processApprovalJobs(jobs);
     }
-    return enqueueTimesheetApprovals(jobs).then((ok) => {
+    return enqueueTimesheetApprovals(jobs).then(async (ok) => {
       if (ok) return;
-      setImmediate(() => {
-        this.processApprovalJobs(jobs).catch((err) => {
-          logger.error({ err, jobs: jobs.map((j) => j.targetId) }, '[timesheet] 后置审批降级失败');
-        });
-      });
+      // Redis 入队失败：同步降级执行审批实例创建，失败则向上抛出明确错误。
+      // 不再 setImmediate 静默吞错，避免“记录已 submitted 但无审批实例、接口却返回成功”的不可见缝隙。
+      try {
+        await this.processApprovalJobs(jobs);
+      } catch (err) {
+        logger.error({ err, jobs: jobs.map((j) => j.targetId) }, '[timesheet] 后置审批创建失败（记录已 submitted，需补偿处理）');
+        throw new BusinessError('工时已提交，但审批创建失败，请联系管理员或稍后重试');
+      }
     });
   }
 
@@ -405,6 +425,8 @@ export class TimesheetService {
     });
     const existingByTarget = new Map(existingInstances.map((instance) => [instance.targetId, instance]));
     const newJobs = activeJobs.filter((job) => !existingByTarget.has(job.targetId));
+    // 本次新创建实例的 targetId 集合：用于避免对重投递（实例已存在）的 job 重复发送 approval-pending 通知。
+    const newTargetIds = new Set(newJobs.map((job) => job.targetId));
     const createdList = await svc.approvalInstanceService.startMany(
       newJobs.map((job) => ({
         targetType: 'timesheet' as const,
@@ -443,7 +465,11 @@ export class TimesheetService {
             totalSteps: resolved.instance.totalSteps,
           },
         );
-        if (resolved.firstApproverIds.length) {
+        if (resolved.firstApproverIds.length && newTargetIds.has(job.targetId)) {
+          // 仅对本次新创建的审批实例发送 approval-pending 通知；重投递（实例已存在）的 job
+          // 认为首次处理时已通知过，不重复发送（保守实现：以"实例新建"作为已通知判据，
+          // 不引入额外 DB 列）。极端情况下首次处理崩溃在发通知之前会导致该条漏发，可由审批人
+          // 主动查看待办列表兜底——优于重复打扰。
           let submitter = submitterCache.get(job.userId);
           if (submitter === undefined) {
             submitter = await svc.userRepo.findOneBy({ id: job.userId });
@@ -538,6 +564,10 @@ export class TimesheetService {
           title: `工时审批 ${r.days}天`,
         });
       }
+    }).catch((err) => {
+      // 并发提交撞 (userId,projectId,date) 活跃唯一索引 → 友好提示，避免重复审批实例
+      if (isUniqueViolation(err)) throw new BusinessError('同一周工时正在提交或已存在，请刷新后重试');
+      throw err;
     });
 
     const maybeWait = this.scheduleTimesheetApprovals(approvalJobs);
@@ -816,6 +846,10 @@ export class TimesheetService {
           title: `工时审批 ${built.totalDays}天`,
         });
       }
+    }).catch((err) => {
+      // 并发提交撞 (userId,projectId,date) 活跃唯一索引 → 友好提示，避免重复记录/重复审批实例
+      if (isUniqueViolation(err)) throw new BusinessError('同一周工时正在提交，请刷新后重试');
+      throw err;
     });
 
     const maybeWait = this.scheduleTimesheetApprovals(approvalJobs);
@@ -902,14 +936,18 @@ export class TimesheetService {
     return { rootGroupId, groups };
   }
 
-  /** 周汇总 — 按 date 取最大 submissionGroupId（最新版本）去重 */
-  async getWeeklySummary(userId: number, weekStart: string, weekEnd: string) {
+  /** 周汇总 — 默认按 date 取最大 submissionGroupId（最新版本）去重（含 submitted+approved）；
+   *  approvedOnly=true 时仅统计已通过(approved)工时，供周报审批口径使用。 */
+  async getWeeklySummary(userId: number, weekStart: string, weekEnd: string, options?: { approvedOnly?: boolean }) {
+    const approvedOnly = !!options?.approvedOnly;
     const rawRecords = await this.repo.find({
-      where: { userId, date: Between(weekStart, weekEnd), status: Not('deprecated') },
+      where: approvedOnly
+        ? { userId, date: Between(weekStart, weekEnd), status: 'approved' as const }
+        : { userId, date: Between(weekStart, weekEnd), status: Not('deprecated') },
       relations: ['project'],
     });
 
-    const records = dedupByLatestSubmissionGroup(rawRecords);
+    const records = approvedOnly ? rawRecords : dedupByLatestSubmissionGroup(rawRecords);
 
     const byDate: Record<string, number> = {};
     for (const r of records) {
