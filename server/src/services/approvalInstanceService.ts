@@ -344,10 +344,12 @@ export class ApprovalInstanceService {
     if (!candidate) throw new BusinessError('审批实例不存在或已结束');
     // 审批动作由 ApprovalService 放在事务中执行。对实例行加写锁，使同一审批单的
     // 会签/或签并发操作串行化，避免双方都基于旧 task 快照判断而永久卡在当前步骤。
+    // 不带 relations：单表 FOR UPDATE 避免 LEFT JOIN approval_tasks 可空侧触发
+    // Postgres "FOR UPDATE cannot be applied to the nullable side of an outer join"；
+    // 当前步骤的 task 由下方 taskRepo.find 单独加载，act() 不依赖 instance.tasks。
     const instance = this.manager
       ? await this.instanceRepo.findOne({
           where: { id: candidate.id, status: 'pending' },
-          relations: ['tasks'],
           lock: { mode: 'pessimistic_write' },
         })
       : candidate;

@@ -58,7 +58,7 @@ export const permissionDefinitions: PermissionDefinition[] = [
   { code: 'report:view:all', name: '报表中心-全局报表', module: 'report', action: 'view:all', grantable: true, scopeTypes: ['global'] },
   { code: 'report:view:overtime', name: '报表中心-查看职责范围内加班统计', requestName: '报表中心-查看指定范围加班统计', module: 'report', action: 'view:overtime', grantable: true, scopeTypes: managedScopes },
   { code: 'report:custom:view', name: '报表中心-运行自定义报表', description: '运行、查看自定义报表定义；可见数据范围受其它 report:view:* 权限约束，仅有此权限时仅能查看本人数据。', module: 'report', action: 'custom:view' },
-  { code: 'report:custom:manage', name: '报表中心-管理自定义报表定义', description: '创建、编辑、删除自定义报表定义并设置共享范围。', module: 'report', action: 'custom:manage', grantable: true },
+  { code: 'report:custom:manage', name: '报表中心-管理自定义报表定义', description: '创建、编辑、删除自定义报表定义并设置共享范围。', module: 'report', action: 'custom:manage', grantable: true, scopeTypes: ['global'] },
   { code: 'report:export', name: '报表中心-导出可见报表', requestName: '报表中心-导出指定范围报表', description: '导出范围不会超过同时拥有的报表查看权限。', module: 'report', action: 'export', grantable: true, scopeTypes: managedScopes },
 
   { code: 'project:access', name: '项目管理-显示入口', description: '控制项目菜单和页面入口，可查看或维护的项目范围需单独授予。', module: 'project', action: 'access' },

@@ -726,8 +726,15 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
 
 function parseReportDefinitionPayload(body: Record<string, unknown>) {
   const name = parseString(body.name, 'name', { required: true, max: 100 })!;
-  // config 以 JSON 字符串形式提交：先校验为字符串，再 parse 并走引擎校验确保结构合法
-  const configStr = parseString(body.config, 'config', { required: true })!;
+  // config 可为 JSON 字符串或对象：统一规整为字符串存储，再 parse 走引擎校验确保结构合法
+  let configStr: string;
+  if (typeof body.config === 'string') {
+    configStr = body.config;
+  } else if (body.config && typeof body.config === 'object') {
+    configStr = JSON.stringify(body.config);
+  } else {
+    throw new BusinessError('config 必须是合法 JSON 对象或字符串');
+  }
   let parsedConfig: unknown;
   try {
     parsedConfig = JSON.parse(configStr);
