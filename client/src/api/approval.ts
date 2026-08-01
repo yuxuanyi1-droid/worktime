@@ -102,10 +102,20 @@ export interface ApprovalDetail {
   };
 }
 
+export interface ApproveResult {
+  success: boolean;
+  failed: {
+    targetType: string;
+    targetId: number;
+    action: string;
+    reason: string;
+  }[];
+}
+
 export const approvalApi = {
   getPending: (params: any) => request.get<any, { code: number; data: PageResult<ApprovalItem> }>('/approvals/pending', { params }),
   approve: (items: { targetType: string; targetId: number; action: 'approve' | 'reject'; comment?: string }[]) =>
-    request.post<any, { code: number }>('/approvals/approve', { items }),
+    request.post<any, { code: number; data: ApproveResult }>('/approvals/approve', { items }),
   getHistory: (params: any) => request.get<any, { code: number; data: PageResult<ApprovalRecord> }>('/approvals/history', { params }),
   getMySubmissions: (params: any) => request.get<any, { code: number; data: PageResult<MySubmission> }>('/approvals/my-submissions', { params }),
   getDetail: (targetType: string, targetId: number) =>

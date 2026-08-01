@@ -1,5 +1,4 @@
 import { ReactNode } from 'react';
-import './PageContainer.css';
 
 interface PageContainerProps {
   /** 页面标题 */
@@ -21,14 +20,14 @@ interface PageContainerProps {
  */
 export function PageContainer({ title, extra, children }: PageContainerProps) {
   return (
-    <div className="page-container">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {(title || extra) && (
-        <div className="page-header">
-          <div className="page-title">{title}</div>
-          {extra && <div className="page-extra">{extra}</div>}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+          <div style={{ fontSize: 20, fontWeight: 600, color: '#2C2418', margin: 0 }}>{title}</div>
+          {extra && <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>{extra}</div>}
         </div>
       )}
-      <div className="page-body">{children}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>{children}</div>
     </div>
   );
 }

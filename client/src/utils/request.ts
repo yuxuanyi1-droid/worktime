@@ -162,10 +162,17 @@ request.interceptors.response.use(
     if (error.response && error.response.status >= 500) {
       return Promise.reject(error);
     }
+    // responseType:'blob'（如报表导出）：响应体是 Blob 取不到 message，拦截器不弹 toast
+    // 也不打 _notified 标记，交给页面 catch 解析 Blob 后自呈现真实中文错误。
+    if (error.config?.responseType === 'blob') {
+      return Promise.reject(error);
+    }
     // 其余情况（4xx 业务错误、网络断开、超时）：保留拦截器统一提示。
     // 网络断开时页面层往往拿不到具体消息，需要这里兜底。
+    // 弹 toast 后给 error 打 _notified 标记，页面层 catch 经 reportError 去重不再重复弹。
     const msg = error.response?.data?.message || error.message || '网络错误';
     notifyErrorOnce(msg);
+    (error as any)._notified = true;
     return Promise.reject(error);
   }
 );

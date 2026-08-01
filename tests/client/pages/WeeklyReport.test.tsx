@@ -21,11 +21,25 @@ vi.mock('@client/api/timesheet', () => ({
   },
 }));
 
+// 页面按真实当前周渲染：动态计算本周一~周日，避免断言随运行日期漂移
+// （历史曾硬编码 2026-07-20 那一周，周次过期后整批失败）。
+const fmtDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const monday = (() => {
+  const d = new Date();
+  const day = d.getDay() || 7;
+  return fmtDate(new Date(d.getFullYear(), d.getMonth(), d.getDate() - day + 1));
+})();
+const sunday = (() => {
+  const d = new Date(`${monday}T00:00:00`);
+  d.setDate(d.getDate() + 6);
+  return fmtDate(d);
+})();
+
 const report = {
   id: 9,
   userId: 1,
-  weekStart: '2026-07-20',
-  weekEnd: '2026-07-26',
+  weekStart: monday,
+  weekEnd: sunday,
   content: '<strong>旧周报</strong><br><img src=x onerror=alert(1)>安全内容',
   summary: '旧摘要',
   totalDays: 4,
@@ -90,8 +104,8 @@ describe('周报页面', () => {
     await waitFor(() => expect(weeklyReportApi.submit).toHaveBeenCalledWith(9));
     expect(weeklyReportApi.save).toHaveBeenCalledWith(expect.objectContaining({
       content: '修改后的周报',
-      weekStart: '2026-07-20',
-      weekEnd: '2026-07-26',
+      weekStart: monday,
+      weekEnd: sunday,
     }));
     expect(vi.mocked(weeklyReportApi.save).mock.invocationCallOrder[0])
       .toBeLessThan(vi.mocked(weeklyReportApi.submit).mock.invocationCallOrder[0]);

@@ -13,6 +13,7 @@ import { systemApi } from '../../api/system';
 import { statusMap } from '../../types';
 import type { Timesheet as TimesheetData, Project } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
+import { reportError } from '../../utils/errors';
 
 dayjs.extend(isoWeek);
 
@@ -157,7 +158,7 @@ export default function TimesheetPage() {
       const res = await systemApi.getActiveProjects();
       if (res.data) setProjects(res.data as any);
     } catch (error) {
-      message.error(getErrorMessage(error, '项目列表加载失败'));
+      reportError(error, '项目列表加载失败');
     }
   };
 
@@ -180,7 +181,7 @@ export default function TimesheetPage() {
       if (res.data) setHistoryData(res.data.list);
     } catch (error) {
       if (reqId !== historyLoadReqId.current) return;
-      message.error(getErrorMessage(error, '工时历史加载失败'));
+      reportError(error, '工时历史加载失败');
       setHistoryData([]);
     } finally {
       if (reqId === historyLoadReqId.current) setHistoryLoading(false);
@@ -247,7 +248,7 @@ export default function TimesheetPage() {
       }
     } catch (error) {
       if (reqId !== weekLoadReqId.current) return;
-      message.error(getErrorMessage(error, '本周工时加载失败'));
+      reportError(error, '本周工时加载失败');
       setRows([newRow()]);
       setDirty(false);
     } finally {
@@ -283,7 +284,7 @@ export default function TimesheetPage() {
         await loadWeekDrafts(); // 同步刷新周表，UI 与 DB 一致（loadWeekDrafts 已重置 dirty）
         return; // draft 删除已通过 loadWeekDrafts 刷新 UI，无需再手动 setRows
       } catch (error) {
-        message.error(getErrorMessage(error, '删除失败'));
+        reportError(error, '删除失败');
         return;
       }
     }
@@ -396,7 +397,7 @@ export default function TimesheetPage() {
         doCopy();
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '复制上周工时失败'));
+      reportError(error, '复制上周工时失败');
     }
   };
 
@@ -452,16 +453,25 @@ export default function TimesheetPage() {
   const handleSaveDraft = async () => {
     if (editing) {
       if (!validateWeekTotal(collectItems())) return;
-      // 编辑模式下：只保存有变更的行（对比快照）
+      // 编辑模式下：把「草稿/新增行」与「已提交/已通过行」分开保存——
+      // 草稿/新增行走 replaceWeekDrafts（整周草稿替换），已提交/已通过行走 modifySubmitted（重新发起审批）。
+      // 之前草稿行与新增行的改动被 continue 跳过，导致编辑模式保存时静默丢失。
       const submittedRows: { projectId: number; description: string; weekStart: string; entries: { date: string; days: number }[] }[] = [];
+      let draftChanged = false; // 是否有草稿/新增行被修改
       for (const row of rows) {
-        if (!row.projectId || !row.originalStatus || row.originalStatus === 'draft') continue;
+        if (!row.projectId) continue;
+        const isDraftLike = !row.originalStatus || row.originalStatus === 'draft';
         // ★ 跳过未修改的行
         if (!isRowChanged(row)) continue;
+        if (isDraftLike) {
+          draftChanged = true;
+          continue;
+        }
         const entries = weekDates
           .filter(d => row.days[d] && row.days[d] > 0)
           .map(d => ({ date: d, days: row.days[d] }));
         if (entries.length === 0) {
+          // 非草稿行不能直接清空整行（否则修改后无工时可提交）；草稿行清空视为删除该行改动
           message.warning('修改后的项目至少需要保留一天有效工时，不能直接清空整行');
           return;
         }
@@ -472,7 +482,7 @@ export default function TimesheetPage() {
           entries,
         });
       }
-      if (submittedRows.length === 0) {
+      if (!draftChanged && submittedRows.length === 0) {
         message.info('没有检测到修改，无需保存');
         return;
       }
@@ -484,16 +494,41 @@ export default function TimesheetPage() {
       }
       setSaving(true);
       try {
-        await timesheetApi.modifySubmitted(submittedRows);
-        message.success('工时已修改，新审批已自动发起');
+        // 草稿先存（整周替换），再修改已提交行；两个请求分别捕获失败——
+        // 任何一个失败都已弹错并继续刷新，避免 UI 与 DB 不一致（已成功的部分不会回滚）。
+        let failed = false;
+        try {
+          if (draftChanged) {
+            // replaceWeekDrafts 是「整周草稿替换」：命中即删除本周全部草稿再写入。
+            // 因此必须把本周所有草稿/新增行（含未修改的）一并提交，否则未修改的草稿会被误删。
+            const allDraftRows = rows.filter(r => r.projectId && (!r.originalStatus || r.originalStatus === 'draft'));
+            const draftItems = allDraftRows.flatMap(r => weekDates
+              .filter(d => r.days[d] && r.days[d] > 0)
+              .map(d => ({ projectId: r.projectId, date: d, days: Number(r.days[d]), description: r.description || undefined })));
+            await timesheetApi.replaceWeekDrafts(weekDates[0], draftItems);
+          }
+        } catch (error) {
+          failed = true;
+          reportError(error, '草稿保存失败');
+        }
+        try {
+          if (submittedRows.length > 0) {
+            await timesheetApi.modifySubmitted(submittedRows);
+          }
+        } catch (error) {
+          failed = true;
+          reportError(error, '修改工时保存失败');
+        }
+        if (!failed) {
+          message.success(submittedRows.length > 0 ? '工时已修改，新审批已自动发起' : '草稿已保存');
+        }
         setEditing(false);
         setDirty(false);
         loadWeekDrafts();
         loadHistory();
-      } catch (error) {
-        message.error(getErrorMessage(error, '修改工时保存失败'));
+      } finally {
+        setSaving(false);
       }
-      setSaving(false);
       return;
     }
 
@@ -530,7 +565,7 @@ export default function TimesheetPage() {
       loadWeekDrafts();
       loadHistory();
     } catch (error) {
-      message.error(getErrorMessage(error, '草稿保存失败'));
+      reportError(error, '草稿保存失败');
     }
     setSaving(false);
   };
@@ -612,7 +647,7 @@ export default function TimesheetPage() {
           loadWeekDrafts();
           loadHistory();
         } catch (error) {
-          message.error(getErrorMessage(error, '提交审批失败'));
+          reportError(error, '提交审批失败');
         }
         setSaving(false);
       },
@@ -797,7 +832,7 @@ export default function TimesheetPage() {
                     loadHistory();
                     loadWeekDrafts();
                   } catch (error) {
-                    message.error(getErrorMessage(error, '删除失败'));
+                    reportError(error, '删除失败');
                   }
                 }}
               >
@@ -920,7 +955,7 @@ export default function TimesheetPage() {
             </Popconfirm>
           );
         }
-        const disabled = rows.length <= 1 || isRowReadonly(row) || isPersistedSubmitted;
+        const disabled = rows.length <= 1 || isRowReadonly(row) || isPersistedSubmitted || !canDelete;
         return (
           <Tooltip title={isPersistedSubmitted ? '已提交工时不支持整行删除' : '删除行'}>
             <Button

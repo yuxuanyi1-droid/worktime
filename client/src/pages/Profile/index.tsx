@@ -178,7 +178,7 @@ export default function ProfilePage() {
           <Form.Item label="邮箱" name="email" rules={[{ type: 'email', message: '请输入有效邮箱地址' }]}>
             <Input placeholder="邮箱地址" readOnly={user?.idpManaged} />
           </Form.Item>
-          <Form.Item label="手机号" name="phone" rules={[{ pattern: /^1\d{10}$/, message: '请输入有效手机号' }]}>
+          <Form.Item label="手机号" name="phone" rules={[{ pattern: /^\+?[0-9 ()-]{6,20}$/, message: '请输入有效手机号' }]}>
             <Input placeholder="手机号" readOnly={user?.idpManaged} />
           </Form.Item>
           {!user?.idpManaged && (

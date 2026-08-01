@@ -37,6 +37,7 @@ import {
   statusMap,
 } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
+import { reportError } from '../../utils/errors';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -66,11 +67,6 @@ const grantStatusMap: Record<string, { label: string; color: string }> = {
   revoked: { label: '已撤销', color: 'default' },
   expired: { label: '已过期', color: 'warning' },
 };
-
-function getErrorMessage(error: unknown, fallback: string) {
-  const e = error as { response?: { data?: { message?: string } }; message?: string };
-  return e?.response?.data?.message || e?.message || fallback;
-}
 
 function scopeText(scopeType?: string, scopeName?: string | null) {
   if (!scopeType) return '-';
@@ -315,7 +311,7 @@ function PermissionRequestPage() {
         if (projectRes.data) setProjects(projectRes.data as Project[]);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '权限申请基础数据加载失败'));
+      reportError(error, '权限申请基础数据加载失败');
     } finally {
       setBaseLoading(false);
     }
@@ -332,7 +328,7 @@ function PermissionRequestPage() {
         setMyPage(res.data.page);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '我的权限申请加载失败'));
+      reportError(error, '我的权限申请加载失败');
       setMyRequests([]);
       setMyTotal(0);
     } finally {
@@ -351,7 +347,7 @@ function PermissionRequestPage() {
         setAllPage(res.data.page);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '全部权限申请加载失败'));
+      reportError(error, '全部权限申请加载失败');
       setAllRequests([]);
       setAllTotal(0);
     } finally {
@@ -366,7 +362,7 @@ function PermissionRequestPage() {
       if (res.data) setUsers(res.data);
     } catch (error) {
       setUsers([]);
-      message.error(getErrorMessage(error, '授权用户加载失败'));
+      reportError(error, '授权用户加载失败');
     }
   };
 
@@ -386,7 +382,7 @@ function PermissionRequestPage() {
         setGrantPage(res.data.page);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '授权记录加载失败'));
+      reportError(error, '授权记录加载失败');
       setGrants([]);
       setGrantTotal(0);
     } finally {
@@ -447,7 +443,7 @@ function PermissionRequestPage() {
             setTabKey('my');
           }
         } catch (error) {
-          message.error(getErrorMessage(error, '权限申请提交失败'));
+          reportError(error, '权限申请提交失败');
         } finally {
           setSubmitLoading(false);
         }
@@ -464,7 +460,7 @@ function PermissionRequestPage() {
       await loadMyRequests(myPage);
       if (canViewAll) await loadAllRequests(allPage);
     } catch (error) {
-      message.error(getErrorMessage(error, '撤回失败'));
+      reportError(error, '撤回失败');
     } finally {
       setWithdrawingId(null);
     }
@@ -501,7 +497,7 @@ function PermissionRequestPage() {
           message.success('授权已撤销');
           await loadGrants(grantPage);
         } catch (error) {
-          message.error(getErrorMessage(error, '撤销授权失败'));
+          reportError(error, '撤销授权失败');
           return Promise.reject(error);
         }
       },

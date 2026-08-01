@@ -38,6 +38,7 @@ import {
   type ReportOvertimeType,
 } from '../../api/report';
 import type { ReportScope } from '../../types';
+import { reportError } from '../../utils/errors';
 import LazyEChart from '../../components/Charts/LazyEChart';
 import { usePermission } from '../../hooks/usePermission';
 import { useAuthStore } from '../../stores/authStore';
@@ -356,7 +357,7 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
       setSaveOpen(false);
       loadDefinitions();
     } catch (err: any) {
-      message.error(err?.response?.data?.message || err?.message || '保存失败');
+      reportError(err, '保存失败');
     } finally {
       setSaving(false);
     }
@@ -369,7 +370,7 @@ export default function CustomReportView({ scope, scopeLoading }: CustomReportVi
       if (editingId === id) setEditingId(null);
       loadDefinitions();
     } catch (err: any) {
-      message.error(err?.response?.data?.message || err?.message || '删除失败');
+      reportError(err, '删除失败');
     }
   };
 

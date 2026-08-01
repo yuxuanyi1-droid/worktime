@@ -24,6 +24,7 @@ import {
   parseStoredTimesheetReminderConfig,
   validateTimesheetReminderConfig,
 } from '../../utils/timesheetReminderConfig';
+import { getErrorMessage } from '../../utils/errors';
 import dayjs from 'dayjs';
 import { CalendarOutlined } from '@ant-design/icons';
 
@@ -575,6 +576,8 @@ function UserTab() {
       setEditItem(null);
       form.resetFields();
       await load();
+    } catch (err) {
+      message.error(getErrorMessage(err, '保存失败'));
     } finally {
       setSaving(false);
     }
@@ -883,6 +886,8 @@ function RoleTab() {
       setRoleModal(null);
       roleForm.resetFields();
       await load(preferredRoleId);
+    } catch (err) {
+      message.error(getErrorMessage(err, '保存失败'));
     } finally {
       setSaving(false);
     }
@@ -895,6 +900,8 @@ function RoleTab() {
       message.success('角色已删除');
       if (selectedRole === role.id) setSelectedRole(undefined);
       await load();
+    } catch (err) {
+      message.error(getErrorMessage(err, '删除失败'));
     } finally {
       setSaving(false);
     }
@@ -1335,6 +1342,8 @@ function ApprovalFlowTab() {
       setEditFlow(null);
       form.resetFields();
       await load();
+    } catch (err) {
+      message.error(getErrorMessage(err, '保存失败'));
     } finally {
       setSaving(false);
     }
@@ -1897,6 +1906,8 @@ function AnnouncementTab() {
       setEditItem(null);
       form.resetFields();
       await load();
+    } catch (err) {
+      message.error(getErrorMessage(err, '保存失败'));
     } finally {
       setSaving(false);
     }

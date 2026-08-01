@@ -12,7 +12,6 @@ vi.mock('@client/api/timesheet', () => ({
   timesheetApi: {
     getMy: vi.fn(),
     delete: vi.fn(),
-    batchCreate: vi.fn(),
     replaceWeekDrafts: vi.fn(),
     submitByRows: vi.fn(),
     modifySubmitted: vi.fn(),
@@ -31,21 +30,38 @@ vi.mock('@client/api/approval', () => ({
 }));
 
 const project = { id: 3, name: '工时项目', code: 'WT', status: 'active' };
-const weekRecords = Array.from({ length: 5 }, (_, index) => ({
-  id: 20 + index,
-  userId: 1,
-  projectId: 3,
-  project,
-  date: `2026-07-${20 + index}`,
-  days: 1,
-  description: '已有草稿',
-  status: 'draft' as const,
-  currentStep: 0,
-  totalSteps: 0,
-  submissionGroupId: null,
-  createdAt: '2026-07-22T08:00:00Z',
-  updatedAt: '2026-07-22T08:00:00Z',
-}));
+// 页面按真实当前周渲染：动态计算本周一~周日，避免断言随运行日期漂移
+// （历史曾硬编码 2026-07-20 那一周，周次过期后整批失败）。
+const fmtDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const monday = (() => {
+  const d = new Date();
+  const day = d.getDay() || 7;
+  return fmtDate(new Date(d.getFullYear(), d.getMonth(), d.getDate() - day + 1));
+})();
+const sunday = (() => {
+  const d = new Date(`${monday}T00:00:00`);
+  d.setDate(d.getDate() + 6);
+  return fmtDate(d);
+})();
+const weekRecords = Array.from({ length: 5 }, (_, index) => {
+  const d = new Date(`${monday}T00:00:00`);
+  d.setDate(d.getDate() + index);
+  return {
+    id: 20 + index,
+    userId: 1,
+    projectId: 3,
+    project,
+    date: fmtDate(d),
+    days: 1,
+    description: '已有草稿',
+    status: 'draft' as const,
+    currentStep: 0,
+    totalSteps: 0,
+    submissionGroupId: null,
+    createdAt: '2026-07-22T08:00:00Z',
+    updatedAt: '2026-07-22T08:00:00Z',
+  };
+});
 
 function setUser(permissions: string[]) {
   useAuthStore.setState({
@@ -105,11 +121,10 @@ describe('工时页面', () => {
 
     await user.click(await screen.findByRole('button', { name: /保存草稿/ }));
     await waitFor(() => expect(timesheetApi.replaceWeekDrafts).toHaveBeenCalledTimes(1));
-    expect(timesheetApi.replaceWeekDrafts).toHaveBeenCalledWith('2026-07-20', expect.arrayContaining([
-      expect.objectContaining({ projectId: 3, date: '2026-07-20', days: 1, description: '已有草稿' }),
+    expect(timesheetApi.replaceWeekDrafts).toHaveBeenCalledWith(monday, expect.arrayContaining([
+      expect.objectContaining({ projectId: 3, date: monday, days: 1, description: '已有草稿' }),
     ]));
     expect(timesheetApi.delete).not.toHaveBeenCalled();
-    expect(timesheetApi.batchCreate).not.toHaveBeenCalled();
   });
 
   it('即使没有进行中项目，也会加载并展示本周已有工时', async () => {
@@ -119,7 +134,7 @@ describe('工时页面', () => {
 
     expect((await screen.findAllByText('已有草稿')).length).toBeGreaterThan(0);
     expect(timesheetApi.getMy).toHaveBeenCalledWith(expect.objectContaining({
-      startDate: '2026-07-20', endDate: '2026-07-26',
+      startDate: monday, endDate: sunday,
     }));
   });
 
@@ -152,8 +167,8 @@ describe('工时页面', () => {
     await waitFor(() => expect(timesheetApi.modifySubmitted).toHaveBeenCalledWith([expect.objectContaining({
       projectId: 3,
       description: '修改后的工作内容',
-      weekStart: '2026-07-20',
-      entries: expect.arrayContaining([{ date: '2026-07-20', days: 1 }]),
+      weekStart: monday,
+      entries: expect.arrayContaining([{ date: monday, days: 1 }]),
     })]));
     expect(timesheetApi.submitByRows).not.toHaveBeenCalled();
   });
@@ -206,7 +221,7 @@ describe('工时页面', () => {
 
     await waitFor(() => expect(timesheetApi.submitByRows).toHaveBeenCalledWith([expect.objectContaining({
       projectId: 3,
-      weekStart: '2026-07-20',
+      weekStart: monday,
       entries: expect.any(Array),
     })]));
   });

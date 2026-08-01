@@ -21,6 +21,7 @@ import dayjs from 'dayjs';
 import { reportApi } from '../../api/report';
 import { DepartmentReport, GroupReport, OvertimeReport, PersonalReport, ProjectReport, ReportScope } from '../../types';
 import request from '../../utils/request';
+import { reportError } from '../../utils/errors';
 import LazyEChart from '../../components/Charts/LazyEChart';
 import { usePermission } from '../../hooks/usePermission';
 import CustomReportView from './CustomReportView';
@@ -626,7 +627,8 @@ export default function Report() {
       window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
     } catch (err: any) {
       // responseType:'blob' 时，4xx 响应体是 Blob 而非 JSON，err.response.data.message 取不到。
-      // 需要先用 blob.text() 取出文本再 JSON.parse 解析服务端返回的 message。
+      // 拦截器对 blob 响应不弹 toast（也不打 _notified 标记），这里解析 Blob 得到真实中文错误后，
+      // 用 reportError 统一呈现（非 blob 的 4xx 已被拦截器提示过，reportError 会自动去重）。
       let errMsg = err?.message || '导出失败';
       const data = err?.response?.data;
       if (data instanceof Blob) {
@@ -640,7 +642,7 @@ export default function Report() {
       } else if (data?.message) {
         errMsg = data.message;
       }
-      message.error(errMsg);
+      reportError({ ...err, message: errMsg }, '导出失败');
     } finally {
       setExporting(false);
     }

@@ -12,6 +12,7 @@ import { approvalApi } from '../../api/approval';
 import { systemApi } from '../../api/system';
 import { OvertimeApplication, statusMap, overtimeTypeMap } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
+import { reportError } from '../../utils/errors';
 
 const { Title } = Typography;
 const { TextArea } = Input;
@@ -37,11 +38,6 @@ export default function Overtime() {
   const canUpdate = hasPermission('overtime:update:self');
   const canSubmit = hasPermission('overtime:submit:self');
   const canWithdraw = hasPermission('approval:withdraw:self');
-
-  const getErrorMessage = (error: unknown, fallback: string) => {
-    const e = error as { response?: { data?: { message?: string } }; message?: string };
-    return e?.response?.data?.message || e?.message || fallback;
-  };
 
   useEffect(() => { void loadData(page); }, [page, canViewSelf]);
   useEffect(() => {
@@ -107,7 +103,7 @@ export default function Overtime() {
       const res = await systemApi.getActiveProjects();
       if (res.data) setProjects(res.data);
     } catch (e) {
-      message.error(getErrorMessage(e, '项目列表加载失败'));
+      reportError(e, '项目列表加载失败');
     }
   };
 
@@ -144,7 +140,7 @@ export default function Overtime() {
           form.resetFields();
           loadData();
         } catch (e) {
-          message.error(getErrorMessage(e, '提交审批失败'));
+          reportError(e, '提交审批失败');
         } finally {
           setSubmitting(false);
         }
@@ -176,7 +172,7 @@ export default function Overtime() {
       message.success('删除成功');
       loadData();
     } catch (e) {
-      message.error(getErrorMessage(e, '删除失败'));
+      reportError(e, '删除失败');
     }
   };
 
@@ -186,7 +182,7 @@ export default function Overtime() {
       message.success('已撤回');
       loadData();
     } catch (e) {
-      message.error(getErrorMessage(e, '撤回失败'));
+      reportError(e, '撤回失败');
     }
   };
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Card, Table, Button, Space, Tag, Tabs, Input, message, Typography, Select, Steps,
   Alert, Descriptions, Modal, Spin, Popconfirm, DatePicker,
@@ -16,6 +16,7 @@ import { ApprovalItem, ApprovalRecord, statusMap, stepTypeMap } from '../../type
 import { useNavigate, useParams } from 'react-router-dom';
 import { usePermission } from '../../hooks/usePermission';
 import { weeklyReportContentToText } from '../../utils/weeklyReportContent';
+import { reportError } from '../../utils/errors';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -447,7 +448,7 @@ export function ApprovalDetailPage() {
       setComment('');
       loadDetail();
     } catch (error) {
-      message.error(getErrorMessage(error, action === 'approve' ? '审批通过失败' : '审批驳回失败'));
+      reportError(error, action === 'approve' ? '审批通过失败' : '审批驳回失败');
     }
     setActionLoading(false);
   };
@@ -459,7 +460,7 @@ export function ApprovalDetailPage() {
       message.success('已撤回');
       loadDetail();
     } catch (error) {
-      message.error(getErrorMessage(error, '撤回失败'));
+      reportError(error, '撤回失败');
     }
     setActionLoading(false);
   };
@@ -471,7 +472,7 @@ export function ApprovalDetailPage() {
         const res = await approvalApi.getUsers();
         if (res.data) setAllUsers(res.data);
       } catch (error) {
-        message.error(getErrorMessage(error, '抄送人列表加载失败'));
+        reportError(error, '抄送人列表加载失败');
       }
     }
   };
@@ -486,7 +487,7 @@ export function ApprovalDetailPage() {
       setCcModalOpen(false);
       loadDetail();
     } catch (error) {
-      message.error(getErrorMessage(error, '抄送失败'));
+      reportError(error, '抄送失败');
     }
     setActionLoading(false);
   };
@@ -674,10 +675,13 @@ function MySubmissionsTab() {
   const [typeFilter, setTypeFilter] = useState('');
   const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
   const navigate = useNavigate();
+  const loadRequestId = useRef(0); // 筛选/翻页请求竞态守卫：只接受最新一次的响应
 
   useEffect(() => { loadData(); }, [statusFilter, typeFilter, dateRange, page]);
 
   const loadData = async () => {
+    // 竞态守卫：快速切换筛选/翻页时丢弃过期响应，避免旧数据覆盖新列表
+    const requestId = ++loadRequestId.current;
     setLoading(true);
     try {
       const res = await approvalApi.getMySubmissions({
@@ -688,16 +692,19 @@ function MySubmissionsTab() {
         startDate: dateRange ? dateRange[0].format('YYYY-MM-DD') : undefined,
         endDate: dateRange ? dateRange[1].format('YYYY-MM-DD') : undefined,
       });
+      if (requestId !== loadRequestId.current) return;
       if (res.data) {
         setData(res.data.list);
         setTotal(res.data.total);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '我的申请加载失败'));
+      if (requestId !== loadRequestId.current) return;
+      reportError(error, '我的申请加载失败');
       setData([]);
       setTotal(0);
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
     }
-    setLoading(false);
   };
 
   const renderProgress = (record: any) => {
@@ -788,6 +795,7 @@ function PendingApprovalTab() {
   const [selectedRows, setSelectedRows] = useState<React.Key[]>([]);
   const [comment, setComment] = useState('');
   const navigate = useNavigate();
+  const loadRequestId = useRef(0); // 翻页请求竞态守卫：只接受最新一次的响应
 
   useEffect(() => {
     setSelectedRows([]);
@@ -795,19 +803,24 @@ function PendingApprovalTab() {
   }, [page]);
 
   const loadData = async () => {
+    // 竞态守卫：快速翻页时丢弃过期响应，避免旧页数据覆盖新页列表
+    const requestId = ++loadRequestId.current;
     setLoading(true);
     try {
       const res = await approvalApi.getPending({ page, pageSize: 20 });
+      if (requestId !== loadRequestId.current) return;
       if (res.data) {
         setData(res.data.list);
         setTotal(res.data.total);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '待审批列表加载失败'));
+      if (requestId !== loadRequestId.current) return;
+      reportError(error, '待审批列表加载失败');
       setData([]);
       setTotal(0);
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleApprove = async (action: 'approve' | 'reject') => {
@@ -824,14 +837,21 @@ function PendingApprovalTab() {
         message.warning('所选审批项已失效，请刷新列表');
         return;
       }
-      await approvalApi.approve(items);
-      message.success(action === 'approve' ? '审批通过' : '已驳回');
+      const res = await approvalApi.approve(items);
+      // 后端部分成功：data.success === false 且 failed 非空时，失败项仍在待办列表，
+      // 提示具体原因后刷新列表（下方现有 reload 逻辑保留）。
+      const failed = res.data?.failed || [];
+      if (res.data && res.data.success === false && failed.length > 0) {
+        message.warning('部分审批未完成：' + failed.map(f => f.reason).join('；'));
+      } else {
+        message.success(action === 'approve' ? '审批通过' : '已驳回');
+      }
       setSelectedRows([]);
       setComment('');
       if (page === 1) loadData();
       else setPage(1);
     } catch (error) {
-      message.error(getErrorMessage(error, action === 'approve' ? '批量通过失败' : '批量驳回失败'));
+      reportError(error, action === 'approve' ? '批量通过失败' : '批量驳回失败');
     } finally {
       setActionLoading(false);
     }
@@ -943,7 +963,7 @@ function ApprovedByMeTab() {
         setTotal(res.data.total);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '已审批列表加载失败'));
+      reportError(error, '已审批列表加载失败');
       setData([]);
       setTotal(0);
     }
@@ -1023,7 +1043,7 @@ function MyCcTab() {
         setTotal(res.data.total);
       }
     } catch (error) {
-      message.error(getErrorMessage(error, '抄送列表加载失败'));
+      reportError(error, '抄送列表加载失败');
       setData([]);
       setTotal(0);
     }
@@ -1057,8 +1077,10 @@ function MyCcTab() {
   ];
 
   return (
+    // 抄送记录可能对同一目标多次抄送，targetType+targetId 不唯一；
+    // 后端抄送列表项不带记录 id，用记录创建时间 ccAt 拼接保证 rowKey 唯一。
     <Table
-      rowKey={(r) => `${r.targetType}-${r.targetId}`}
+      rowKey={(r) => `${r.targetType}-${r.targetId}-${r.ccAt}`}
       loading={loading}
       columns={columns}
       dataSource={data}

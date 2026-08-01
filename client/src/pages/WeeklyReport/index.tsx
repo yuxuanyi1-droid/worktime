@@ -9,6 +9,7 @@ import type { Timesheet, WeeklyReport } from '../../types';
 import { Input } from 'antd';
 import { usePermission } from '../../hooks/usePermission';
 import { weeklyReportContentToText } from '../../utils/weeklyReportContent';
+import { reportError } from '../../utils/errors';
 
 dayjs.extend(isoWeek);
 
@@ -152,7 +153,7 @@ export default function WeeklyReportPage() {
       await saveDraft();
       message.success('保存成功');
     } catch (e: any) {
-      message.error(e?.response?.data?.message || '保存失败');
+      reportError(e, '保存失败');
     }
     setSaving(false);
   };
@@ -172,15 +173,10 @@ export default function WeeklyReportPage() {
       message.success('提交成功');
       await loadData();
     } catch (e: any) {
-      message.error(e?.response?.data?.message || '提交失败');
+      reportError(e, '提交失败');
     } finally {
       setSubmitting(false);
     }
-  };
-
-  const getErrorMessage = (error: unknown, fallback: string) => {
-    const e = error as { response?: { data?: { message?: string } }; message?: string };
-    return e?.response?.data?.message || e?.message || fallback;
   };
 
   const changeWeek = (next: dayjs.Dayjs) => {
@@ -234,7 +230,7 @@ export default function WeeklyReportPage() {
       setDirty(true);
       message.success('已从当前周工时生成摘要');
     } catch (error) {
-      message.error(getErrorMessage(error, '工时摘要生成失败'));
+      reportError(error, '工时摘要生成失败');
     }
   };
 

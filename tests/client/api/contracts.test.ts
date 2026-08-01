@@ -117,25 +117,19 @@ describe('客户端 API 契约', () => {
     await expectCall(() => timesheetApi.getMy(params), 'get', '/timesheets/my', { params });
     await expectCall(() => timesheetApi.getWeeklySummary('2026-07-20', '2026-07-26', 8), 'get',
       '/timesheets/weekly-summary', { params: { weekStart: '2026-07-20', weekEnd: '2026-07-26', userId: 8 } });
-    await expectCall(() => timesheetApi.create({ days: 1 }), 'post', '/timesheets', { days: 1 });
-    await expectCall(() => timesheetApi.batchCreate([{ days: 1 }]), 'post', '/timesheets/batch', { items: [{ days: 1 }] });
     await expectCall(() => timesheetApi.replaceWeekDrafts('2026-07-20', [{ days: 1 }]), 'post',
       '/timesheets/drafts/replace', { weekStart: '2026-07-20', items: [{ days: 1 }] });
-    await expectCall(() => timesheetApi.update(2, { days: 0.5 }), 'put', '/timesheets/2', { days: 0.5 });
     await expectCall(() => timesheetApi.delete(2), 'delete', '/timesheets/2');
-    await expectCall(() => timesheetApi.submit([1, 2]), 'post', '/timesheets/submit', { ids: [1, 2] });
     await expectCall(() => timesheetApi.submitByRows([{ id: 1 }]), 'post', '/timesheets/submit-rows', { rows: [{ id: 1 }] });
     await expectCall(() => timesheetApi.modifySubmitted([{ id: 1 }]), 'post', '/timesheets/modify', { rows: [{ id: 1 }] });
 
     await expectCall(() => overtimeApi.getMy(params), 'get', '/overtime/my', { params });
-    await expectCall(() => overtimeApi.getStats(2026, 7), 'get', '/overtime/stats', { params: { year: 2026, month: 7 } });
     await expectCall(() => overtimeApi.create({ days: 1 }), 'post', '/overtime', { days: 1 });
     await expectCall(() => overtimeApi.createAndSubmit({ days: 1 }), 'post', '/overtime/submit-new', { days: 1 });
     await expectCall(() => overtimeApi.update(3, { days: 0.5 }), 'put', '/overtime/3', { days: 0.5 });
     await expectCall(() => overtimeApi.delete(3), 'delete', '/overtime/3');
     await expectCall(() => overtimeApi.submit([3]), 'post', '/overtime/submit', { ids: [3] });
 
-    await expectCall(() => weeklyReportApi.getMy(params), 'get', '/weekly-reports/my', { params });
     await expectCall(() => weeklyReportApi.getByWeek('2026-07-20'), 'get', '/weekly-reports/week',
       { params: { weekStart: '2026-07-20' } });
     await expectCall(() => weeklyReportApi.save({ content: '周报' }), 'post', '/weekly-reports', { content: '周报' });

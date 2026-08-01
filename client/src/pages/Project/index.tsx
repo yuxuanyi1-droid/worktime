@@ -9,6 +9,7 @@ import {
 import { systemApi, SimpleUser } from '../../api/system';
 import { Group, Project, ProjectSE, ProjectWorkloadAllocation, projectStatusMap } from '../../types';
 import { usePermission } from '../../hooks/usePermission';
+import { reportError } from '../../utils/errors';
 
 const { Title } = Typography;
 
@@ -169,7 +170,7 @@ export default function ProjectPage() {
       allocationForm.resetFields();
       await Promise.all([loadProjectAllocations(selectedProject.id), load()]);
     } catch (error) {
-      message.error(getErrorMessage(error, '工时配额保存失败'));
+      reportError(error, '工时配额保存失败');
     } finally {
       setSaving(false);
     }
@@ -192,7 +193,7 @@ export default function ProjectPage() {
       setEditItem(null);
       await load();
     } catch (error) {
-      message.error(getErrorMessage(error, '项目保存失败'));
+      reportError(error, '项目保存失败');
     } finally {
       setSaving(false);
     }
@@ -207,7 +208,7 @@ export default function ProjectPage() {
       seForm.resetFields();
       await Promise.all([loadProjectSEs(selectedProject.id), load()]);
     } catch (error) {
-      message.error(getErrorMessage(error, '模块 SE 保存失败'));
+      reportError(error, '模块 SE 保存失败');
     } finally {
       setSaving(false);
     }
@@ -221,7 +222,7 @@ export default function ProjectPage() {
       message.success('删除成功');
       await load();
     } catch (error) {
-      message.error(getErrorMessage(error, '项目删除失败'));
+      reportError(error, '项目删除失败');
     } finally {
       setDeletingProjectId(null);
     }
@@ -235,7 +236,7 @@ export default function ProjectPage() {
       message.success('删除成功');
       if (selectedProject) await Promise.all([loadProjectSEs(selectedProject.id), load()]);
     } catch (error) {
-      message.error(getErrorMessage(error, '模块 SE 删除失败'));
+      reportError(error, '模块 SE 删除失败');
     } finally {
       setRemovingSeId(null);
     }
@@ -249,7 +250,7 @@ export default function ProjectPage() {
       message.success('删除成功');
       if (selectedProject) await Promise.all([loadProjectAllocations(selectedProject.id), load()]);
     } catch (error) {
-      message.error(getErrorMessage(error, '工时配额删除失败'));
+      reportError(error, '工时配额删除失败');
     } finally {
       setRemovingAllocationId(null);
     }
