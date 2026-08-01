@@ -121,4 +121,83 @@ describe('ReportService 超投统计集成', () => {
     // 只计最新版本 5 天，不会把旧 approved 再计一次
     expect(frontend.consumed).toBe(5);
   });
+
+  it('口径切换：consumedScope=approved 时 submitted 工时不消耗配额', async () => {
+    const ds = getTestDataSource();
+    const tsRepo = ds.getRepository(Timesheet);
+    await tsRepo.save([
+      // 甲 3 天已通过 + 乙 4 天审批中（前端组配额 10，覆盖组1+组2）
+      { userId: 1, projectId: 1, date: '2026-07-01', days: 3, status: 'approved', submissionGroupId: 1, rootGroupId: 1 },
+      { userId: 2, projectId: 1, date: '2026-07-02', days: 4, status: 'submitted', submissionGroupId: 2, rootGroupId: 2 },
+    ]);
+    // 预警口径（默认）：3 + 4 = 7
+    const warn = await new ReportService(ds.manager).getOverrunStats(adminViewer, {
+      startDate: '2026-07-01', endDate: '2026-07-31',
+    });
+    expect(warn.list.find((r: any) => r.groupId === 1).consumed).toBe(7);
+    // 结算口径：仅 3
+    const settle = await new ReportService(ds.manager).getOverrunStats(adminViewer, {
+      startDate: '2026-07-01', endDate: '2026-07-31', consumedScope: 'approved',
+    });
+    const row = settle.list.find((r: any) => r.groupId === 1);
+    expect(row.consumed).toBe(3);
+    expect(row.overrun).toBe(0);
+  });
+
+  it('consumedByGroup 下钻明细：配额组覆盖范围内逐成员组汇总', async () => {
+    const ds = getTestDataSource();
+    const tsRepo = ds.getRepository(Timesheet);
+    // 前端组配额 10 覆盖组1+组2：甲(组1) 6 天、乙(组2) 4 天 → 明细两组各自展示
+    await tsRepo.save([
+      { userId: 1, projectId: 1, date: '2026-07-01', days: 6, status: 'approved', submissionGroupId: 1, rootGroupId: 1 },
+      { userId: 2, projectId: 1, date: '2026-07-02', days: 4, status: 'approved', submissionGroupId: 2, rootGroupId: 2 },
+    ]);
+    const data = await new ReportService(ds.manager).getOverrunStats(adminViewer, {
+      startDate: '2026-07-01', endDate: '2026-07-31',
+    });
+    const frontend = data.list.find((r: any) => r.groupId === 1);
+    expect(frontend.consumedByGroup).toHaveLength(2);
+    expect(frontend.consumedByGroup).toEqual(expect.arrayContaining([
+      expect.objectContaining({ groupId: 1, groupName: '前端组', days: 6 }),
+      expect.objectContaining({ groupId: 2, groupName: 'React小组', days: 4 }),
+    ]));
+  });
+
+  it('月度趋势：按 (月, 项目, 配额组) 聚合，支持项目过滤与结算口径', async () => {
+    const ds = getTestDataSource();
+    const tsRepo = ds.getRepository(Timesheet);
+    // 项目1 前端组：7月 6 天 + 8月 5 天（配额 10）；项目2 前端组：7月 2 天（配额 3）
+    await tsRepo.save([
+      { userId: 1, projectId: 1, date: '2026-07-01', days: 3, status: 'approved', submissionGroupId: 1, rootGroupId: 1 },
+      { userId: 2, projectId: 1, date: '2026-07-02', days: 3, status: 'approved', submissionGroupId: 2, rootGroupId: 2 },
+      { userId: 1, projectId: 1, date: '2026-08-05', days: 5, status: 'approved', submissionGroupId: 3, rootGroupId: 1 },
+      { userId: 1, projectId: 2, date: '2026-07-03', days: 2, status: 'approved', submissionGroupId: 4, rootGroupId: 1 },
+      // 乙 8月 4 天审批中 → 预警口径计入、结算口径不计
+      { userId: 2, projectId: 1, date: '2026-08-06', days: 4, status: 'submitted', submissionGroupId: 5, rootGroupId: 2 },
+    ]);
+    const trend = await new ReportService(ds.manager).getOverrunTrend(adminViewer, {
+      startDate: '2026-07-01', endDate: '2026-08-31',
+    });
+    // 项目1 前端组（覆盖组1+组2）：7月消耗 6（无超投）→ 8月 9（超投 0，9<10 无超投）
+    const p1f = trend.list.filter((r: any) => r.projectId === 1 && r.groupId === 1);
+    expect(p1f).toHaveLength(2);
+    expect(p1f.find((r: any) => r.month === '2026-07').consumed).toBe(6);
+    expect(p1f.find((r: any) => r.month === '2026-08').consumed).toBe(9); // 5 + 4（含 submitted）
+    expect(p1f.find((r: any) => r.month === '2026-08').overrun).toBe(0);
+    // 项目2 前端组：7月 2 天（配额 3，无超投）
+    const p2f = trend.list.filter((r: any) => r.projectId === 2 && r.groupId === 1);
+    expect(p2f).toHaveLength(1);
+    expect(p2f[0]).toMatchObject({ month: '2026-07', consumed: 2 });
+    // 项目过滤
+    const p1Only = await new ReportService(ds.manager).getOverrunTrend(adminViewer, {
+      startDate: '2026-07-01', endDate: '2026-08-31', projectId: 1,
+    });
+    expect(p1Only.list.every((r: any) => r.projectId === 1)).toBe(true);
+    // 结算口径：8月 consumed = 5（submitted 4 天不计）
+    const settle = await new ReportService(ds.manager).getOverrunTrend(adminViewer, {
+      startDate: '2026-07-01', endDate: '2026-08-31', consumedScope: 'approved',
+    });
+    const p1fSettle = settle.list.filter((r: any) => r.projectId === 1 && r.groupId === 1);
+    expect(p1fSettle.find((r: any) => r.month === '2026-08').consumed).toBe(5);
+  });
 });

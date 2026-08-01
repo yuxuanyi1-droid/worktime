@@ -114,23 +114,24 @@ export class ReportService {
   private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
 
   /**
-   * 超投统计：项目 × 配额组的「配额 vs 实际消耗」。
+   * 超投统计基础：查询配额配置、组覆盖集合与去重后的有效消耗行。
+   * stats（汇总）与 trend（月度）共用，保证两个视图口径一致。
    *
-   * 口径与审批单配额警告（approvalService.buildTimesheetQuota）完全一致：
-   * - 消耗 = submitted + approved 工时，按 (userId, projectId, date) 最新版本去重
+   * 口径：
+   * - consumedScope='all'（默认，与审批单配额警告一致）：submitted + approved
+   * - consumedScope='approved'（结算口径）：仅已通过
+   * - 版本去重：按 (userId, projectId, date) 取最新 submissionGroupId
    * - 配额组覆盖范围 = 配额组及其全部子孙组（path 前缀，成员按当前所在组归属）
-   * - 配额 = 当前配置值（配额变更影响历史结论，界面注明）
-   * 查看范围受报表权限裁剪（report:view:project / report:view:all 的可访问项目）。
    */
-  async getOverrunStats(
+  private async loadOverrunBase(
     viewer: AccessViewer,
-    params: { startDate: string; endDate: string; projectId?: number; groupId?: number },
+    params: { startDate: string; endDate: string; projectId?: number; groupId?: number; consumedScope?: 'all' | 'approved' },
   ) {
-    const { startDate, endDate, projectId, groupId } = params;
+    const { startDate, endDate, projectId, groupId, consumedScope = 'all' } = params;
     const accessPolicy = new AccessPolicyService(this.manager);
     const accessibleProjectIds = await accessPolicy.getAccessibleProjectIds(viewer, ['report:view:project', 'report:view:all']);
     if (accessibleProjectIds !== null && accessibleProjectIds.length === 0) {
-      return { list: [], total: 0 };
+      return { allocations: [], effectiveRows: [], coverageByQuotaGroup: new Map<number, Set<number>>(), allGroups: [] };
     }
 
     // 1. 配额配置（裁剪到可访问项目，可选按项目/组过滤）
@@ -143,23 +144,30 @@ export class ReportService {
       allocQb.andWhere('a.projectId IN (:...projectIds)', { projectIds: accessibleProjectIds });
     }
     const allocations = await allocQb.getMany();
-    if (!allocations.length) return { list: [], total: 0 };
+    if (!allocations.length) {
+      return { allocations: [], effectiveRows: [], coverageByQuotaGroup: new Map<number, Set<number>>(), allGroups: [] };
+    }
 
     // 2. 配额组覆盖集合（配额组 + 全部子孙组）
-    const allGroups = await this.groupRepo.find({ select: { id: true, path: true } });
+    const allGroups = await this.groupRepo.find({ select: { id: true, path: true, name: true } });
     const coverageByQuotaGroup = new Map<number, Set<number>>();
     for (const a of allocations) {
       coverageByQuotaGroup.set(a.groupId, collectGroupCoverage(allGroups, a.groupId));
     }
 
-    // 3. 时间范围内活跃工时（submitted + approved），带用户当前所在组
+    // 3. 时间范围内活跃工时（按口径过滤状态），带用户当前所在组
     const allocProjectIds = [...new Set(allocations.map((a) => a.projectId))];
-    const rows = await this.timesheetRepo.createQueryBuilder('t')
+    const qb = this.timesheetRepo.createQueryBuilder('t')
       .innerJoin('users', 'u', 'u.id = t.userId')
       .where('t.projectId IN (:...projectIds)', { projectIds: allocProjectIds })
       .andWhere('t.date >= :startDate', { startDate })
-      .andWhere('t.date <= :endDate', { endDate })
-      .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
+      .andWhere('t.date <= :endDate', { endDate });
+    if (consumedScope === 'approved') {
+      qb.andWhere('t.status = :approved', { approved: 'approved' });
+    } else {
+      qb.andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] });
+    }
+    const rows = await qb
       // 显式别名：无别名时 Postgres raw 列名带表前缀（t_userId），取键会得到 undefined
       .select('t.userId', 'userId')
       .addSelect('t.projectId', 'projectId')
@@ -191,12 +199,37 @@ export class ReportService {
       return !maxGroupByKey.has(`${r.userId}_${r.projectId}_${r.date}`);
     });
 
-    // 5. 逐配额组计算消耗/剩余/超投（成员当前组 ∈ 配额组覆盖范围）
+    return { allocations, effectiveRows, coverageByQuotaGroup, allGroups };
+  }
+
+  /** 超投统计：项目 × 配额组的「配额 vs 实际消耗」汇总。 */
+  async getOverrunStats(
+    viewer: AccessViewer,
+    params: { startDate: string; endDate: string; projectId?: number; groupId?: number; consumedScope?: 'all' | 'approved' },
+  ) {
+    const { startDate, endDate, projectId, groupId, consumedScope = 'all' } = params;
+    const { allocations, effectiveRows, coverageByQuotaGroup, allGroups } =
+      await this.loadOverrunBase(viewer, { startDate, endDate, projectId, groupId, consumedScope });
+    if (!allocations.length) return { list: [], total: 0 };
+
+    const groupNameById = new Map(allGroups.map((g) => [g.id, g.name]));
+
+    // 逐配额组计算消耗/剩余/超投，并给出成员组分解（供前端展开下钻）
     const list = allocations.map((a) => {
       const coverage = coverageByQuotaGroup.get(a.groupId) ?? new Set<number>();
-      const consumed = sumConsumption(
-        effectiveRows.filter((r) => r.projectId === a.projectId && r.userGroupId !== null && coverage.has(r.userGroupId)),
+      const memberRows = effectiveRows.filter(
+        (r) => r.projectId === a.projectId && r.userGroupId !== null && coverage.has(r.userGroupId),
       );
+      const consumed = sumConsumption(memberRows);
+      // 成员组分解：按成员当前所在组聚合（仅覆盖范围内）
+      const byGroupMap = new Map<number, number>();
+      for (const r of memberRows) {
+        if (r.userGroupId === null) continue;
+        byGroupMap.set(r.userGroupId, round2((byGroupMap.get(r.userGroupId) ?? 0) + Number(r.days)));
+      }
+      const consumedByGroup = [...byGroupMap.entries()]
+        .map(([gid, days]) => ({ groupId: gid, groupName: groupNameById.get(gid) || '', days }))
+        .sort((x, y) => y.days - x.days);
       const total = round2(Number(a.allocation));
       const remaining = round2(total - consumed);
       const overrun = round2(Math.max(0, consumed - total));
@@ -212,9 +245,60 @@ export class ReportService {
         remaining,
         overrun,
         overrunRate,
+        consumedByGroup,
       };
     }).sort((x, y) => y.overrun - x.overrun || y.consumed - x.consumed);
 
+    return { list, total: list.length };
+  }
+
+  /**
+   * 超投月度趋势：每个 (项目 × 配额组) 在各月的消耗与超投（配额取当前配置值）。
+   * 返回按月份升序的序列，前端据此绘制折线图。
+   */
+  async getOverrunTrend(
+    viewer: AccessViewer,
+    params: { startDate: string; endDate: string; projectId?: number; groupId?: number; consumedScope?: 'all' | 'approved' },
+  ) {
+    const { startDate, endDate, projectId, groupId, consumedScope = 'all' } = params;
+    const { allocations, effectiveRows, coverageByQuotaGroup } =
+      await this.loadOverrunBase(viewer, { startDate, endDate, projectId, groupId, consumedScope });
+    if (!allocations.length) return { list: [], total: 0 };
+
+    // 对每个配额组：过滤覆盖范围内的有效行后按月份累计
+    const list: Array<{
+      month: string;
+      projectId: number;
+      projectName: string;
+      groupId: number;
+      groupName: string;
+      allocation: number;
+      consumed: number;
+      overrun: number;
+    }> = [];
+    for (const a of allocations) {
+      const coverage = coverageByQuotaGroup.get(a.groupId) ?? new Set<number>();
+      const monthMap = new Map<string, number>();
+      for (const r of effectiveRows) {
+        if (r.projectId !== a.projectId || r.userGroupId === null || !coverage.has(r.userGroupId)) continue;
+        const month = r.date.slice(0, 7); // YYYY-MM
+        monthMap.set(month, round2((monthMap.get(month) ?? 0) + Number(r.days)));
+      }
+      const total = round2(Number(a.allocation));
+      for (const [month, consumed] of monthMap) {
+        list.push({
+          month,
+          projectId: a.projectId,
+          projectName: a.project?.name || '',
+          groupId: a.groupId,
+          groupName: a.group?.name || a.groupName || '',
+          allocation: total,
+          consumed,
+          overrun: round2(Math.max(0, consumed - total)),
+        });
+      }
+    }
+    list.sort((x, y) => x.month.localeCompare(y.month) || x.projectId - y.projectId || x.groupId - y.groupId);
     return { list, total: list.length };
   }
 

@@ -365,6 +365,20 @@ export interface OverrunStatItem {
   remaining: number;
   overrun: number;
   overrunRate: number;
+  /** 成员组分解（配额组覆盖范围内的各成员组消耗），供展开下钻 */
+  consumedByGroup?: { groupId: number; groupName: string; days: number }[];
+}
+
+/** 超投月度趋势点：某 (项目 × 配额组) 在某月的消耗与超投 */
+export interface OverrunTrendItem {
+  month: string;
+  projectId: number;
+  projectName: string;
+  groupId: number;
+  groupName: string;
+  allocation: number;
+  consumed: number;
+  overrun: number;
 }
 
 export interface OvertimeReport {

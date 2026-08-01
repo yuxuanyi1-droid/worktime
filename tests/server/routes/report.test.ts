@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import ExcelJS from 'exceljs';
 import { AccessPolicyService } from '@server/services/accessPolicyService';
 import { ReportService } from '@server/services/reportService';
 import { AppDataSource } from '@server/config/database';
@@ -293,5 +294,44 @@ describe('报表路由范围与参数校验', () => {
       expect(response.headers['content-type']).toContain('spreadsheetml.sheet');
       expect(response.headers['content-disposition']).toContain('.xlsx');
     }
+  });
+
+  it('超投导出：生成 xlsx 且包含口径说明与超投明细，consumedScope 透传', async () => {
+    vi.spyOn(AccessPolicyService.prototype, 'getAccessibleProjectIds').mockResolvedValue(null);
+    vi.spyOn(AccessPolicyService.prototype, 'isAdmin').mockReturnValue(true);
+    const overrun = vi.spyOn(ReportService.prototype, 'getOverrunStats').mockResolvedValue({
+      total: 1,
+      list: [{
+        projectId: 1, projectName: '工时项目', projectCode: 'WTM', groupId: 1, groupName: '前端组',
+        allocation: 10, consumed: 12, remaining: -2, overrun: 2, overrunRate: 20,
+        consumedByGroup: [{ groupId: 1, groupName: '前端组', days: 6 }, { groupId: 2, groupName: 'React小组', days: 6 }],
+      }],
+    } as any);
+    // 自定义 binary parser：supertest 对 xlsx 的 content-type 会把二进制按 utf8 解码损坏，这里直接收集原始字节
+    const response = await request(app)
+      .get('/reports/export/overrun?startDate=2026-07-01&endDate=2026-07-31&consumedScope=approved')
+      .buffer(true)
+      .parse((res, callback) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toContain('spreadsheetml.sheet');
+    expect(response.headers['content-disposition']).toContain('overrun-report-2026-07-01-2026-07-31.xlsx');
+    expect(overrun).toHaveBeenCalledWith(expect.anything(), {
+      startDate: '2026-07-01', endDate: '2026-07-31', consumedScope: 'approved',
+    });
+        // 用 exceljs 解析真实文件内容：口径说明（末尾行） + 超投明细行（表头之后）
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(response.body);
+    const sheet = workbook.worksheets[0];
+    const rows = sheet.getRows(1, sheet.rowCount).map((row) => row.values.map(String).join('|'));
+    expect(rows.some((text) => text.includes('口径') && text.includes('结算'))).toBe(true);
+    const detailRow = rows.find((text) => text.includes('工时项目') && text.includes('WTM'));
+    expect(detailRow).toBeTruthy();
+    expect(detailRow).toContain('12');
+    expect(detailRow).toContain('2');
+    expect(detailRow).toContain('20');
   });
 });

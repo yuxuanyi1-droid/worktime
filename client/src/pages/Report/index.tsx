@@ -21,7 +21,7 @@ import {
 import { DownloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { reportApi } from '../../api/report';
-import { DepartmentReport, GroupReport, OvertimeReport, OverrunStatItem, PersonalReport, ProjectReport, ReportScope } from '../../types';
+import { DepartmentReport, GroupReport, OvertimeReport, OverrunStatItem, OverrunTrendItem, PersonalReport, ProjectReport, ReportScope } from '../../types';
 import request from '../../utils/request';
 import { reportError } from '../../utils/errors';
 import LazyEChart from '../../components/Charts/LazyEChart';
@@ -268,7 +268,44 @@ function ProjectView({ data }: { data: ProjectReport | null }) {
   );
 }
 
-function OverrunView({ data }: { data: OverrunStatItem[] | null }) {
+function OverrunView({ data, trend, projects, consumedScope, onScopeChange }: {
+  data: OverrunStatItem[] | null;
+  trend: OverrunTrendItem[] | null;
+  projects?: { id: number; name: string }[];
+  consumedScope: 'all' | 'approved';
+  onScopeChange: (value: 'all' | 'approved') => void;
+}) {
+  const [trendProjectId, setTrendProjectId] = useState<number>();
+
+  // 趋势图数据：x=月份，系列=「项目-配额组」的超投量
+  const trendChart = useMemo(() => {
+    const filtered = (trend || []).filter((t) => !trendProjectId || t.projectId === trendProjectId);
+    const months = [...new Set(filtered.map((t) => t.month))].sort();
+    const seriesMap = new Map<string, { name: string; data: (number | null)[] }>();
+    for (const t of filtered) {
+      const key = `${t.projectName}-${t.groupName}`;
+      if (!seriesMap.has(key)) seriesMap.set(key, { name: key, data: months.map(() => null) });
+      const idx = months.indexOf(t.month);
+      seriesMap.get(key)!.data[idx] = t.overrun;
+    }
+    return { months, series: [...seriesMap.values()] };
+  }, [trend, trendProjectId]);
+
+  const trendOption = useMemo(() => ({
+    tooltip: { trigger: 'axis' as const },
+    legend: { type: 'scroll' as const, bottom: 0 },
+    grid: { left: 48, right: 16, top: 24, bottom: 48 },
+    xAxis: { type: 'category' as const, data: trendChart.months },
+    yAxis: { type: 'value' as const, name: '超投量(天)' },
+    series: trendChart.series.map((ser) => ({
+      name: ser.name,
+      type: 'line' as const,
+      smooth: true,
+      connectNulls: true,
+      data: ser.data,
+    })),
+  }), [trendChart]);
+
   const columns = [
     {
       title: '项目',
@@ -317,20 +354,68 @@ function OverrunView({ data }: { data: OverrunStatItem[] | null }) {
   ];
 
   return (
-    <Card title="超投统计" style={{ borderRadius: 8 }}>
-      <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
-        口径与审批单配额警告一致：消耗 = 审批中 + 已通过工时（按最新版本去重），配额组含其全部子组成员；配额取当前配置值（修改配额会影响历史结论）。
-      </Paragraph>
-      <Table
-        rowKey={(record) => `${record.projectId}-${record.groupId}`}
-        columns={columns}
-        dataSource={data || []}
-        loading={!data}
-        pagination={false}
-        size="middle"
-        locale={{ emptyText: '暂无配额配置或消耗数据' }}
-      />
-    </Card>
+    <>
+      <Card title="超投趋势" style={{ borderRadius: 8, marginBottom: 16 }}>
+        <Space style={{ marginBottom: 12 }}>
+          <Select
+            placeholder="按项目过滤趋势"
+            style={{ width: 220 }}
+            allowClear
+            options={(projects || []).map((project) => ({ label: project.name, value: project.id }))}
+            value={trendProjectId}
+            onChange={(value) => setTrendProjectId(value)}
+          />
+          <Text type="secondary" style={{ fontSize: 12 }}>各月超投量（配额取当前配置值）</Text>
+        </Space>
+        {trend === null ? (
+          <Spin />
+        ) : (
+          <LazyEChart option={trendOption} style={{ height: 280 }} />
+        )}
+      </Card>
+      <Card title="超投统计" style={{ borderRadius: 8 }}>
+        <Space style={{ marginBottom: 12 }}>
+          <Select
+            style={{ width: 240 }}
+            value={consumedScope}
+            onChange={(value) => onScopeChange(value)}
+            options={[
+              { label: '预警口径（审批中 + 已通过）', value: 'all' },
+              { label: '结算口径（仅已通过）', value: 'approved' },
+            ]}
+          />
+          <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+            消耗按最新版本去重，配额组含其全部子组成员；配额取当前配置值（修改配额会影响历史结论）。
+          </Paragraph>
+        </Space>
+        <Table
+          rowKey={(record) => `${record.projectId}-${record.groupId}`}
+          columns={columns}
+          dataSource={data || []}
+          loading={!data}
+          pagination={false}
+          size="middle"
+          locale={{ emptyText: '暂无配额配置或消耗数据' }}
+          expandable={{
+            expandedRowRender: (record) => (
+              <div style={{ padding: '4px 8px' }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>成员组消耗明细（配额组覆盖范围内）：</Text>
+                <Table
+                  rowKey={(item) => `${record.projectId}-${item.groupId}`}
+                  size="small"
+                  pagination={false}
+                  columns={[
+                    { title: '成员组', dataIndex: 'groupName', key: 'groupName' },
+                    { title: '消耗(天)', dataIndex: 'days', key: 'days', align: 'right', width: 120 },
+                  ]}
+                  dataSource={record.consumedByGroup || []}
+                />
+              </div>
+            ),
+          }}
+        />
+      </Card>
+    </>
   );
 }
 
@@ -380,6 +465,8 @@ export default function Report() {
   const [projData, setProjData] = useState<ProjectReport | null>(null);
   const [overtimeData, setOvertimeData] = useState<OvertimeReport | null>(null);
   const [overrunData, setOverrunData] = useState<OverrunStatItem[] | null>(null);
+  const [overrunTrend, setOverrunTrend] = useState<OverrunTrendItem[] | null>(null);
+  const [overrunScope, setOverrunScope] = useState<'all' | 'approved'>('all');
   const [scopeLoading, setScopeLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -423,7 +510,10 @@ export default function Report() {
   const exportScope = scope?.exportScope;
   const canExportCurrent = (() => {
     if (!canExport || !exportScope) return false;
-    if (tabKey === 'overrun') return false; // 超投统计暂未提供 Excel 导出
+    if (tabKey === 'overrun') {
+      // 超投导出：需具备查看权限（report:view:project / report:view:all），与后端一致
+      return hasPermission('report:view:project') || hasPermission('report:view:all');
+    }
     if (exportScope.unrestricted) return true;
     if (tabKey === 'personal') return false;
     if (tabKey === 'group') return !!selectedGroup && exportScope.groupIds.includes(selectedGroup);
@@ -578,16 +668,33 @@ export default function Report() {
   const loadOverrun = async () => {
     const requestId = beginQuery();
     try {
-      const res = await reportApi.getOverrun({ startDate, endDate });
-      if (isLatestQuery(requestId)) setOverrunData(res.data?.list || []);
+      const [res, trendRes] = await Promise.all([
+        reportApi.getOverrun({ startDate, endDate, consumedScope: overrunScope }),
+        reportApi.getOverrunTrend({ startDate, endDate, consumedScope: overrunScope }),
+      ]);
+      if (isLatestQuery(requestId)) {
+        setOverrunData(res.data?.list || []);
+        setOverrunTrend(trendRes.data?.list || []);
+      }
     } catch (err: any) {
       if (isLatestQuery(requestId)) {
         setOverrunData(null);
+        setOverrunTrend(null);
         setError(getErrorMessage(err, '超投统计加载失败'));
       }
     } finally {
       finishQuery(requestId);
     }
+  };
+
+  /** 口径切换：重新查询统计与趋势 */
+  const handleOverrunScopeChange = (value: 'all' | 'approved') => {
+    setOverrunScope(value);
+    setOverrunData(null);
+    setOverrunTrend(null);
+    cancelActiveQuery();
+    setError(null);
+    loadOverrun();
   };
 
   const loadProject = async () => {
@@ -678,6 +785,7 @@ export default function Report() {
       setProjData(null);
       setOvertimeData(null);
       setOverrunData(null);
+      setOverrunTrend(null);
     }
   };
 
@@ -702,6 +810,8 @@ export default function Report() {
         params.departmentId = selectedDept;
         params.groupId = selectedDeptGroup;
         params.projectId = selectedOvertimeProject;
+      } else if (type === 'overrun') {
+        params.consumedScope = overrunScope;
       }
       const res = await request.get(`/reports/export/${type}`, { params, responseType: 'blob' });
       const blob = res instanceof Blob ? res : new Blob([res as any]);
@@ -959,7 +1069,15 @@ export default function Report() {
           {tabKey === 'department' && <DepartmentView data={deptData} />}
           {tabKey === 'project' && <ProjectView data={projData} />}
           {tabKey === 'overtime' && <OvertimeView data={overtimeData} />}
-          {tabKey === 'overrun' && <OverrunView data={overrunData} />}
+          {tabKey === 'overrun' && (
+            <OverrunView
+              data={overrunData}
+              trend={overrunTrend}
+              projects={scope?.projects}
+              consumedScope={overrunScope}
+              onScopeChange={handleOverrunScopeChange}
+            />
+          )}
           {tabKey === 'custom' && <CustomReportView scope={scope} scopeLoading={scopeLoading} />}
         </Spin>
       </Spin>

@@ -13,6 +13,7 @@ export default defineConfig({
       'better-sqlite3': path.join(repoRoot, 'server/node_modules/better-sqlite3'),
       bcryptjs: path.join(repoRoot, 'server/node_modules/bcryptjs'),
       jsonwebtoken: path.join(repoRoot, 'server/node_modules/jsonwebtoken'),
+      exceljs: path.join(repoRoot, 'server/node_modules/exceljs'),
       express: path.join(repoRoot, 'server/node_modules/express'),
       'openid-client': path.join(repoRoot, 'server/node_modules/openid-client/build/index.js'),
     },

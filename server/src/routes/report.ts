@@ -29,6 +29,8 @@ const timesheetRepo = () => AppDataSource.getRepository(Timesheet);
 const reportDefinitionRepo = () => AppDataSource.getRepository(ReportDefinition);
 
 const REPORT_DEFINITION_SCOPES = ['private', 'group', 'department', 'public'] as const;
+/** 超投消耗口径：all=审批中+已通过（预警，与审批单一致）；approved=仅已通过（结算） */
+const OVERRUN_SCOPES = ['all', 'approved'] as const;
 
 type Viewer = NonNullable<AuthRequest['user']>;
 
@@ -328,7 +330,22 @@ router.get('/overrun', requirePermission('report:view:project', 'report:view:all
     const { startDate, endDate } = parseReportDateRange(req.query);
     const projectId = parseOptionalPositiveInt(firstQueryValue(req.query.projectId), 'projectId');
     const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
-    const data = await reportService.getOverrunStats(req.user!, { startDate, endDate, projectId, groupId });
+    const consumedScope = parseEnum(firstQueryValue(req.query.consumedScope) || 'all', 'consumedScope', OVERRUN_SCOPES);
+    const data = await reportService.getOverrunStats(req.user!, { startDate, endDate, projectId, groupId, consumedScope });
+    res.json({ code: 0, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** 超投月度趋势：每个 (项目 × 配额组) 在各月的消耗与超投 */
+router.get('/overrun/trend', requirePermission('report:view:project', 'report:view:all'), async (req: AuthRequest, res, next) => {
+  try {
+    const { startDate, endDate } = parseReportDateRange(req.query);
+    const projectId = parseOptionalPositiveInt(firstQueryValue(req.query.projectId), 'projectId');
+    const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
+    const consumedScope = parseEnum(firstQueryValue(req.query.consumedScope) || 'all', 'consumedScope', OVERRUN_SCOPES);
+    const data = await reportService.getOverrunTrend(req.user!, { startDate, endDate, projectId, groupId, consumedScope });
     res.json({ code: 0, data });
   } catch (error) {
     next(error);
@@ -734,6 +751,56 @@ router.get('/export/overtime', requireAllPermissions('report:view:overtime', 're
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=overtime-report-${startDate}-${endDate}.xlsx`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 导出超投统计
+router.get('/export/overrun', requireAllPermissions('report:export'), async (req: AuthRequest, res, next) => {
+  try {
+    const { startDate, endDate } = parseReportDateRange(req.query);
+    const consumedScope = parseEnum(firstQueryValue(req.query.consumedScope) || 'all', 'consumedScope', OVERRUN_SCOPES);
+    // 查看权限与统计接口一致：report:view:project 或 report:view:all（数据范围由服务层裁剪）
+    if (!await accessPolicy.hasPermission(req.user!, 'report:view:project')
+      && !await accessPolicy.hasPermission(req.user!, 'report:view:all')) {
+      return res.status(403).json({ code: 403, message: '无此操作权限' });
+    }
+    const data = await reportService.getOverrunStats(req.user!, { startDate, endDate, consumedScope });
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('超投统计');
+    sheet.columns = [
+      { header: '项目', key: 'project', width: 20 },
+      { header: '项目编码', key: 'projectCode', width: 12 },
+      { header: '配额组', key: 'groupName', width: 16 },
+      { header: '配额(天)', key: 'allocation', width: 12 },
+      { header: '已消耗', key: 'consumed', width: 12 },
+      { header: '剩余', key: 'remaining', width: 12 },
+      { header: '超投量', key: 'overrun', width: 12 },
+      { header: '超投率(%)', key: 'overrunRate', width: 12 },
+    ];
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0E8E8' } };
+    for (const item of data.list as any[]) {
+      sheet.addRow({
+        project: item.projectName,
+        projectCode: item.projectCode,
+        groupName: item.groupName,
+        allocation: item.allocation,
+        consumed: item.consumed,
+        remaining: item.remaining,
+        overrun: item.overrun,
+        overrunRate: item.overrunRate,
+      });
+    }
+    sheet.addRow([]);
+    sheet.addRow({ project: `口径：${consumedScope === 'approved' ? '仅已通过（结算）' : '审批中+已通过（预警）'}（配额取当前配置值）` });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=overrun-report-${startDate}-${endDate}.xlsx`);
     await workbook.xlsx.write(res);
     res.end();
   } catch (error) {
