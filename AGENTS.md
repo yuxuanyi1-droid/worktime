@@ -91,7 +91,7 @@ No lint/format scripts exist. No CI. Client type checking runs inside `build`; c
 - 默认账号（seed 后，密码均为 `123456`）：`admin`、`manager1`、`leader1/2`、`subleader1`、`employee1/2`。
 - `server/data/` contains generated AI model config, session state, runtime logs/PIDs and other local data (gitignored) — never commit it.
 - Helmet, CORS and rate limiting are enabled. Do not weaken security headers, trusted-origin validation, proxy trust or login/global limiter behavior without tests.
-- `hooks/useRequest.ts` 存在但页面仍手写 `useState(loading/error)` + try/catch——两种方式皆可。
+- 页面统一手写 `useState(loading/error)` + try/catch 方式（旧的 `hooks/useRequest.ts` 已移除，不要重新引入）。
 - 设了 `trust proxy = 1`（反向代理后限流依赖它）。
 
 ## Before editing sensitive areas, read

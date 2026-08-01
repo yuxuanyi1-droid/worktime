@@ -7,7 +7,7 @@ import { SubmissionSequence } from '@server/entities/SubmissionSequence';
  *
  * 用法（在测试文件顶部）：
  *   import { describe, it, expect, beforeEach } from 'vitest';
- *   import { setupTestDb, getTestDataSource } from '../test/setup';
+ *   import { setupTestDb, getTestDataSource } from '../helpers/database';
  *   beforeEach(async () => { await setupTestDb(); });
  *
  * 内存库随进程退出自动销毁，互不影响。

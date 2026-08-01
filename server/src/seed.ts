@@ -13,6 +13,7 @@ import { ProjectSE } from './entities/ProjectSE';
 import { ApprovalFlow } from './entities/ApprovalFlow';
 import { ApprovalFlowStep } from './entities/ApprovalFlowStep';
 import { ApprovalFlowVersion } from './entities/ApprovalFlowVersion';
+import { Holiday } from './entities/Holiday';
 import { permissionDefinitions } from './config/permissionDefinitions';
 
 async function seed() {
@@ -147,7 +148,8 @@ async function seed() {
   // 4. 创建多层级分组
   const groupRepo = AppDataSource.getRepository(Group);
   const getOrCreateGroup = async (name: string, dept: Department, parent: Group | null, leader?: User) => {
-    let group = await groupRepo.findOne({ where: { name } });
+    // 按 name + departmentId 查找：跨部门存在同名组时不会被误复用（仅按 name 全局查找会串组）
+    let group = await groupRepo.findOne({ where: { name, departmentId: dept.id } });
     if (!group) {
       const level = parent ? (parent.level || 0) + 1 : 0;
       // path 先用父级的完整 path，保存拿到自身 id 后再拼接
@@ -325,17 +327,18 @@ async function seed() {
     await flowRepo.update({ type, isDefault: true }, { isDefault: false });
 
     let flow = await flowRepo.findOne({ where: { name } });
-    if (!flow) {
-      flow = flowRepo.create({ name, type, isDefault: true, enabled: true });
-      await flowRepo.save(flow);
-    } else {
+    if (flow) {
+      // 幂等收敛：同名流程已存在 → 只保证启用并设为默认，不重建步骤、不递增版本号。
+      // ApprovalTask/ApprovalInstance 存储的是审批时的流程快照（含步骤 JSON），不依赖 steps 行，
+      // 因此跳过步骤重建不会影响存量审批数据。
       flow.isDefault = true;
       flow.enabled = true;
       await flowRepo.save(flow);
+      return flow;
     }
 
-    // 清除旧步骤
-    await stepRepo.delete({ flowId: flow.id });
+    flow = flowRepo.create({ name, type, isDefault: true, enabled: true });
+    await flowRepo.save(flow);
 
     for (let i = 0; i < steps.length; i++) {
       await stepRepo.save(stepRepo.create({
@@ -348,15 +351,11 @@ async function seed() {
       }));
     }
 
-    const lastVersion = await flowVersionRepo.findOne({
-      where: { flowId: flow.id },
-      order: { version: 'DESC' },
-    });
     await flowVersionRepo.save(flowVersionRepo.create({
       flowId: flow.id,
       flowName: flow.name,
       type: flow.type,
-      version: (lastVersion?.version || 0) + 1,
+      version: 1,
       description: flow.description ?? null,
       isDefault: flow.isDefault,
       enabled: flow.enabled,
@@ -396,6 +395,33 @@ async function seed() {
   ]);
 
   console.log('✅ 审批流程初始化完成');
+
+  // 7. 节假日数据（2026 年中国法定节假日示例，开发模式种子数据）
+  // 幂等：按主键 date 逐条检查，已存在则跳过（holidayService.upsertYear 是运维侧整年覆盖入口，seed 不做覆盖）
+  const holidayRepo = AppDataSource.getRepository(Holiday);
+  const holidays2026 = [
+    { date: '2026-01-01', name: '元旦' },
+    { date: '2026-02-16', name: '除夕' },
+    { date: '2026-02-17', name: '春节' },
+    { date: '2026-02-18', name: '春节' },
+    { date: '2026-02-19', name: '春节' },
+    { date: '2026-04-05', name: '清明节' },
+    { date: '2026-05-01', name: '劳动节' },
+    { date: '2026-06-19', name: '端午节' },
+    { date: '2026-09-25', name: '中秋节' },
+    { date: '2026-10-01', name: '国庆节' },
+    { date: '2026-10-02', name: '国庆节' },
+    { date: '2026-10-03', name: '国庆节' },
+  ];
+  let holidayCount = 0;
+  for (const item of holidays2026) {
+    const exists = await holidayRepo.findOne({ where: { date: item.date } });
+    if (!exists) {
+      await holidayRepo.save(holidayRepo.create({ ...item, isWorkday: false }));
+      holidayCount += 1;
+    }
+  }
+  console.log(`✅ 节假日初始化完成（新增 ${holidayCount} 条，其余已存在跳过）`);
 
   console.log('\n🎉 种子数据初始化完成！');
   console.log('📝 默认账号：');

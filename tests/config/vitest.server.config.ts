@@ -22,6 +22,7 @@ export default defineConfig({
     include: ['tests/server/**/*.test.ts'],
     isolate: true,
     testTimeout: 15000,
+    setupFiles: ['tests/server/setup.ts'],
     env: {
       SUBMIT_APPROVAL_SYNC: '1',
       WORKTIME_DISABLE_AUTO_START: '1',

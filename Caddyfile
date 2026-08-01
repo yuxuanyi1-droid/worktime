@@ -3,20 +3,34 @@
 	auto_https off
 }
 
+# ⚠️ 重要：使用本 Caddyfile 必须在根 .env 中取消注释 BASE_PATH=/worktime（见 .env.example「子路径部署」节），
+# 并在启动 Caddy 前让该变量生效（source 根 .env 或 export BASE_PATH=/worktime）。
+# 本文件所有 API 路径（agent 亲和路由、两处 health_uri）都用 {$BASE_PATH} 前缀拼出：
+#   - BASE_PATH=/worktime  →  /worktime/api/...
+#   - BASE_PATH 未设置     →  /api/...（与 .env.example 默认的根路径部署一致，不会命中 SPA fallback）
+# {$BASE_PATH} 与下方 {$CADDY_LB_COOKIE_SECRET} 同属 Caddyfile 环境变量展开语法（解析期替换，
+# 未设置时展开为空串，不报错）。若需要改 BASE_PATH，只改根 .env 即可，本文件无需手工同步。
+
 # 工时系统统一入口。接受 Tunnel 保留的公网 Host，但仅在本机回环地址监听。
 http://:3000 {
 	bind 127.0.0.1 ::1
 
-	encode zstd gzip
+	# 排除 SSE 不做压缩：encode 会缓冲流式输出，导致 AI 聊天逐字输出被积压。
+	# 语法为 Caddy 官方 encode 指令的 match 子句（not header 匹配 Content-Type 非 text/event-stream）。
+	encode zstd gzip {
+		match {
+			not header Content-Type text/event-stream
+		}
+	}
 
 	route {
 		# AI 会话与 SSE 回调驻留在单个 API 实例内。首次访问由 Caddy 写入亲和 Cookie，
 		# 后续创建、流式聊天、排队和停止请求必须回到同一实例。
-		@agent path /worktime/api/v1/agent/*
+		@agent path {$BASE_PATH}/api/v1/agent/*
 		reverse_proxy @agent 127.0.0.1:3011 127.0.0.1:3012 127.0.0.1:3013 {
 			lb_policy cookie worktime_ai_upstream {$CADDY_LB_COOKIE_SECRET}
 
-			health_uri /worktime/api/health
+			health_uri {$BASE_PATH}/api/health
 			health_interval 10s
 			health_timeout 2s
 			health_status 200
@@ -30,7 +44,7 @@ http://:3000 {
 		reverse_proxy 127.0.0.1:3011 127.0.0.1:3012 127.0.0.1:3013 {
 			lb_policy least_conn
 
-			health_uri /worktime/api/health
+			health_uri {$BASE_PATH}/api/health
 			health_interval 10s
 			health_timeout 2s
 			health_status 200

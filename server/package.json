@@ -39,7 +39,7 @@
     "redis": "^5.12.1",
     "reflect-metadata": "^0.2.1",
     "typebox": "^1.1.38",
-    "typeorm": "^0.3.19"
+    "typeorm": "^0.3.31"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -51,8 +51,7 @@
     "@types/pg": "^8.20.0",
     "@types/pino": "^7.0.4",
     "tsx": "^4.6.2",
-    "typescript": "^5.3.2",
-    "vitest": "^4.1.9"
+    "typescript": "^5.3.2"
   },
   "overrides": {
     "uuid": "^11.1.1",
