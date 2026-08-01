@@ -3,11 +3,12 @@
 	auto_https off
 }
 
-# ⚠️ 重要：使用本 Caddyfile 必须在根 .env 中取消注释 BASE_PATH=/worktime（见 .env.example「子路径部署」节），
-# 并在启动 Caddy 前让该变量生效（source 根 .env 或 export BASE_PATH=/worktime）。
-# 本文件所有 API 路径（agent 亲和路由、两处 health_uri）都用 {$BASE_PATH} 前缀拼出：
+# ⚠️ 重要：本文件所有 API 路径（agent 亲和路由、两处 health_uri）都用 {$BASE_PATH} 前缀拼出，
+# 必须与根 .env 的 BASE_PATH 保持一致：
 #   - BASE_PATH=/worktime  →  /worktime/api/...
 #   - BASE_PATH 未设置     →  /api/...（与 .env.example 默认的根路径部署一致，不会命中 SPA fallback）
+# 使用 server/scripts/production-stack.sh 启动时 BASE_PATH 会自动从根 .env 读取并透传给 Caddy；
+# 手工启动 Caddy（caddy run）时请先 source 根 .env 或 export BASE_PATH。
 # {$BASE_PATH} 与下方 {$CADDY_LB_COOKIE_SECRET} 同属 Caddyfile 环境变量展开语法（解析期替换，
 # 未设置时展开为空串，不报错）。若需要改 BASE_PATH，只改根 .env 即可，本文件无需手工同步。
 

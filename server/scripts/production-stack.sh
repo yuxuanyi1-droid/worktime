@@ -154,7 +154,10 @@ start_worker() {
 start_caddy() {
   (
     cd "$REPO_DIR"
-    nohup env CADDY_LB_COOKIE_SECRET="$CADDY_LB_COOKIE_SECRET" \
+    # BASE_PATH 必须透传给 Caddy：Caddyfile 的 {$BASE_PATH} 环境变量展开与 health_uri /
+    # agent 亲和路由联动，不透传时子路径部署（BASE_PATH=/worktime）下健康检查会退回
+    # 根路径命中 SPA fallback 而假绿、agent 路由失效。
+    nohup env BASE_PATH="$BASE_PATH" CADDY_LB_COOKIE_SECRET="$CADDY_LB_COOKIE_SECRET" \
       caddy run --config "$CADDY_CONFIG" --adapter caddyfile \
       >"$LOG_DIR/caddy.log" 2>&1 </dev/null &
     echo $! >"$RUNTIME_DIR/caddy.pid"

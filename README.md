@@ -149,6 +149,10 @@ http://127.0.0.1:3000
 
 公网 HTTPS 在 Cloudflare 终止，Cloudflare 到本机 Caddy 使用 HTTP 属于正常的内部链路。Caddy 接受 Tunnel 保留的公网 Host，但只绑定本机回环地址，不直接暴露服务端口。
 
+> **子路径部署**：`Caddyfile` 的 API 路径（health_uri / agent 亲和路由）用 `{$BASE_PATH}` 环境变量展开，必须与根 `.env` 的 `BASE_PATH` 一致。`production-stack.sh` 会自动读取根 `.env` 并透传给 Caddy；手工 `caddy run` 前请先 `source 根 .env` 或 `export BASE_PATH`。不一致时健康检查会命中 SPA fallback 返回 200 造成「假绿」，AI 亲和路由也会失效。
+>
+> **限流 IP 来源**：生产环境（Cloudflare Tunnel 拓扑）限流与登录锁定按 `CF-Connecting-IP` 分桶（否则全部用户经回环转发后共享同一个 IP 桶）。该头由 cloudflared 注入、外部无法伪造；非 Cloudflare 前置代理会自动回退 `req.ip`。生产请保持 `TRUST_PROXY_HOPS=1`（仅 Caddy 一层），误设大于 1 会让客户端可控的 X-Forwarded-For 项成为 `req.ip` 从而绕过限流。
+
 ## 默认账号
 
 | 角色 | 用户名 | 密码 |
@@ -217,13 +221,18 @@ node tests/smoke/ai-api-smoke.mjs
 
 ### 数据一致性
 - **事务化**：工时提交/修改、审批通过/撤回、权限授予等所有多步写操作统一包裹数据库事务，中途失败自动回滚
-- **提交分组序列**：`SubmissionSequence` 计数器替代 `SELECT MAX+1`，事务内原子分配，消除并发竞争
+- **提交分组序列**：`SubmissionSequence` 计数器替代 `SELECT MAX+1`，事务内原子分配，消除并发竞争；Redis 发号与 DB 互相校准，序号不会回绕碰撞
+- **审批窗口期版本保留**：修改已通过工时后，旧版本保留到新版本审批通过才废弃——报表/周报在审批窗口期继续统计旧版本，不会归零；配额消耗按「用户+项目+日期」最新版本去重，不会双计
+- **日合计上限**：单日工时 ≤1 天的校验覆盖跨多次提交（合并同日已存在记录），无法通过分批提交绕过
+- **孤儿补偿**：提交事务成功但审批入队前崩溃的记录由后台扫描器（每 5 分钟）按提交组重新入队，不会永久卡在「审批中」
 - **数据精度**：工时/加班/周报时长使用 `numeric(10,2)` 存储，避免 float 累计精度误差
 - **删除保护**：删除用户/项目前检查关联工时，防止孤儿数据和悬空引用
 
 ### 安全
 - **Token 版本号**：JWT 携带 `tokenVersion`，改密/登出时 +1 使所有旧 Token 立即失效
-- **限流**：express-rate-limit 全局限流（15 分钟/1000 次）+ 登录失败专用限流（10 分钟/100 次，可通过 `LOGIN_RATE_MAX` 调整）
+- **JWT_SECRET 强度校验**：启动时拒绝占位符/弱密钥（前缀匹配黑名单，`replace-with-` 开头的示例值直接报错），生产请用 `openssl rand -hex 32` 生成
+- **个人访问令牌（PAT）**：支持权限码 scope 收窄（令牌权限 = 用户权限 ∩ scope），默认 90 天过期（不提供永不过期），创建响应只返回一次明文、不含 tokenHash
+- **限流**：express-rate-limit 全局限流（15 分钟/1000 次）+ 登录失败专用限流（10 分钟/100 次，可通过 `LOGIN_RATE_MAX` 调整）；生产按 `CF-Connecting-IP` 分桶；登录锁定双维度（IP+用户名 5 次 / 用户名 20 次），防止任意失败请求锁死已知账号
 - **统一错误处理**：`BusinessError` 区分业务错误（400 + 友好提示）与系统错误（500 + 不泄露内部细节）
 - **审计日志**：改密、用户禁用/删除、角色权限变更、审批决策、权限授予/撤销等高敏感操作全程留痕
 - **日志脱敏**：结构化日志统一遮蔽 Authorization、Cookie、Token、API key 和客户端密钥，禁止在业务日志中手工拼接敏感凭据
@@ -239,6 +248,7 @@ node tests/smoke/ai-api-smoke.mjs
 - 本地可设置 `TYPEORM_SYNCHRONIZE=true`，启动时直接把实体结构同步到开发数据库
 - 需要干净环境时可重建开发数据库并重新执行 seed；现有 migration 仅作为历史初始化能力保留
 - 准备正式部署前需重新确定 schema 升级策略，并关闭生产环境的自动同步
+- ⚠️ **已有开发库升级**：迁移 `1700000000020-ApprovalWindowVersioning` 调整了 `uq_timesheet_active_user_project_date` 唯一索引谓词（去掉 approved，允许「旧版本已通过 + 新版本审批中」并存）并新增抄送去重索引。该索引不在实体上声明，`TYPEORM_SYNCHRONIZE=true` 不会自动执行——老库请手动运行该迁移（或重建后重新 seed），否则审批窗口期版本化修复不生效。
 
 ### 可观测性
 - **pino 结构化日志**：开发环境 pretty 打印，生产环境 JSON 行（便于 ELK/Loki 采集）
@@ -249,6 +259,7 @@ node tests/smoke/ai-api-smoke.mjs
 - 所有自动化用例、性能脚本和恢复演练统一位于根目录 `tests/`，避免前后端测试分散。
 - `npm test`：依次运行后端和前端测试；`npm run test:coverage`：生成 `tests/coverage/` 覆盖率报告。
 - `npm run test:server` / `npm run test:client`：分别运行服务端或客户端测试。
+- 服务端测试在 `tests/server/setup.ts` 中注入测试专用 `JWT_SECRET`，不再依赖本机根 `.env`（CI / 新克隆环境可直接运行）。
 - `npm run test:smoke:ai`：对已启动环境执行登录、AI 状态、建会话、SSE、历史持久化和删除的完整烟测；账号及地址可通过 `AI_SMOKE_*` 环境变量指定。
 
 ## 项目结构
