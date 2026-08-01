@@ -103,7 +103,7 @@ describe('useChat', () => {
 
     act(() => {
       handlers.onEvent({
-        type: 'message_start',
+        type: 'message_update',
         message: { role: 'assistant', content: [{ type: 'thinking', thinking: '正在分析' }] },
         assistantMessageEvent: { type: 'thinking_start', contentIndex: 0 },
       });
@@ -121,7 +121,7 @@ describe('useChat', () => {
         result: { content: [{ type: 'text', text: '{"days":5}' }] },
       });
       handlers.onEvent({
-        type: 'message_start',
+        type: 'message_update',
         message: { role: 'assistant', content: [{ type: 'text', text: '本月共' }] },
         assistantMessageEvent: { type: 'text_start', contentIndex: 1 },
       });
@@ -181,7 +181,7 @@ describe('useChat', () => {
 
     act(() => {
       handlers.onEvent({
-        type: 'message_start',
+        type: 'message_update',
         message: { role: 'assistant', content: [{ type: 'thinking', thinking: '' }] },
         assistantMessageEvent: { type: 'thinking_start', contentIndex: 0 },
       });
@@ -211,7 +211,7 @@ describe('useChat', () => {
 
     act(() => {
       handlers.onEvent({
-        type: 'message_start',
+        type: 'message_update',
         message: { role: 'assistant', content: [{ type: 'thinking', thinking: '' }] },
         assistantMessageEvent: { type: 'thinking_start', contentIndex: 0 },
       });
@@ -242,6 +242,31 @@ describe('useChat', () => {
     expect(agentApi.abortSession).toHaveBeenCalledWith('session-1');
     expect(result.current.sending).toBe(false);
     expect(result.current.messages.at(-1)?.loading).toBe(false);
+  });
+
+  it('createSession 在途时停止：不启动 SSE，删除刚创建的空会话并还原状态', async () => {
+    const creating = deferred<{ code: number; data: { id: string; title: string } }>();
+    vi.mocked(agentApi.createSession).mockReturnValue(creating.promise);
+    vi.mocked(agentApi.deleteSession).mockResolvedValue({ code: 0 });
+    const abort = vi.fn();
+    vi.mocked(startChat).mockReturnValue({ abort } as unknown as AbortController);
+    const { result } = renderHook(() => useChat());
+
+    let firstSend!: Promise<boolean>;
+    act(() => { firstSend = result.current.send('第一条消息'); });
+    expect(result.current.sending).toBe(true);
+    act(() => result.current.stop());
+    expect(result.current.sending).toBe(false);
+
+    creating.resolve({ code: 0, data: { id: 'session-1', title: '新对话' } });
+    await expect(firstSend).resolves.toBe(true);
+
+    expect(startChat).not.toHaveBeenCalled();
+    expect(abort).not.toHaveBeenCalled();
+    expect(agentApi.deleteSession).toHaveBeenCalledWith('session-1');
+    expect(result.current.sending).toBe(false);
+    expect(result.current.currentSessionId).toBeUndefined();
+    expect(result.current.messages).toEqual([]);
   });
 
   it('初始化加载最近会话，重命名和删除当前会话后切换到剩余会话', async () => {

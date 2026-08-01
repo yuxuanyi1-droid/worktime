@@ -5,6 +5,7 @@
  * Agent 仅启用 worktime_query 自定义工具，不再拥有 bash/read 等通用工具。
  */
 import { parentPort } from 'node:worker_threads';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Type } from 'typebox';
@@ -26,6 +27,75 @@ const sessions = new Map<string, WorkerSession>();
 const SAFE_CWD = path.resolve(__dirname, '../../data/agent-cwd');
 const SESSIONS_ROOT = path.resolve(__dirname, '../../data/agent-sessions');
 const IDLE_SESSION_TTL_MS = 30 * 60 * 1000;
+// 生成任务最大执行时长：主线程 10 分钟超时后已通知 abort，worker 侧 12 分钟兜底，
+// 避免 SDK 挂起时长期占用并发槽位。
+const PROMPT_MAX_DURATION_MS = 12 * 60 * 1000;
+
+// ---- 会话文件跨实例写锁 ----
+// pi SDK 对会话文件是无锁追加写；多实例部署时（Caddy cookie 亲和失效）可能并发写
+// 同一会话文件导致上下文分叉。本实例打开会话前以 O_EXCL 创建锁文件，dispose 时释放。
+const LOCKS_DIR = path.join(SESSIONS_ROOT, '.locks');
+const SESSION_LOCK_TTL_MS = 5 * 60 * 1000;
+const INSTANCE_ID = `${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+const SESSION_LOCK_CONFLICT_ERROR = '该会话正在其他实例处理中，请稍后重试';
+
+function lockPathFor(locksDir: string, sessionId: string): string {
+  // 会话 id 可能包含任意字符，锁定文件名仅保留安全字符，防止路径穿越。
+  const safeId = sessionId.replace(/[^A-Za-z0-9._-]/g, '_');
+  return path.join(locksDir, `${safeId}.lock`);
+}
+
+function isLockExpired(lockPath: string): boolean {
+  try {
+    const data = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as { createdAt?: number };
+    return typeof data.createdAt === 'number' && Date.now() - data.createdAt > SESSION_LOCK_TTL_MS;
+  } catch {
+    // 锁文件损坏或已不存在：按未过期处理，避免误抢正在使用的会话。
+    return false;
+  }
+}
+
+/** 尝试为会话创建跨实例锁；已被其他实例持有（未过期）时抛可操作错误。 */
+export function acquireSessionLock(sessionId: string, locksDir = LOCKS_DIR): void {
+  fs.mkdirSync(locksDir, { recursive: true, mode: 0o700 });
+  const lockPath = lockPathFor(locksDir, sessionId);
+  const content = JSON.stringify({ pid: process.pid, instanceId: INSTANCE_ID, createdAt: Date.now() });
+  const tryCreate = (): void => {
+    const fd = fs.openSync(lockPath, 'wx', 0o600);
+    fs.writeSync(fd, content);
+    fs.closeSync(fd);
+  };
+  try {
+    tryCreate();
+    return;
+  } catch (error: any) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  if (!isLockExpired(lockPath)) throw new Error(SESSION_LOCK_CONFLICT_ERROR);
+  // 锁已过期：抢占（先删后建，O_EXCL 保证并发抢占只有一个成功）。
+  try {
+    fs.unlinkSync(lockPath);
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  try {
+    tryCreate();
+  } catch (error: any) {
+    if (error?.code === 'EEXIST') throw new Error(SESSION_LOCK_CONFLICT_ERROR);
+    throw error;
+  }
+}
+
+/** 释放本实例持有的会话锁；只删自己的锁，避免误删其他实例抢占后的新锁。 */
+export function releaseSessionLock(sessionId: string, locksDir = LOCKS_DIR): void {
+  const lockPath = lockPathFor(locksDir, sessionId);
+  try {
+    const data = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as { instanceId?: string };
+    if (data?.instanceId === INSTANCE_ID) fs.unlinkSync(lockPath);
+  } catch {
+    // 锁不存在、已过期被抢占或内容损坏：无需处理。
+  }
+}
 
 function envInt(name: string, fallback: number, min: number, max: number): number {
   const value = Number(process.env[name]);
@@ -120,6 +190,7 @@ function disposeSession(sessionId: string, record: WorkerSession) {
   record.unsubscribe();
   record.session.dispose?.();
   sessions.delete(sessionId);
+  releaseSessionLock(sessionId);
   // 通知主线程该会话已被（空闲 TTL / LRU 容量）淘汰，使其清理 sessionOwners 等跟踪态。
   // 否则主线程仍认为会话驻留，下次访问命中 owner 直接返回旧 sessionId，进 worker 后抛“会话不存在”且无法自愈。
   post({ type: 'session-disposed', sessionId });
@@ -137,7 +208,7 @@ function ensureResidentCapacity() {
 
 export function buildQueryUrl(worktimeApi: string, resource: ResourceName, params: Record<string, unknown>): string {
   const url = new URL(`${worktimeApi}${RESOURCE_CONFIG[resource].path}`);
-  const allowed = ['startDate', 'endDate', 'status', 'weekStart', 'weekEnd', 'page', 'pageSize', 'userId', 'includeAll'];
+  const allowed = ['startDate', 'endDate', 'status', 'weekStart', 'weekEnd', 'page', 'pageSize', 'userId', 'groupId', 'departmentId', 'includeAll'];
   for (const key of allowed) {
     const value = params[key];
     if (value !== undefined && value !== null && value !== '') {
@@ -177,6 +248,8 @@ function createWorktimeQueryTool(accessToken: { current: string }, worktimeApi: 
       page: Type.Optional(Type.Number({ minimum: 1 })),
       pageSize: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
       userId: Type.Optional(Type.Number({ minimum: 1 })),
+      groupId: Type.Optional(Type.Number({ minimum: 1 })),
+      departmentId: Type.Optional(Type.Number({ minimum: 1 })),
       includeAll: Type.Optional(Type.Boolean()),
     }),
     executionMode: 'parallel',
@@ -271,10 +344,19 @@ async function createOrOpenSession(data: {
   const sessionDir = userSessionDir(userId);
   const available = await pi.SessionManager.list(SAFE_CWD, sessionDir);
   let sessionManager: any;
+  // 会话文件跨实例写锁：仅在按 sessionId 打开已有会话时加锁，新建会话文件不存在并发写问题。
+  let releaseLock: (() => void) | undefined;
   if (sessionId) {
     const info = available.find((item: any) => item.id === sessionId);
     if (!info) throw new Error('会话不存在');
-    sessionManager = pi.SessionManager.open(info.path, sessionDir, SAFE_CWD);
+    acquireSessionLock(sessionId);
+    releaseLock = () => releaseSessionLock(sessionId);
+    try {
+      sessionManager = pi.SessionManager.open(info.path, sessionDir, SAFE_CWD);
+    } catch (error) {
+      releaseSessionLock(sessionId);
+      throw error;
+    }
   } else {
     const knownSessionIds = new Set(available.map((item: any) => item.id));
     for (const [knownSessionId, record] of sessions) {
@@ -284,57 +366,63 @@ async function createOrOpenSession(data: {
     sessionManager = pi.SessionManager.create(SAFE_CWD, sessionDir);
   }
 
-  const { modelRuntime, model } = await getModelRuntime(piModelsJsonPath, aiConfig);
+  try {
+    const { modelRuntime, model } = await getModelRuntime(piModelsJsonPath, aiConfig);
 
-  const calendar = buildShanghaiCalendarContext();
-  const resourceLoader = new pi.DefaultResourceLoader({
-    cwd: SAFE_CWD,
-    agentDir: SAFE_CWD,
-    noExtensions: true,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-    appendSystemPrompt: [
-      '你是「工时管理系统」的只读数据助手。使用 worktime_query 查询当前用户有权限访问的数据，并用简洁中文回答。',
-      `当前日期为 ${calendar.today}（Asia/Shanghai），本周范围为 ${calendar.weekStart} 至 ${calendar.weekEnd}。用户说“今天”“本周”或“本月”时必须以此日期为基准。`,
-      `查询本周工时汇总时，weekly_timesheet_summary 必须同时传 weekStart=${calendar.weekStart} 和 weekEnd=${calendar.weekEnd}。`,
-      '不要声称已修改、提交或审批任何数据；你没有写入能力。不要暴露访问令牌、接口地址、工具参数或其他技术细节。',
-      '回答优先给出结论和关键数字，明细较多时使用短列表；仅在确实适合比较时使用表格。',
-    ],
-  });
-  await resourceLoader.reload();
+    const calendar = buildShanghaiCalendarContext();
+    const resourceLoader = new pi.DefaultResourceLoader({
+      cwd: SAFE_CWD,
+      agentDir: SAFE_CWD,
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      appendSystemPrompt: [
+        '你是「工时管理系统」的只读数据助手。使用 worktime_query 查询当前用户有权限访问的数据，并用简洁中文回答。',
+        `当前日期为 ${calendar.today}（Asia/Shanghai），本周范围为 ${calendar.weekStart} 至 ${calendar.weekEnd}。用户说“今天”“本周”或“本月”时必须以此日期为基准。`,
+        `查询本周工时汇总时，weekly_timesheet_summary 必须同时传 weekStart=${calendar.weekStart} 和 weekEnd=${calendar.weekEnd}。`,
+        '不要声称已修改、提交或审批任何数据；你没有写入能力。不要暴露访问令牌、接口地址、工具参数或其他技术细节。',
+        '回答优先给出结论和关键数字，明细较多时使用短列表；仅在确实适合比较时使用表格。',
+      ],
+    });
+    await resourceLoader.reload();
 
-  const accessToken = { current: pat };
-  const queryTool = createWorktimeQueryTool(accessToken, worktimeApi);
-  const created = await pi.createAgentSession({
-    cwd: SAFE_CWD,
-    modelRuntime,
-    model,
-    tools: ['worktime_query'],
-    customTools: [queryTool],
-    resourceLoader,
-    sessionManager,
-  });
-  const session = created.session;
-  if (session.sessionFile) {
-    await fs.promises.chmod(session.sessionFile, 0o600).catch(() => undefined);
+    const accessToken = { current: pat };
+    const queryTool = createWorktimeQueryTool(accessToken, worktimeApi);
+    const created = await pi.createAgentSession({
+      cwd: SAFE_CWD,
+      modelRuntime,
+      model,
+      tools: ['worktime_query'],
+      customTools: [queryTool],
+      resourceLoader,
+      sessionManager,
+    });
+    const session = created.session;
+    if (session.sessionFile) {
+      await fs.promises.chmod(session.sessionFile, 0o600).catch(() => undefined);
+    }
+    const unsubscribe = session.subscribe((event: any) => {
+      const record = sessions.get(session.sessionId);
+      if (record) record.lastActiveAt = Date.now();
+      post({ type: 'event', sessionId: session.sessionId, payload: event });
+    });
+    sessions.set(session.sessionId, {
+      session,
+      userId,
+      sessionFile: session.sessionFile,
+      accessToken,
+      unsubscribe,
+      lastActiveAt: Date.now(),
+    });
+    postWorkerStats();
+    post({ type: 'created', requestId, sessionId: session.sessionId, sessionFile: session.sessionFile, reused: false });
+  } catch (error) {
+    // 会话未注册成功前失败：释放刚取得的跨实例锁，避免残留锁阻塞后续打开。
+    releaseLock?.();
+    throw error;
   }
-  const unsubscribe = session.subscribe((event: any) => {
-    const record = sessions.get(session.sessionId);
-    if (record) record.lastActiveAt = Date.now();
-    post({ type: 'event', sessionId: session.sessionId, payload: event });
-  });
-  sessions.set(session.sessionId, {
-    session,
-    userId,
-    sessionFile: session.sessionFile,
-    accessToken,
-    unsubscribe,
-    lastActiveAt: Date.now(),
-  });
-  postWorkerStats();
-  post({ type: 'created', requestId, sessionId: session.sessionId, sessionFile: session.sessionFile, reused: false });
 }
 
 async function listSessions(data: { requestId: string; userId: number }) {
@@ -398,6 +486,28 @@ function getOwnedSession(sessionId: string, userId: number): WorkerSession {
   return record;
 }
 
+/**
+ * 生成任务看门狗：超过最大时长强制 abort 并报超时错误。
+ * 主线程 10 分钟超时后也会发 abort，worker 侧 12 分钟兜底，保证任务最终结束、
+ * promptScheduler 槽位（run 的 finally）一定释放。
+ */
+async function runPromptWithWatchdog(session: any, message: string): Promise<void> {
+  let watchdog: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      session.prompt(message),
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => {
+          session.abort().catch(() => undefined);
+          reject(new Error('AI 处理超时，请稍后重试'));
+        }, PROMPT_MAX_DURATION_MS);
+      }),
+    ]);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+  }
+}
+
 async function promptSession(data: { requestId: string; sessionId: string; userId: number; message: string }) {
   const record = getOwnedSession(data.sessionId, data.userId);
   await promptScheduler.run(data.sessionId, async () => {
@@ -405,7 +515,7 @@ async function promptSession(data: { requestId: string; sessionId: string; userI
     if (!record.session.sessionManager.getSessionName()) {
       record.session.setSessionName(data.message.trim().slice(0, 30) || '新对话');
     }
-    await record.session.prompt(data.message);
+    await runPromptWithWatchdog(record.session, data.message);
   });
   post({ type: 'prompt-done', requestId: data.requestId, sessionId: data.sessionId });
 }
@@ -427,7 +537,7 @@ async function regenerateSession(data: { requestId: string; sessionId: string; u
     if (navigation.cancelled) throw new Error('重新生成已取消');
     const prompt = navigation.editorText?.trim() || data.message.trim();
     if (!prompt) throw new Error('没有可重新生成的消息');
-    await record.session.prompt(prompt);
+    await runPromptWithWatchdog(record.session, prompt);
   });
   post({ type: 'prompt-done', requestId: data.requestId, sessionId: data.sessionId });
 }
@@ -494,6 +604,13 @@ function serializedCreate(data: Parameters<typeof createOrOpenSession>[0]): Prom
   return run as Promise<void>;
 }
 
+/** 优雅关闭：释放全部驻留会话（含跨实例锁），避免进程重启后残留锁阻塞会话打开。 */
+function shutdownAllSessions(): void {
+  for (const [sessionId, record] of [...sessions]) {
+    disposeSession(sessionId, record);
+  }
+}
+
 async function handleMessage(message: any) {
   switch (message.type) {
     case 'create': return serializedCreate(message);
@@ -506,6 +623,10 @@ async function handleMessage(message: any) {
     case 'abort': return abortSession(message);
     case 'rename': return renameSession(message);
     case 'delete': return deleteSession(message);
+    case 'shutdown':
+      shutdownAllSessions();
+      post({ type: 'action-done', requestId: message.requestId });
+      return;
     default: throw new Error('不支持的 Agent 操作');
   }
 }

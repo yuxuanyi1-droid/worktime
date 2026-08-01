@@ -3,12 +3,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  acquireSessionLock,
   assertSessionQuota,
   buildQueryUrl,
   buildShanghaiCalendarContext,
   createModelRuntime,
   entryMessageText,
   messageText,
+  releaseSessionLock,
   serializeHistory,
 } from '@server/ai/agentWorker';
 
@@ -38,6 +40,66 @@ describe('AI Worker 纯逻辑', () => {
       includeAll: 'false',
     });
     expect(url.searchParams.has('ignored')).toBe(false);
+  });
+  it('group/department 报表透传 groupId/departmentId 白名单参数', () => {
+    const groupUrl = new URL(buildQueryUrl('http://127.0.0.1:3000/api/v1', 'group_report', {
+      groupId: 3,
+      startDate: '2026-07-01',
+      endDate: '2026-07-31',
+      ignored: 'secret',
+    }));
+    expect(groupUrl.pathname).toBe('/api/v1/reports/group');
+    expect(groupUrl.searchParams.get('groupId')).toBe('3');
+    expect(groupUrl.searchParams.has('ignored')).toBe(false);
+
+    const departmentUrl = new URL(buildQueryUrl('http://127.0.0.1:3000/api/v1', 'department_report', {
+      departmentId: 5,
+      groupId: 3,
+      startDate: '2026-07-01',
+      endDate: '2026-07-31',
+    }));
+    expect(departmentUrl.pathname).toBe('/api/v1/reports/department');
+    expect(departmentUrl.searchParams.get('departmentId')).toBe('5');
+    expect(departmentUrl.searchParams.get('groupId')).toBe('3');
+  });
+  it('会话跨实例锁：未过期冲突拒绝打开，过期可抢占，释放只删自己的锁', () => {
+    const locksDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worktime-locks-'));
+    const lockPath = (sessionId: string) => path.join(locksDir, `${sessionId}.lock`);
+    const otherLock = (createdAt: number) => ({
+      pid: 9999,
+      instanceId: 'other-instance',
+      createdAt,
+    });
+    try {
+      // 本实例正常加锁并释放，锁文件可创建、可删除（单实例不受影响）。
+      acquireSessionLock('session-1', locksDir);
+      expect(fs.existsSync(lockPath('session-1'))).toBe(true);
+      expect(JSON.parse(fs.readFileSync(lockPath('session-1'), 'utf8'))).toMatchObject({ pid: process.pid });
+      releaseSessionLock('session-1', locksDir);
+      expect(fs.existsSync(lockPath('session-1'))).toBe(false);
+
+      // 其他实例持有且未过期：拒绝并给出可操作错误。
+      fs.writeFileSync(lockPath('session-1'), JSON.stringify(otherLock(Date.now())));
+      expect(() => acquireSessionLock('session-1', locksDir)).toThrow('该会话正在其他实例处理中');
+      // 释放他人锁不应删除对方锁文件。
+      releaseSessionLock('session-1', locksDir);
+      expect(fs.existsSync(lockPath('session-1'))).toBe(true);
+
+      // 过期锁可被抢占，抢占后归属本实例。
+      fs.writeFileSync(lockPath('session-1'), JSON.stringify(otherLock(Date.now() - 6 * 60 * 1000)));
+      acquireSessionLock('session-1', locksDir);
+      expect(JSON.parse(fs.readFileSync(lockPath('session-1'), 'utf8'))).toMatchObject({ pid: process.pid });
+      releaseSessionLock('session-1', locksDir);
+      expect(fs.existsSync(lockPath('session-1'))).toBe(false);
+
+      // 会话 id 中的不安全字符不会逃出锁目录。
+      acquireSessionLock('../escape', locksDir);
+      expect(fs.existsSync(path.join(locksDir, '.._escape.lock'))).toBe(true);
+      releaseSessionLock('../escape', locksDir);
+      expect(fs.existsSync(path.join(locksDir, '.._escape.lock'))).toBe(false);
+    } finally {
+      fs.rmSync(locksDir, { recursive: true, force: true });
+    }
   });
 
   it('按 Asia/Shanghai 计算当前日期及周一到周日范围', () => {

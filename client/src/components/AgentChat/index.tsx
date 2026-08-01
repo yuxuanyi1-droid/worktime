@@ -769,6 +769,14 @@ function MessageBubble({
  * 过程总折叠：所有思考/工具 part 统一收进一个"执行中 Xs / 已完成"条，
  * 展开后内部再按时间线展示各步骤（思考过程、工具调用，各自可折叠）。
  */
+
+/** 中间过渡文本只展示摘要，避免把模型未定稿的原始输出整段塞进折叠区。 */
+function summarizeIntermediateText(text: string): string {
+  const collapsed = text.trim().replace(/\s+/g, ' ');
+  if (collapsed.length <= 50) return collapsed;
+  return `${collapsed.slice(0, 50)}…`;
+}
+
 function ProcessGroup({
   parts,
   running,
@@ -836,7 +844,7 @@ function ProcessGroup({
                   ? part.detail || '正在等待查询结果…'
                   : part.type === 'thinking'
                     ? thinkingSummary
-                    : part.text || '正在整理结果…'}
+                    : summarizeIntermediateText(part.text) || '正在整理结果…'}
               </div>
             </CollapsibleBar>
           );

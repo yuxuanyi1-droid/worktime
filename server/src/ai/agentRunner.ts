@@ -2,6 +2,7 @@ import { Worker } from 'node:worker_threads';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { logger } from '../utils/logger';
+import { presentAgentError } from './agentErrors';
 import { aiConfig, isAiRuntimeReady, piModelsJsonPath } from '../config/ai';
 import { AuthService } from '../services/authService';
 import { resetAiWorkerStats, setAiWorkerStats } from '../middleware/metrics';
@@ -132,12 +133,20 @@ export function startWorker(): Promise<void> {
         sessionCallbacks.get(message.sessionId)?.onError?.(message.message);
       }
       if (message.type === 'error') {
-        logger.error({ message }, '[ai] worker 报错');
+        // 记录前先经安全分类，避免 worker 侧携带的上游错误细节落入日志。
+        logger.error(
+          { message: { ...message, message: presentAgentError(new Error(message.message || '')) } },
+          '[ai] worker 报错',
+        );
       }
     });
     worker.on('error', (error) => {
       clearStartupTimer();
-      logger.error({ err: error }, '[ai] worker 线程异常');
+      // 线程级异常可能包含模型错误细节，日志仅保留错误类型与分类后的安全文案。
+      logger.error(
+        { err: { name: (error as Error)?.name || 'Error', message: presentAgentError(error) } },
+        '[ai] worker 线程异常',
+      );
       workerReady = false;
       rejectAllPending(error);
       reject(error);
@@ -165,15 +174,25 @@ async function requestWorker(type: string, payload: Record<string, unknown> = {}
   if (!workerReady) await startWorker();
   const requestId = crypto.randomUUID();
   return new Promise((resolve, reject) => {
+    const postAbort = () => {
+      worker?.postMessage({
+        type: 'abort',
+        requestId: crypto.randomUUID(),
+        userId: payload.userId,
+        sessionId: payload.sessionId,
+      });
+    };
     const timer = setTimeout(() => {
       pendingRequests.delete(requestId);
       if ((type === 'prompt' || type === 'regenerate') && typeof payload.sessionId === 'string') {
-        worker?.postMessage({
-          type: 'abort',
-          requestId: crypto.randomUUID(),
-          userId: payload.userId,
-          sessionId: payload.sessionId,
-        });
+        logger.warn(
+          { userId: payload.userId, sessionId: payload.sessionId },
+          '[ai] 生成请求超时，通知 worker 中止任务',
+        );
+        // 立即发一次 abort；30 秒后补发一次，避免单条 abort 消息丢失导致 worker 侧任务长期挂起。
+        postAbort();
+        const retryTimer = setTimeout(postAbort, 30_000);
+        retryTimer.unref();
       }
       reject(new Error('Agent 操作超时'));
     }, timeoutMs);
@@ -316,6 +335,9 @@ export function preloadPi(): void {
 /**
  * 优雅退出时终止 pi worker，释放会话文件、订阅回调和待处理请求。
  * HTTP 连接应先完成 drain，再调用本函数，避免主动截断仍在输出的 SSE。
+ *
+ * 终止前先通知 worker 释放全部驻留会话（含跨实例会话锁文件），
+ * 避免进程重启后残留锁导致会话在锁过期前无法重新打开。
  */
 export async function stopAgentWorker(): Promise<void> {
   const activeWorker = worker;
@@ -330,6 +352,23 @@ export async function stopAgentWorker(): Promise<void> {
   resetAiWorkerStats();
   if (activeWorker) {
     workerStopping = true;
+    await new Promise<void>((resolve) => {
+      const requestId = crypto.randomUUID();
+      const done = (message: any) => {
+        if (message?.requestId === requestId) {
+          activeWorker.off('message', done);
+          resolve();
+        }
+      };
+      activeWorker.on('message', done);
+      const timer = setTimeout(() => {
+        // worker 可能已卡死；不阻塞关闭流程，直接终止线程。
+        activeWorker.off('message', done);
+        resolve();
+      }, 5_000);
+      timer.unref();
+      activeWorker.postMessage({ type: 'shutdown', requestId });
+    });
     await activeWorker.terminate();
   }
 }

@@ -85,6 +85,8 @@ export function useChat() {
   const sessionIdRef = useRef<string>();
   const sendingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  // 停止标志：createSession 在途时用户点击停止，send() 据此放弃启动 SSE 并清理新建会话。
+  const stopRequestedRef = useRef(false);
   const initializedRef = useRef(false);
   const messagesRef = useRef<ChatMessage[]>([]);
   const sessionLoadRequestIdRef = useRef(0);
@@ -95,6 +97,8 @@ export function useChat() {
 
   useEffect(() => () => {
     sessionLoadRequestIdRef.current += 1;
+    // 组件卸载视为取消发送：createSession 在途时同样放弃启动 SSE。
+    stopRequestedRef.current = true;
     abortRef.current?.abort();
     abortRef.current = null;
   }, []);
@@ -197,6 +201,8 @@ export function useChat() {
 
     // 必须在首次 createSession 的 await 之前占用发送状态，否则快速连续点击会并发
     // 创建多个服务端会话，并让后返回的 sessionId 覆盖先返回的会话。
+    // 同时清除上次 stop 留下的取消标志，开启新一轮发送。
+    stopRequestedRef.current = false;
     sendingRef.current = true;
     setSending(true);
     let sessionId = sessionIdRef.current;
@@ -210,6 +216,17 @@ export function useChat() {
       sendingRef.current = false;
       setSending(false);
       throw error;
+    }
+
+    // createSession 在途时用户可能已点击停止（stop 已复位发送状态）：
+    // 放弃启动 SSE，删除刚创建的空会话并把会话状态还原，避免恢复一个已取消的流。
+    if (stopRequestedRef.current) {
+      sendingRef.current = false;
+      setSending(false);
+      setQueuedMessages([]);
+      if (sessionId) void agentApi.deleteSession(sessionId).catch(() => undefined);
+      setSessionId(undefined);
+      return true;
     }
 
     const userMessage: ChatMessage = {
@@ -237,7 +254,6 @@ export function useChat() {
             case 'session':
               setSessionId(event.sessionId);
               break;
-            case 'message_start':
             case 'message_update': {
               if (!isAssistant) break;
               const contentIndex = event.assistantMessageEvent?.contentIndex;
@@ -378,6 +394,8 @@ export function useChat() {
 
   const stop = useCallback(() => {
     const sessionId = sessionIdRef.current;
+    // 置位取消标志：createSession 在途时由 send() 检测并放弃启动 SSE。
+    stopRequestedRef.current = true;
     abortRef.current?.abort();
     abortRef.current = null;
     if (sessionId) void agentApi.abortSession(sessionId).catch(() => undefined);

@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { BusinessError, isBusinessError } from '../utils/errors';
 import { logger } from '../utils/logger';
+import { presentAgentError } from '../ai/agentErrors';
 import {
   abortSession,
   checkAiAvailability,
@@ -46,28 +47,14 @@ function parseMessage(value: unknown): string {
 }
 
 function writeSse(res: Response, payload: unknown) {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  (res as any).flush?.();
-}
-
-export function presentAgentError(error: unknown): string {
-  const message = error instanceof Error ? error.message : '';
-  const safeMessages = [
-    /^会话不存在$/,
-    /^当前会话正在处理中$/,
-    /^当前会话没有正在执行的任务$/,
-    /^该会话已在其他窗口处理中$/,
-    /^任务已取消$/,
-    /^没有可重新生成的消息$/,
-    /^重新生成已取消$/,
-    /^最多保留\d+条对话，请先删除不需要的历史对话$/,
-    /^AI 服务当前任务较多，请稍后重试$/,
-  ];
-  if (safeMessages.some(pattern => pattern.test(message))) return message;
-  if (/超时|timeout/i.test(message)) return 'AI 处理超时，请稍后重试';
-  if (/429|rate.?limit|too many requests|限流|频繁/i.test(message)) return 'AI 模型服务繁忙，请稍后重试';
-  if (/找不到模型|pi 加载失败|模型配置/i.test(message)) return 'AI 模型配置不可用，请联系管理员';
-  return 'AI 处理失败，请稍后重试';
+  // 客户端已断开（writableEnded）或写入抛错（EPIPE 等）时静默，不把 SSE 写入异常抛到调用链。
+  if (res.writableEnded) return;
+  try {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    (res as any).flush?.();
+  } catch {
+    // 写入失败通常意味着连接已断开，忽略即可。
+  }
 }
 
 const toolArgumentKeys = new Set([
@@ -151,6 +138,7 @@ function toAgentHttpError(error: unknown): unknown {
     '当前会话正在处理中',
     '当前会话没有正在执行的任务',
     '该会话已在其他窗口处理中',
+    '该会话正在其他实例处理中，请稍后重试',
     '任务已取消',
     '没有可重新生成的消息',
     '重新生成已取消',
@@ -277,6 +265,10 @@ router.post('/chat', async (req: AuthRequest, res: Response, next) => {
     if (!clientClosed && !res.writableEnded) res.write(': heartbeat\n\n');
   }, 15_000);
   heartbeat.unref();
+  // 客户端断开（EPIPE/ECONNRESET）时静默，避免触发 unhandled error 事件。
+  res.on('error', () => {
+    clientClosed = true;
+  });
   res.on('close', () => {
     clientClosed = true;
     clearInterval(heartbeat);
@@ -287,7 +279,8 @@ router.post('/chat', async (req: AuthRequest, res: Response, next) => {
     }
   });
 
-  writeSse(res, { type: 'meta', userId: req.user!.id });
+  // 前端未使用 meta 中的 userId，不下发不必要的用户 ID。
+  writeSse(res, { type: 'meta' });
 
   try {
     const result = await getOrCreateSession(req.user!.id, requestedSessionId, {
