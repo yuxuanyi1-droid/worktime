@@ -302,6 +302,29 @@ export interface PersonalReport {
   totalDays: number;
   byProject: Record<string, { days: number; count: number }>;
   byDate: Record<string, number>;
+  /** 工时状态分布（approved/submitted/draft，各状态最新版本去重） */
+  statusBreakdown?: StatusBreakdown;
+}
+
+export interface StatusBreakdown {
+  approved: number;
+  submitted: number;
+  draft: number;
+}
+
+/** 提交覆盖度：范围内在职成员 vs 期间有工时提交的成员 */
+export interface ReportCoverage {
+  memberCount: number;
+  submittedUserCount: number;
+  coverageRate: number;
+}
+
+/** 审批效率：工时单闭合实例的平均审批时长与驳回率 */
+export interface ApprovalEfficiency {
+  avgDurationHours: number;
+  closedCount: number;
+  rejectedCount: number;
+  rejectRate: number;
 }
 
 export interface DepartmentReport {
@@ -311,6 +334,9 @@ export interface DepartmentReport {
   byDate: Record<string, number>;
   byGroup: Record<string, { days: number; count: number }>;
   byDepartment?: Record<string, { days: number; count: number }>;
+  statusBreakdown?: StatusBreakdown;
+  coverage?: ReportCoverage;
+  efficiency?: ApprovalEfficiency;
 }
 
 export interface GroupReport {
@@ -319,6 +345,9 @@ export interface GroupReport {
   byProject: Record<string, { days: number; count?: number }>;
   byDate: Record<string, number>;
   byGroup: Record<string, { days: number; count: number }>;
+  statusBreakdown?: StatusBreakdown;
+  coverage?: ReportCoverage;
+  efficiency?: ApprovalEfficiency;
 }
 
 export interface ProjectReport {
@@ -328,6 +357,8 @@ export interface ProjectReport {
   byDate: Record<string, number>;
   byDepartment: Record<string, { days: number; count: number }>;
   byGroup: Record<string, { days: number; count: number }>;
+  statusBreakdown?: StatusBreakdown;
+  efficiency?: ApprovalEfficiency;
   filters?: {
     departments: { id: number; name: string }[];
     groups: { id: number; name: string; departmentId: number | null }[];

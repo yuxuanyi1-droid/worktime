@@ -30,6 +30,16 @@ describe('报表路由范围与参数校验', () => {
       groupIds: [],
       projectIds: [],
     });
+    // 报表内嵌指标（状态分布/覆盖度/审批效率）：路由层默认 mock 空值，避免真实执行依赖数据库
+    vi.spyOn(ReportService.prototype, 'getStatusBreakdown').mockResolvedValue({
+      approved: 0, submitted: 0, draft: 0,
+    } as any);
+    vi.spyOn(ReportService.prototype, 'getCoverage').mockResolvedValue({
+      memberCount: 0, submittedUserCount: 0, coverageRate: 0,
+    } as any);
+    vi.spyOn(ReportService.prototype, 'getApprovalEfficiency').mockResolvedValue({
+      avgDurationHours: 0, closedCount: 0, rejectedCount: 0, rejectRate: 0,
+    } as any);
   });
 
   it('所有报表在查询前拒绝反向日期区间', async () => {

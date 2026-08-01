@@ -4,8 +4,10 @@ import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { WeeklyReport } from '../entities/WeeklyReport';
 import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
+import { ApprovalInstance } from '../entities/ApprovalInstance';
 import { Group } from '../entities/Group';
-import { Between, Not } from 'typeorm';
+import { User } from '../entities/User';
+import { Between } from 'typeorm';
 import { ApprovalService } from './approvalService';
 import { AccessPolicyService, AccessViewer } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
@@ -103,6 +105,34 @@ export function dedupReportTimesheets(records: Timesheet[]): Timesheet[] {
   });
 }
 
+/**
+ * 按 (userId, projectId, date) 对指定状态的行取最新 submissionGroup 求和。
+ * 与 dedupReportTimesheets 同规则（无组号行仅在无带组号行时保留），供状态分布使用：
+ * approved / submitted 各有版本链，分别去重后相加，保证「各状态之和」不因窗口期多版本而虚高。
+ */
+export function sumLatestByStatus(records: Timesheet[], status: Timesheet['status']): number {
+  const maxGroupByKey = new Map<string, number>();
+  for (const r of records) {
+    if (r.status !== status || !r.submissionGroupId) continue;
+    const key = `${r.userId}_${r.projectId}_${r.date}`;
+    const cur = maxGroupByKey.get(key);
+    if (cur === undefined || r.submissionGroupId > cur) {
+      maxGroupByKey.set(key, r.submissionGroupId);
+    }
+  }
+  let sum = 0;
+  for (const r of records) {
+    if (r.status !== status) continue;
+    const key = `${r.userId}_${r.projectId}_${r.date}`;
+    if (r.submissionGroupId) {
+      if (r.submissionGroupId === maxGroupByKey.get(key)) sum += Number(r.days);
+    } else if (!maxGroupByKey.has(key)) {
+      sum += Number(r.days);
+    }
+  }
+  return round2(sum);
+}
+
 export class ReportService {
   constructor(private manager?: EntityManager) {}
 
@@ -112,6 +142,8 @@ export class ReportService {
   private get approvalService() { return new ApprovalService(this.manager); }
   private get allocationRepo() { return (this.manager ?? AppDataSource).getRepository(ProjectWorkloadAllocation); }
   private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
+  private get instanceRepo() { return (this.manager ?? AppDataSource).getRepository(ApprovalInstance); }
+  private get userRepo() { return (this.manager ?? AppDataSource).getRepository(User); }
 
   /**
    * 超投统计基础：查询配额配置、组覆盖集合与去重后的有效消耗行。
@@ -446,22 +478,135 @@ export class ReportService {
       acc[record.overtimeType] = round2((acc[record.overtimeType] || 0) + Number(record.days));
       return acc;
     }, {} as Record<string, number>);
+    // 与普通报表（summarizeTimesheets）统一为 { days, count } 形态，避免跨报表契约分裂
     const byUser = records.reduce((acc, record) => {
-      const key = record.user?.realName || UNKNOWN_USER;
-      acc[key] = round2((acc[key] || 0) + Number(record.days));
+      addCountSummary(acc, record.user?.realName || UNKNOWN_USER, Number(record.days));
       return acc;
-    }, {} as Record<string, number>);
-    // 已知不一致（保留，未统一）：加班报表的 byUser 为 Record<string, number>（仅天数），
-    // 而普通报表（summarizeTimesheets）的 byUser 为 Record<string, { days, count }>。
-    // 强行统一会同时破坏 server 集成测试（reportService.integration.test.ts 断言数字形态）
-    // 与前端契约（Report.test.tsx 的加班 mock 也按数字形态），属于跨层契约变更，风险超出本 LOW 修复范围。
-    // 如后续要统一，建议统一到 { days, count } 并同步更新前端与测试。
+    }, {} as Record<string, SummaryWithCount>);
     const byGroup = records.reduce((acc, record) => {
       addHoursSummary(acc, record.groupSnapshotName || UNKNOWN_GROUP, Number(record.days));
       return acc;
     }, {} as Record<string, SummaryHours>);
 
     return { totalDays, byType, byUser, byGroup, records };
+  }
+
+  /**
+   * 工时状态分布：approved / submitted / draft 各自按最新版本去重求和。
+   *
+   * 与主统计的关系：approved 档与报表主统计完全一致（同为 dedup 规则）；
+   * submitted 档补上「已提交未审批」的负荷视角，draft 档为未提交草稿。
+   * 各档独立去重，窗口期（v1 approved + v2 submitted 并存）下三档之和仍可能大于
+   * 最新版本视图，但每一档数字本身是准确的，且不会因多版本双计虚高。
+   */
+  async getStatusBreakdown(startDate: string, endDate: string, filters: ReportFilters = {}) {
+    assertReportRange(startDate, endDate);
+    const qb = this.timesheetRepo.createQueryBuilder('t')
+      .where('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
+      .andWhere('t.status != :deprecated', { deprecated: 'deprecated' });
+    if (filters.userId) qb.andWhere('t.userId = :userId', { userId: filters.userId });
+    if (filters.departmentIds?.length) qb.andWhere('t.departmentSnapshotId IN (:...departmentIds)', { departmentIds: filters.departmentIds });
+    else if (filters.departmentId) qb.andWhere('t.departmentSnapshotId = :departmentId', { departmentId: filters.departmentId });
+    if (filters.groupIds?.length) qb.andWhere('t.groupSnapshotId IN (:...groupIds)', { groupIds: filters.groupIds });
+    else if (filters.groupId) qb.andWhere('t.groupSnapshotId = :groupId', { groupId: filters.groupId });
+    const records = await qb.getMany();
+    return {
+      approved: sumLatestByStatus(records, 'approved'),
+      submitted: sumLatestByStatus(records, 'submitted'),
+      draft: sumLatestByStatus(records, 'draft'),
+    };
+  }
+
+  /**
+   * 提交覆盖度：范围内在职成员数 vs 期间有工时提交（approved / submitted）的成员数。
+   *
+   * 分子分母同口径（均按成员当前组织归属），避免调岗导致快照归属与在职名单不一致。
+   * 覆盖度用 distinct userId，不受版本去重影响。
+   */
+  async getCoverage(filters: {
+    departmentId?: number;
+    departmentIds?: number[];
+    groupId?: number;
+    groupIds?: number[];
+    startDate: string;
+    endDate: string;
+  }) {
+    const { departmentId, departmentIds, groupId, groupIds, startDate, endDate } = filters;
+    assertReportRange(startDate, endDate);
+    const memberQb = this.userRepo.createQueryBuilder('u').where('u.status = 1');
+    if (departmentId) memberQb.andWhere('u.departmentId = :departmentId', { departmentId });
+    else if (departmentIds?.length) memberQb.andWhere('u.departmentId IN (:...departmentIds)', { departmentIds });
+    if (groupId) memberQb.andWhere('u.groupId = :groupId', { groupId });
+    else if (groupIds?.length) memberQb.andWhere('u.groupId IN (:...groupIds)', { groupIds });
+    const memberCount = await memberQb.getCount();
+
+    const submitQb = this.timesheetRepo.createQueryBuilder('t')
+      .innerJoin('users', 'u', 'u.id = t.userId AND u.status = 1')
+      .where('t.date BETWEEN :start AND :end', { start: startDate, end: endDate })
+      .andWhere("t.status IN ('approved', 'submitted')");
+    if (departmentId) submitQb.andWhere('u.departmentId = :departmentId', { departmentId });
+    else if (departmentIds?.length) submitQb.andWhere('u.departmentId IN (:...departmentIds)', { departmentIds });
+    if (groupId) submitQb.andWhere('u.groupId = :groupId', { groupId });
+    else if (groupIds?.length) submitQb.andWhere('u.groupId IN (:...groupIds)', { groupIds });
+    const row = await submitQb
+      .select('COUNT(DISTINCT t.userId)', 'cnt')
+      .getRawOne<{ cnt: string | number }>();
+    const submittedUserCount = Number(row?.cnt ?? 0);
+    const coverageRate = memberCount > 0 ? round2((submittedUserCount / memberCount) * 100) : 0;
+    return { memberCount, submittedUserCount, coverageRate };
+  }
+
+  /**
+   * 审批效率：范围内工时单的审批时效与驳回率。
+   *
+   * 统计对象为 timesheet 类型的审批实例（ApprovalInstance，targetId 挂在提交组首行），
+   * 按工时日期与快照组织范围过滤（与报表同期同范围）；只统计已闭合实例
+   * （approved / rejected），平均时长 = submittedAt → finishedAt。
+   */
+  async getApprovalEfficiency(filters: {
+    departmentId?: number;
+    departmentIds?: number[];
+    groupId?: number;
+    groupIds?: number[];
+    projectId?: number;
+    userId?: number;
+    startDate: string;
+    endDate: string;
+  }) {
+    const { startDate, endDate } = filters;
+    assertReportRange(startDate, endDate);
+    const qb = this.instanceRepo.createQueryBuilder('i')
+      .innerJoin('timesheets', 't', 't.id = i."targetId"')
+      .where('i."targetType" = :tt', { tt: 'timesheet' })
+      .andWhere('t.date BETWEEN :start AND :end', { start: startDate, end: endDate });
+    if (filters.departmentId) qb.andWhere('t."departmentSnapshotId" = :departmentId', { departmentId: filters.departmentId });
+    else if (filters.departmentIds?.length) qb.andWhere('t."departmentSnapshotId" IN (:...departmentIds)', { departmentIds: filters.departmentIds });
+    if (filters.groupId) qb.andWhere('t."groupSnapshotId" = :groupId', { groupId: filters.groupId });
+    else if (filters.groupIds?.length) qb.andWhere('t."groupSnapshotId" IN (:...groupIds)', { groupIds: filters.groupIds });
+    if (filters.projectId) qb.andWhere('t.projectId = :projectId', { projectId: filters.projectId });
+    if (filters.userId) qb.andWhere('t.userId = :userId', { userId: filters.userId });
+    // 显式别名：raw 列名带表前缀（i_status）会导致取键 undefined
+    const rows = await qb
+      .select('i.status', 'status')
+      .addSelect('i.submittedAt', 'submittedAt')
+      .addSelect('i.finishedAt', 'finishedAt')
+      .getRawMany<{ status: string; submittedAt: string | Date; finishedAt: string | Date | null }>();
+
+    let durationMs = 0;
+    let closedCount = 0;
+    let rejectedCount = 0;
+    for (const r of rows) {
+      if (r.status === 'rejected') rejectedCount++;
+      if (r.status === 'approved' || r.status === 'rejected') {
+        closedCount++;
+        if (r.finishedAt && r.submittedAt) {
+          durationMs += new Date(r.finishedAt).getTime() - new Date(r.submittedAt).getTime();
+        }
+      }
+    }
+    const avgDurationHours = closedCount > 0 ? round2(durationMs / closedCount / 3_600_000) : 0;
+    const rejectRate = closedCount > 0 ? round2((rejectedCount / closedCount) * 100) : 0;
+    return { avgDurationHours, closedCount, rejectedCount, rejectRate };
   }
 
   async getDashboardData(userId: number, visibility: {
@@ -475,10 +620,13 @@ export class ReportService {
     const { weekStart, weekEnd } = businessWeekRange();
 
     // 本月工时：一次查询同时算 monthDays 和 trend（两者 where 条件相同，避免重复查询）
+    // 口径与报表一致：仅 approved + 版本去重（dedupReportTimesheets 按 (user,project,date) 取最大
+    // approved submissionGroup）。此前用 status != deprecated 会同时计入草稿/审批中且窗口期新旧版本双计，
+    // 与报表页数字对不上账。
     const [monthTimesheets, pendingResult, monthOvertime, draftTimesheetCount, weeklyReport] = await Promise.all([
       visibility.timesheet
         ? this.timesheetRepo.find({
-          where: { userId, date: Between(monthStart, monthEnd), status: Not('deprecated') },
+          where: { userId, date: Between(monthStart, monthEnd), status: 'approved' },
           order: { date: 'ASC' },
         })
         : Promise.resolve([]),
@@ -499,8 +647,9 @@ export class ReportService {
         ? this.weeklyReportRepo.findOne({ where: { userId, weekStart } })
         : Promise.resolve(null),
     ]);
+    const effectiveRecords = this.dedupTimesheets(monthTimesheets);
     const monthByDate: Record<string, number> = {};
-    for (const record of monthTimesheets) {
+    for (const record of effectiveRecords) {
       monthByDate[record.date] = round2((monthByDate[record.date] || 0) + Number(record.days));
     }
     const monthDays = totalOfDates(monthByDate);

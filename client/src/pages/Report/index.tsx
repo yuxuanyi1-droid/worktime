@@ -7,6 +7,7 @@ import {
   DatePicker,
   Divider,
   Empty,
+  Progress,
   Row,
   Select,
   Space,
@@ -21,7 +22,7 @@ import {
 import { DownloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { reportApi } from '../../api/report';
-import { DepartmentReport, GroupReport, OvertimeReport, OverrunStatItem, OverrunTrendItem, PersonalReport, ProjectReport, ReportScope } from '../../types';
+import { DepartmentReport, GroupReport, OvertimeReport, OverrunStatItem, OverrunTrendItem, PersonalReport, ProjectReport, ReportScope, StatusBreakdown, ReportCoverage, ApprovalEfficiency } from '../../types';
 import request from '../../utils/request';
 import { reportError } from '../../utils/errors';
 import LazyEChart from '../../components/Charts/LazyEChart';
@@ -138,6 +139,62 @@ function SummaryCard({ title, total, count }: { title: string; total?: number; c
   );
 }
 
+/** 工时状态分布：已通过 / 审批中 / 草稿（各状态最新版本去重，与报表口径一致） */
+function StatusBreakdownCard({ data }: { data?: StatusBreakdown }) {
+  return (
+    <Card title="工时状态分布" style={{ borderRadius: 8 }}>
+      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <div>
+          <Tag color="success">已通过</Tag>
+          <Statistic value={data?.approved || 0} suffix="天" precision={1} style={{ display: 'inline-block', marginLeft: 8 }} />
+        </div>
+        <div>
+          <Tag color="processing">审批中</Tag>
+          <Statistic value={data?.submitted || 0} suffix="天" precision={1} style={{ display: 'inline-block', marginLeft: 8 }} />
+        </div>
+        <div>
+          <Tag color="default">草稿</Tag>
+          <Statistic value={data?.draft || 0} suffix="天" precision={1} style={{ display: 'inline-block', marginLeft: 8 }} />
+        </div>
+        <Text type="secondary" style={{ fontSize: 12 }}>各状态按最新版本去重统计</Text>
+      </Space>
+    </Card>
+  );
+}
+
+/** 提交覆盖度：范围内在职成员 vs 期间有工时提交的成员 */
+function CoverageCard({ data }: { data?: ReportCoverage }) {
+  return (
+    <Card title="提交覆盖度" style={{ borderRadius: 8 }}>
+      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <div>
+          <Statistic title="在职成员" value={data?.memberCount || 0} style={{ display: 'inline-block', marginRight: 24 }} />
+          <Statistic title="期间已提交" value={data?.submittedUserCount || 0} style={{ display: 'inline-block' }} />
+        </div>
+        <Progress percent={data?.coverageRate || 0} strokeColor={palette[0]} />
+        <Text type="secondary" style={{ fontSize: 12 }}>覆盖度 = 期间有已通过/审批中工时记录的成员 / 在职成员</Text>
+      </Space>
+    </Card>
+  );
+}
+
+/** 审批效率：工时单平均审批时长与驳回率（已闭合实例） */
+function EfficiencyCard({ data }: { data?: ApprovalEfficiency }) {
+  return (
+    <Card title="审批效率" style={{ borderRadius: 8 }}>
+      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <div>
+          <Statistic title="平均审批时长" value={data?.avgDurationHours || 0} precision={1} suffix="小时" style={{ display: 'inline-block', marginRight: 24 }} />
+          <Statistic title="驳回率" value={data?.rejectRate || 0} precision={1} suffix="%" style={{ display: 'inline-block' }} />
+        </div>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          已闭合 {data?.closedCount || 0} 单（驳回 {data?.rejectedCount || 0}），提交→审批结束时长
+        </Text>
+      </Space>
+    </Card>
+  );
+}
+
 function SummaryTable({ data, nameTitle, unit = '天' }: { data?: Record<string, SummaryValue>; nameTitle: string; unit?: string }) {
   return (
     <Table
@@ -174,10 +231,13 @@ function PersonalView({ data }: { data: PersonalReport | null }) {
       <Col xs={24} xl={8}>
         <SummaryCard title="个人汇总" total={data?.totalDays} count={totalCount(data?.byProject)} />
       </Col>
-      <Col xs={24} lg={12}>
+      <Col xs={24} xl={8}>
+        <StatusBreakdownCard data={data?.statusBreakdown} />
+      </Col>
+      <Col xs={24} xl={16}>
         <DataChart title="项目工时占比" option={makePieOption(data?.byProject)} />
       </Col>
-      <Col xs={24} lg={12}>
+      <Col xs={24}>
         <Card title="项目工时明细" style={{ borderRadius: 8 }}>
           <SummaryTable data={data?.byProject} nameTitle="项目" />
         </Card>
@@ -189,6 +249,15 @@ function PersonalView({ data }: { data: PersonalReport | null }) {
 function GroupView({ data }: { data: GroupReport | null }) {
   return (
     <Row gutter={[16, 16]}>
+      <Col xs={24} md={8}>
+        <StatusBreakdownCard data={data?.statusBreakdown} />
+      </Col>
+      <Col xs={24} md={8}>
+        <CoverageCard data={data?.coverage} />
+      </Col>
+      <Col xs={24} md={8}>
+        <EfficiencyCard data={data?.efficiency} />
+      </Col>
       <Col xs={24} xl={16}>
         <DataChart title="组内每日趋势" option={makeTrendOption(data?.byDate)} />
       </Col>
@@ -213,6 +282,15 @@ function GroupView({ data }: { data: GroupReport | null }) {
 function DepartmentView({ data }: { data: DepartmentReport | null }) {
   return (
     <Row gutter={[16, 16]}>
+      <Col xs={24} md={8}>
+        <StatusBreakdownCard data={data?.statusBreakdown} />
+      </Col>
+      <Col xs={24} md={8}>
+        <CoverageCard data={data?.coverage} />
+      </Col>
+      <Col xs={24} md={8}>
+        <EfficiencyCard data={data?.efficiency} />
+      </Col>
       <Col xs={24} xl={16}>
         <DataChart title="部门每日趋势" option={makeTrendOption(data?.byDate)} />
       </Col>
@@ -242,6 +320,12 @@ function DepartmentView({ data }: { data: DepartmentReport | null }) {
 function ProjectView({ data }: { data: ProjectReport | null }) {
   return (
     <Row gutter={[16, 16]}>
+      <Col xs={24} md={8}>
+        <StatusBreakdownCard data={data?.statusBreakdown} />
+      </Col>
+      <Col xs={24} md={8}>
+        <EfficiencyCard data={data?.efficiency} />
+      </Col>
       <Col xs={24} xl={16}>
         <DataChart title="项目每日趋势" option={makeTrendOption(data?.byDate)} />
       </Col>

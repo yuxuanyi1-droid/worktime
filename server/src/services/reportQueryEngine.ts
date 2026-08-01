@@ -1,5 +1,4 @@
 import { EntityManager, SelectQueryBuilder } from 'typeorm';
-import { Brackets } from 'typeorm';
 import { AppDataSource } from '../config/database';
 import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
@@ -425,41 +424,43 @@ export class ReportQueryEngine {
       qb.andWhere(`${alias}."status" IN (:...rqStatuses)`, { rqStatuses: eff.statuses });
     }
 
+    // 工时版本去重（仅 timesheet 源；加班无版本链）：
+    // 审批修改会产生同 (userId, projectId, date) 的多个版本（旧版本 deprecated 前并存）。
+    // 与报表标准口径（dedupReportTimesheets / 超投 loadOverrunBase）一致：保留所选状态集合内的
+    // 最大 submissionGroupId 行；无组号的历史行仅在不存在带组号行时保留。避免同一工时被重复求和。
+    // 用 LEFT JOIN 聚合派生表实现（非相关子查询），pg-mem / PostgreSQL / SQLite 均支持。
+    if (source === 'timesheet') {
+      const scopeSql = this.buildScopeSql('t2', eff, scope.matchAnyScope);
+      const userIdsSql = eff.userIds?.length ? ` AND t2."userId" IN (:...rqUserIds)` : '';
+      const dedupSub = `(
+        SELECT t2."userId" AS "dedupUserId", t2."projectId" AS "dedupProjectId", t2."date" AS "dedupDate",
+               MAX(t2."submissionGroupId") AS "dedupMaxGroup"
+        FROM timesheets t2
+        WHERE t2."submissionGroupId" IS NOT NULL
+          AND t2."date" BETWEEN :rqStart AND :rqEnd
+          AND t2."status" IN (:...rqStatuses)${scopeSql ? ` AND ${scopeSql}` : ''}${userIdsSql}
+        GROUP BY t2."userId", t2."projectId", t2."date"
+      )`;
+      qb.leftJoin(dedupSub, 'tmax',
+        `"t"."userId" = tmax."dedupUserId" AND "t"."projectId" = tmax."dedupProjectId" AND "t"."date" = tmax."dedupDate"`);
+      qb.andWhere(`(
+        ("t"."submissionGroupId" IS NOT NULL AND "t"."submissionGroupId" = tmax."dedupMaxGroup")
+        OR ("t"."submissionGroupId" IS NULL AND tmax."dedupMaxGroup" IS NULL)
+      )`);
+    }
+
     // overtimeType 过滤（仅 overtime 源；validateReportQueryConfig 已阻止误用）
     if (source === 'overtime' && eff.overtimeTypes?.length) {
       qb.andWhere(`${alias}."overtimeType" IN (:...rqOtTypes)`, { rqOtTypes: eff.overtimeTypes });
     }
 
     // 组织轴可见范围裁剪（部门 / 组 / 项目）
-    const scopeAxes: { col: string; ids: number[] }[] = [];
-    if (eff.departmentIds?.length) scopeAxes.push({ col: 'departmentSnapshotId', ids: eff.departmentIds });
-    if (eff.groupIds?.length) scopeAxes.push({ col: 'groupSnapshotId', ids: eff.groupIds });
-    if (eff.projectIds?.length) scopeAxes.push({ col: 'projectId', ids: eff.projectIds });
-
-    if (scopeAxes.length === 1) {
-      qb.andWhere(`${alias}."${scopeAxes[0].col}" IN (:...rqScope0)`, {
-        rqScope0: scopeAxes[0].ids,
-      });
-    } else if (scopeAxes.length > 1) {
-      if (scope.matchAnyScope) {
-        // 多轴可访问集：OR（如同时拥有部门 + 组权限，取并集）
-        qb.andWhere(
-          new Brackets((sub) => {
-            scopeAxes.forEach((axis, i) => {
-              sub.orWhere(`${alias}."${axis.col}" IN (:...rqScope${i})`, {
-                [`rqScope${i}`]: axis.ids,
-              });
-            });
-          }),
-        );
-      } else {
-        // 显式请求多轴过滤：AND（用户主动收窄）
-        scopeAxes.forEach((axis, i) => {
-          qb.andWhere(`${alias}."${axis.col}" IN (:...rqScope${i})`, {
-            [`rqScope${i}`]: axis.ids,
-          });
-        });
-      }
+    const scopeSql = this.buildScopeSql(alias, eff, scope.matchAnyScope);
+    if (scopeSql) {
+      const params: Record<string, number[]> = {};
+      const axes = this.scopeAxes(eff);
+      axes.forEach((axis, i) => { params[`rqScope${i}`] = axis.ids; });
+      qb.andWhere(scopeSql, params);
     }
 
     // userIds 过滤：始终 AND（组织轴已在 SQL 层约束，防止跨范围查看他人）
@@ -468,6 +469,31 @@ export class ReportQueryEngine {
     }
 
     return qb;
+  }
+
+  private scopeAxes(eff: ReportQueryFilters): { col: string; ids: number[] }[] {
+    const axes: { col: string; ids: number[] }[] = [];
+    if (eff.departmentIds?.length) axes.push({ col: 'departmentSnapshotId', ids: eff.departmentIds });
+    if (eff.groupIds?.length) axes.push({ col: 'groupSnapshotId', ids: eff.groupIds });
+    if (eff.projectIds?.length) axes.push({ col: 'projectId', ids: eff.projectIds });
+    return axes;
+  }
+
+  /**
+   * 组织轴范围过滤条件 SQL 片段（主查询与去重聚合子查询共用，参数名一致避免两处漂移）。
+   * 返回纯条件（不带 AND 前缀）：andWhere 会自动加 AND；拼接进子查询字符串时调用方自行加 AND。
+   * 单轴用 IN；多轴时 matchAnyScope=true 用 OR（可访问集并集），否则 AND（用户主动收窄）。
+   */
+  private buildScopeSql(alias: string, eff: ReportQueryFilters, matchAnyScope: boolean): string {
+    const axes = this.scopeAxes(eff);
+    if (!axes.length) return '';
+    if (axes.length === 1) {
+      return `${alias}."${axes[0].col}" IN (:...rqScope0)`;
+    }
+    const parts = axes.map((a, i) => `${alias}."${a.col}" IN (:...rqScope${i})`);
+    return matchAnyScope
+      ? `(${parts.join(' OR ')})`
+      : `(${parts.join(' AND ')})`;
   }
 
   async run(configInput: unknown, viewer: AccessViewer): Promise<ReportQueryResult> {

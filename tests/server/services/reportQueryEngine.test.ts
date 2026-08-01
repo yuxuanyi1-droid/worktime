@@ -262,6 +262,57 @@ describe('ReportQueryEngine', () => {
     expect(result.grandTotal.count).toBe(2);
   });
 
+  it('版本去重：同 (user, project, date) 多版本只计所选状态内最大组号（与报表口径一致）', async () => {
+    const { db, dept, group, project, adminUser, selfUser, otherUser } = await seedBase();
+    await db.getRepository(Timesheet).save([
+      // 张三 07-01：v1 approved 3 天（组 70）+ v2 submitted 5 天（组 71）→ 窗口期并存
+      { ...tsRow(selfUser, project, dept, group, '2026-07-01', 3), submissionGroupId: 70 },
+      { ...tsRow(selfUser, project, dept, group, '2026-07-01', 5), submissionGroupId: 71, status: 'submitted' },
+      // 王五 07-02：独立 approved 2 天（组 72）
+      { ...tsRow(otherUser, project, dept, group, '2026-07-02', 2), submissionGroupId: 72 },
+    ]);
+    const engine = new ReportQueryEngine(db.manager);
+    const viewer = { id: adminUser.id, roles: ['admin'] };
+
+    // 默认 approved：只计 v1（3），v2 submitted 不在集合内 → 3 + 2 = 5（修复前为 8 双计）
+    const approved = await engine.run({
+      source: 'timesheet', startDate: '2026-07-01', endDate: '2026-07-31',
+      rowDimension: 'user', measures: ['sumDays'],
+    }, viewer);
+    expect(approved.grandTotal.sumDays).toBe(5);
+
+    // 显式 submitted：只计 v2（5）
+    const submitted = await engine.run({
+      source: 'timesheet', startDate: '2026-07-01', endDate: '2026-07-31',
+      rowDimension: 'user', measures: ['sumDays'],
+      filters: { statuses: ['submitted'] },
+    }, viewer);
+    expect(submitted.grandTotal.sumDays).toBe(5);
+
+    // 混合 approved + submitted：最新版本视角 = v2（5），v1 不再双计 → 5 + 2 = 7
+    const mixed = await engine.run({
+      source: 'timesheet', startDate: '2026-07-01', endDate: '2026-07-31',
+      rowDimension: 'user', measures: ['sumDays'],
+      filters: { statuses: ['approved', 'submitted'] },
+    }, viewer);
+    expect(mixed.grandTotal.sumDays).toBe(7);
+  });
+
+  it('版本去重：新旧版本同为 approved 时只计最大组号（v2 通过后 v1 不双计）', async () => {
+    const { db, dept, group, project, adminUser, selfUser } = await seedBase();
+    await db.getRepository(Timesheet).save([
+      { ...tsRow(selfUser, project, dept, group, '2026-07-01', 3), submissionGroupId: 80 },
+      { ...tsRow(selfUser, project, dept, group, '2026-07-01', 4), submissionGroupId: 81 },
+    ]);
+    const engine = new ReportQueryEngine(db.manager);
+    const result = await engine.run({
+      source: 'timesheet', startDate: '2026-07-01', endDate: '2026-07-31',
+      rowDimension: 'user', measures: ['sumDays', 'count'],
+    }, { id: adminUser.id, roles: ['admin'] });
+    expect(result.grandTotal.sumDays).toBe(4);
+    expect(result.grandTotal.count).toBe(1);
+  });
+
   it('overtime 源：按 overtimeType 维度聚合正常工作', async () => {
     const { db, dept, group, project, adminUser, selfUser } = await seedBase();
     await db.getRepository(OvertimeApplication).save([

@@ -258,7 +258,9 @@ router.get('/personal', requirePermission('report:view:self'), async (req: AuthR
     }
 
     const data = await reportService.getPersonalReport(targetUserId, startDate, endDate);
-    res.json({ code: 0, data });
+    // 个人报表附带本人工时状态分布（approved/submitted/draft 最新版本视角）
+    const statusBreakdown = await reportService.getStatusBreakdown(startDate, endDate, { userId: targetUserId });
+    res.json({ code: 0, data: { ...data, statusBreakdown } });
   } catch (error) {
     next(error);
   }
@@ -275,7 +277,13 @@ router.get('/group', requirePermission('report:view:group'), async (req: AuthReq
 
     const groupIds = await accessPolicy.getGroupAndDescendantIds([groupId]);
     const data = await reportService.getGroupReport(groupId, startDate, endDate, groupIds);
-    res.json({ code: 0, data });
+    // 组别报表附带：状态分布 + 提交覆盖度 + 审批效率（同期同范围）
+    const [statusBreakdown, coverage, efficiency] = await Promise.all([
+      reportService.getStatusBreakdown(startDate, endDate, { groupId, groupIds }),
+      reportService.getCoverage({ groupId, groupIds, startDate, endDate }),
+      reportService.getApprovalEfficiency({ groupId, groupIds, startDate, endDate }),
+    ]);
+    res.json({ code: 0, data: { ...data, statusBreakdown, coverage, efficiency } });
   } catch (error) {
     next(error);
   }
@@ -296,7 +304,13 @@ router.get('/department', requirePermission('report:view:department'), async (re
 
     const groupIds = groupId ? await accessPolicy.getGroupAndDescendantIds([groupId]) : undefined;
     const data = await reportService.getDepartmentReport(departmentId, startDate, endDate, { groupId, groupIds });
-    res.json({ code: 0, data });
+    // 部门报表附带：状态分布 + 提交覆盖度 + 审批效率（同期同范围）
+    const [statusBreakdown, coverage, efficiency] = await Promise.all([
+      reportService.getStatusBreakdown(startDate, endDate, { departmentId, groupId, groupIds }),
+      reportService.getCoverage({ departmentId, groupId, groupIds, startDate, endDate }),
+      reportService.getApprovalEfficiency({ departmentId, groupId, groupIds, startDate, endDate }),
+    ]);
+    res.json({ code: 0, data: { ...data, statusBreakdown, coverage, efficiency } });
   } catch (error) {
     next(error);
   }
@@ -315,7 +329,12 @@ router.get('/project', requirePermission('report:view:project'), async (req: Aut
 
     const { filters, reportFilters } = await getProjectScopedFilters(projectId, departmentId, groupId);
     const data = await reportService.getProjectReport(projectId, startDate, endDate, reportFilters);
-    res.json({ code: 0, data: { ...data, filters } });
+    // 项目报表附带：状态分布 + 审批效率（项目参与人不固定，不做提交覆盖度）
+    const [statusBreakdown, efficiency] = await Promise.all([
+      reportService.getStatusBreakdown(startDate, endDate, { ...reportFilters }),
+      reportService.getApprovalEfficiency({ projectId, ...reportFilters, startDate, endDate }),
+    ]);
+    res.json({ code: 0, data: { ...data, filters, statusBreakdown, efficiency } });
   } catch (error) {
     next(error);
   }
