@@ -1,9 +1,15 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, Index } from 'typeorm';
 import { Timesheet } from './Timesheet';
 import { OvertimeApplication } from './OvertimeApplication';
 import { WeeklyReport } from './WeeklyReport';
 
 @Entity('approval_records')
+// 抄送并发去重兜底：同一单据对同一收件人仅一条 cc 记录（check-then-insert 的 DB 级保障）。
+// 与 migration 1700000000020 保持一致；实体声明使 TYPEORM_SYNCHRONIZE=true 的开发库同步建索引。
+@Index('uq_approval_record_cc_recipient', ['targetType', 'targetId', 'approverId'], {
+  unique: true,
+  where: `"action" = 'cc'`,
+})
 export class ApprovalRecord {
   @PrimaryGeneratedColumn()
   id!: number;

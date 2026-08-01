@@ -51,6 +51,7 @@ import { ExternalIdentityProviderConstraint1700000000016 } from '../migrations/1
 import { DataIntegrityConstraints1700000000017 } from '../migrations/1700000000017-DataIntegrityConstraints';
 import { HolidayCalendar1700000000018 } from '../migrations/1700000000018-HolidayCalendar';
 import { ReportDefinitions1700000000019 } from '../migrations/1700000000019-ReportDefinitions';
+import { ApprovalWindowVersioning1700000000020 } from '../migrations/1700000000020-ApprovalWindowVersioning';
 
 /**
  * PostgreSQL 是当前唯一生产数据库；保留旧分支仅用于历史代码读取，不再保证 SQLite 兼容。
@@ -92,6 +93,7 @@ const migrations = [
   DataIntegrityConstraints1700000000017,
   HolidayCalendar1700000000018,
   ReportDefinitions1700000000019,
+  ApprovalWindowVersioning1700000000020,
 ];
 
 /**

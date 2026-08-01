@@ -10,6 +10,13 @@ import { ApprovalFlow } from './ApprovalFlow';
 @Index('idx_timesheet_submission_group', ['submissionGroupId'])
 @Index('idx_timesheet_root_group', ['rootGroupId'])
 @Index('idx_timesheet_date_status', ['date', 'status'])
+// 并发提交防重兜底：同一用户+项目+日期仅允许一条草稿/审批中记录。
+// 谓词不含 approved：审批窗口期旧 approved 版本保留到新版本通过（见迁移 0020 说明）。
+// 与 migration 1700000000020 保持一致；实体声明使 TYPEORM_SYNCHRONIZE=true 的开发库同步建索引。
+@Index('uq_timesheet_active_user_project_date', ['userId', 'projectId', 'date'], {
+  unique: true,
+  where: `"status" IN ('draft', 'submitted')`,
+})
 export class Timesheet {
   @PrimaryGeneratedColumn()
   id!: number;
