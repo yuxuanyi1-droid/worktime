@@ -176,7 +176,9 @@ describe('TimesheetService 提交审批集成', () => {
     }]);
 
     const stored = await dataSource.getRepository(Timesheet).find({ order: { id: 'ASC' } });
-    expect(stored.find(row => row.id === oldRows[0].id)?.status).toBe('deprecated');
+    // 载荷内的旧 approved 版本在审批窗口期保留（v2 通过时才废弃，报表口径不归零）
+    expect(stored.find(row => row.id === oldRows[0].id)?.status).toBe('approved');
+    // 载荷外被清空的日期：立即废弃
     expect(stored.find(row => row.id === oldRows[1].id)?.status).toBe('deprecated');
     expect(stored.find(row => row.id === oldRows[2].id)).toMatchObject({
       status: 'approved', description: '未修改项目',

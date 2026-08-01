@@ -19,8 +19,29 @@ const auditService = new AuditService();
 const announcementTypes = ['info', 'important', 'urgent'] as const;
 const targetScopes = ['all', 'department', 'group', 'user'] as const;
 
-function parseAnnouncementPayload(body: Record<string, unknown>) {
-  const targetScope = parseEnum(body.targetScope ?? 'all', 'targetScope', targetScopes);
+/** 创建公告的完整载荷（targetScope 必填） */
+type AnnouncementPayload = {
+  title: string;
+  content: string | null;
+  type: 'info' | 'important' | 'urgent';
+  targetScope: 'all' | 'department' | 'group' | 'user';
+  targetDeptId?: number;
+  targetGroupId?: number;
+  targetUserIds?: number[];
+};
+
+/** 部分更新载荷（targetScope 可缺省，由 service 沿用原值） */
+type PartialAnnouncementPayload = Omit<AnnouncementPayload, 'targetScope'> & { targetScope?: 'all' | 'department' | 'group' | 'user' };
+
+function parseAnnouncementPayload(body: Record<string, unknown>): AnnouncementPayload;
+function parseAnnouncementPayload(body: Record<string, unknown>, opts: { partialTargetScope: true }): PartialAnnouncementPayload;
+function parseAnnouncementPayload(body: Record<string, unknown>, opts: { partialTargetScope?: boolean } = {}): AnnouncementPayload | PartialAnnouncementPayload {
+  const hasTargetScope = body.targetScope !== undefined;
+  // 部分更新（PUT）时 targetScope 缺失沿用原值（由 service 合并），
+  // 避免默认 'all' 把「仅某部门可见」的公告静默改为全员可见。
+  const targetScope = hasTargetScope
+    ? parseEnum(body.targetScope, 'targetScope', targetScopes)
+    : (opts.partialTargetScope ? undefined : 'all');
   return {
     title: parseString(body.title, 'title', { required: true, max: 200 })!,
     content: parseString(body.content, 'content', { max: 2000, trim: false }) ?? null,
@@ -81,7 +102,8 @@ router.post('/admin', requirePermission('system:announcement:create'), async (re
 router.put('/admin/:id', requirePermission('system:announcement:update'), async (req: AuthRequest, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, 'id');
-    const payload = parseAnnouncementPayload(req.body as Record<string, unknown>);
+    // 部分更新：targetScope 未提供时由 service 沿用原公告受众范围（见 announcementService.update）
+    const payload = parseAnnouncementPayload(req.body as Record<string, unknown>, { partialTargetScope: true });
     const data = await announcementService.update(
       id,
       payload,

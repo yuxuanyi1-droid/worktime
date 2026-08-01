@@ -4,6 +4,7 @@ import { requirePermission } from '../middleware/permission';
 import { PermissionScopeType } from '../entities/UserPermissionGrant';
 import { PermissionGovernanceService } from '../services/permissionGovernanceService';
 import { AuditService } from '../services/auditService';
+import { businessDayjs } from '../utils/time';
 import {
   firstQueryValue,
   parseEnum,
@@ -70,7 +71,9 @@ router.post('/', requirePermission('permission_request:create'), async (req: Aut
       scopeType: parseEnum(body.scopeType, 'scopeType', scopeTypes) as PermissionScopeType,
       scopeId: parseOptionalPositiveInt(body.scopeId, 'scopeId'),
       reason: parseString(body.reason, 'reason', { required: true, max: 1000 })!,
-      expiresAt: expiresAtString ? new Date(`${expiresAtString}T23:59:59`) : null,
+      // 有效期按业务时区（Asia/Shanghai）当日 23:59:59.999 结束，
+      // 避免容器 UTC 下「T23:59:59 本地时间」导致授权实际多生效约 8 小时
+      expiresAt: expiresAtString ? businessDayjs(expiresAtString).endOf('day').toDate() : null,
     });
     res.json({ code: 0, data, message: '权限申请已提交' });
   } catch (error) {

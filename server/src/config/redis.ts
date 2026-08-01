@@ -8,6 +8,9 @@ let client: RedisClientType | null = null;
 
 let redisReadyHandler: (() => Promise<void>) | null = null;
 
+/** 最近一次（重）连就绪后的校准 promise：发号前等待其完成，避免校准窗口内从旧值发号。 */
+let calibrationPromise: Promise<void> | null = null;
+
 /** 注册 Redis（重）连就绪回调：把 DB 最大 submissionGroupId 重新同步到 Redis，
  *  避免 Redis 重启丢 key 后从旧值/0 重新发号与已用序号碰撞。 */
 export function setRedisReadyHandler(cb: () => Promise<void>): void {
@@ -35,9 +38,13 @@ export async function initRedis(): Promise<boolean> {
       logger.warn({ err }, '[redis] 客户端错误');
     });
     c.on('ready', () => {
-      // 首次连接与重连均触发：重新用 DB 最大 submissionGroupId 校准 Redis 计数器
+      // 首次连接与重连均触发：重新用 DB 最大 submissionGroupId 校准 Redis 计数器。
+      // 记录校准 promise，使 redisNextSubmissionGroupIds 在发号前等待校准完成，
+      // 避免「isReady 已置位但校准尚未完成」窗口内从旧值/0 发号与已用序号碰撞。
       logger.info('[redis] 连接就绪，触发 submissionGroupId 重新校准');
-      redisReadyHandler?.().catch((err) => logger.warn({ err }, '[redis] ready 回调失败'));
+      calibrationPromise = Promise.resolve()
+        .then(() => redisReadyHandler?.())
+        .catch((err) => logger.warn({ err }, '[redis] ready 回调失败'));
     });
     await c.connect();
     client = c;
@@ -69,6 +76,12 @@ export async function redisNextSubmissionGroupId(): Promise<number | null> {
 /** 一次分配 count 个连续序号（INCRBY），减少多项目提交时的往返 */
 export async function redisNextSubmissionGroupIds(count: number): Promise<number[] | null> {
   if (!client?.isReady || count <= 0) return null;
+  // 发号前等待连接就绪后的首次校准完成（校准失败不阻断，后续 DB 回退路径兜底）
+  if (calibrationPromise) {
+    try {
+      await calibrationPromise;
+    } catch { /* 忽略：校准内部已记录日志 */ }
+  }
   try {
     const last = await client.incrBy('worktime:submissionGroupId', count);
     const first = last - count + 1;

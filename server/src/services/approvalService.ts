@@ -226,14 +226,65 @@ export class ApprovalService {
     const { targetType, page = 1, pageSize = 20 } = params;
     const isAdmin = await this.isAdminUser(approverId);
     // 在数据库完成范围过滤和分页，避免管理员请求加载公司全部待办。
-    const { items: pageTasks, total } = await this.approvalInstanceService.getPendingTasks(
+    const { items: pageTasks, total: rawTotal } = await this.approvalInstanceService.getPendingTasks(
       approverId,
       { targetType, isAdmin, page, pageSize },
     );
 
+    // 过滤掉 target 已非 submitted 的孤儿任务（记录被废弃/撤回但 pending task 残留），
+    // 并批量加载 target 信息。
+    const { items: validTasks, targetMap } = await this.loadValidPendingTasks(pageTasks);
+
+    // total 校准：当本页存在被过滤的孤儿任务时，全量（不分页）过滤一次得到准确 total，
+    // 避免分页按未过滤的 DB 窗口计算导致翻页空页/漏项。
+    let total = rawTotal;
+    if (validTasks.length !== pageTasks.length) {
+      const { items: allTasks } = await this.approvalInstanceService.getPendingTasks(
+        approverId,
+        { targetType, isAdmin, page: 1, pageSize: 1_000_000 },
+      );
+      const { items: validAll } = await this.loadValidPendingTasks(allTasks);
+      total = validAll.length;
+    }
+
+    // 批量加载 applicant：收集所有 applicantId 一次性查
+    const applicantIds = new Set<number>();
+    for (const task of validTasks) {
+      const target = targetMap.get(`${task.targetType}_${task.targetId}`);
+      if (target) applicantIds.add(target.userId ?? target.applicantId ?? 0);
+    }
+    const applicantMap = new Map<number, User>();
+    if (applicantIds.size) {
+      const applicants = await this.userRepo.find({
+        where: { id: In([...applicantIds].filter(Boolean)) },
+        relations: ['department', 'group'],
+      });
+      for (const a of applicants) applicantMap.set(a.id, a);
+    }
+
+    const results: any[] = [];
+    for (const task of validTasks) {
+      const target = targetMap.get(`${task.targetType}_${task.targetId}`);
+      if (!target) continue;
+      const applicant = applicantMap.get(target.userId ?? target.applicantId) ?? null;
+      const item = await this.buildListItem(task.targetType as TargetType, target, task.instance, applicant);
+      item.taskId = task.id;
+      results.push(item);
+    }
+
+    results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return { list: results, total, page, pageSize };
+  }
+
+  /**
+   * 过滤出 target 仍处于待审批（submitted）状态的任务，并批量加载 target 信息。
+   * 孤儿任务（记录已 deprecated/withdrawn 但 pending task 残留）会被剔除，
+   * 避免审批人看到无法处理的陈旧待办。
+   */
+  private async loadValidPendingTasks(tasks: Array<{ id: number; targetType: string; targetId: number; instance: ApprovalInstance }>) {
     // 批量加载 target：按 targetType 分组，用 In(...) 一次性取，避免 N+1
-    const tasksByType = new Map<string, typeof pageTasks>();
-    for (const task of pageTasks) {
+    const tasksByType = new Map<string, typeof tasks>();
+    for (const task of tasks) {
       const bucket = tasksByType.get(task.targetType) ?? [];
       bucket.push(task);
       tasksByType.set(task.targetType, bucket);
@@ -249,33 +300,11 @@ export class ApprovalService {
       }
     }
 
-    // 批量加载 applicant：收集所有 applicantId 一次性查
-    const applicantIds = new Set<number>();
-    for (const task of pageTasks) {
+    const items = tasks.filter((task) => {
       const target = targetMap.get(`${task.targetType}_${task.targetId}`);
-      if (target) applicantIds.add(target.userId ?? target.applicantId ?? 0);
-    }
-    const applicantMap = new Map<number, User>();
-    if (applicantIds.size) {
-      const applicants = await this.userRepo.find({
-        where: { id: In([...applicantIds].filter(Boolean)) },
-        relations: ['department', 'group'],
-      });
-      for (const a of applicants) applicantMap.set(a.id, a);
-    }
-
-    const results: any[] = [];
-    for (const task of pageTasks) {
-      const target = targetMap.get(`${task.targetType}_${task.targetId}`);
-      if (!target || target.status !== 'submitted') continue;
-      const applicant = applicantMap.get(target.userId ?? target.applicantId) ?? null;
-      const item = await this.buildListItem(task.targetType as TargetType, target, task.instance, applicant);
-      item.taskId = task.id;
-      results.push(item);
-    }
-
-    results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return { list: results, total, page, pageSize };
+      return !!target && target.status === 'submitted';
+    });
+    return { items, targetMap };
   }
 
   /** 按 targetType 返回对应的实体 repository（供批量查询） */
@@ -289,14 +318,19 @@ export class ApprovalService {
 
   async approve(approverId: number, approverName: string, items: { targetType: string; targetId: number; action: 'approve' | 'reject'; comment?: string }[]) {
     if (!items.length) throw new BusinessError('请选择需要审批的记录');
+    const isAdmin = await this.isAdminUser(approverId);
     const itemKeys = new Set<string>();
     for (const item of items) {
-      const key = `${item.targetType}:${item.targetId}`;
-      if (itemKeys.has(key)) throw new BusinessError(`审批记录重复（类型：${item.targetType}，编号：${item.targetId}）`);
-      itemKeys.add(key);
+      // 非管理员：同一请求内同 (targetType, targetId) 视为重复提交（每人每实例只有一个待办任务），前置拒绝。
+      // 管理员不做前置去重：会签步骤同一单据有多条待办 task（同一 targetId），批量处理时
+      // 每条 item 对应一个 task；重复提交由审批任务的条件更新（affected=0）在数据库层面幂等兜底。
+      if (!isAdmin) {
+        const key = `${item.targetType}:${item.targetId}`;
+        if (itemKeys.has(key)) throw new BusinessError(`审批记录重复（类型：${item.targetType}，编号：${item.targetId}）`);
+        itemKeys.add(key);
+      }
       if (item.action === 'reject' && !item.comment?.trim()) throw new BusinessError('驳回时必须填写原因');
     }
-    const isAdmin = await this.isAdminUser(approverId);
     const applicantNameCache = new Map<number, string>();
 
     // 已传入事务管理器（被外层事务包裹）时保持原子语义：单条失败必须整批回滚，
@@ -414,7 +448,12 @@ export class ApprovalService {
           applicantId,
         );
       }
-      await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
+      // 回写条件收紧：仅更新「仍处于 submitted」的组内记录，防御并发重提已废弃旧组时
+      // 复活 deprecated 记录；并限定 userId，避免发号碰撞等异常场景下跨用户误写。
+      await txService.timesheetRepo.update(
+        { submissionGroupId: target.submissionGroupId, userId: target.userId, status: 'submitted' },
+        updateData,
+      );
       if (item.action === 'approve' && result.status === 'approved') {
         // 新版本审批通过：按 rootGroupId deprecate 整条旧链上所有旧版本（非当前 submissionGroupId）
         const currentRec = await txService.timesheetRepo.findOne({
@@ -697,7 +736,11 @@ export class ApprovalService {
         // previousGroupId / rootGroupId 亦保留。下次提交时 submitByRows 的 existingRecords
         // 只查 draft/rejected/approved/submitted，不含 withdrawn，故撤回记录不会被当作
         // "已存在版本"误走 deprecated 重建分支——无需清空 group。
-        await txService.timesheetRepo.update({ submissionGroupId: target.submissionGroupId }, updateData);
+        // 限定 userId 防御发号碰撞等异常场景下跨用户误写。
+        await txService.timesheetRepo.update(
+          { submissionGroupId: target.submissionGroupId, userId },
+          updateData,
+        );
       } else {
         await repo!.update(targetId, updateData);
       }
@@ -1007,16 +1050,36 @@ export class ApprovalService {
     // 3. 动态查询配额组及其所有子组成员在该项目的已消耗工时（submitted + approved）
     // 去重保证：timesheets 上的部分唯一索引 (userId,projectId,date) WHERE 活跃 确保同一用户+项目+日期
     // 只有一条活跃记录，故 SUM 不会因并发重复提交而双计（历史重复数据会在该索引创建时被暴露）。
-    const consumedRaw = await this.timesheetRepo
+    // 查询配额组全部成员的活跃工时记录，在 JS 内按 (userId, projectId, date) 取最新版本去重后求和。
+    // 原因：审批窗口期旧 approved 版本会保留到新版本通过（submitByRows 不再提交时立即废弃），
+    // 若直接 SUM 会把「同一工时的新旧两个版本」双计；按最新 submissionGroupId 只计一次。
+    const activeRows = await this.timesheetRepo
       .createQueryBuilder('t')
       .innerJoin('users', 'u', 'u.id = t.userId')
       .where('t.projectId = :projectId', { projectId })
       .andWhere(`u.groupId IN (${quotaGroupIds.map((_, i) => `:gid${i}`).join(',')})`,
         Object.fromEntries(quotaGroupIds.map((id, i) => [`gid${i}`, id])))
       .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
-      .select('COALESCE(SUM(t.days), 0)', 'total')
-      .getRawOne<{ total: string | number }>();
-    const consumed = round2(Number(consumedRaw?.total || 0));
+      .select(['t.userId', 't.projectId', 't.date', 't.days', 't.submissionGroupId'])
+      .getRawMany<{ userId: number; projectId: number; date: string; days: string | number; submissionGroupId: number | null }>();
+    const maxGroupByKey = new Map<string, number>();
+    for (const r of activeRows) {
+      if (!r.submissionGroupId) continue;
+      const key = `${r.userId}_${r.projectId}_${r.date}`;
+      const cur = maxGroupByKey.get(key);
+      if (cur === undefined || r.submissionGroupId > cur) maxGroupByKey.set(key, r.submissionGroupId);
+    }
+    let consumed = 0;
+    for (const r of activeRows) {
+      if (r.submissionGroupId) {
+        // 有组号的版本：只计该 (userId, projectId, date) 下最新组的记录
+        if (r.submissionGroupId !== maxGroupByKey.get(`${r.userId}_${r.projectId}_${r.date}`)) continue;
+      } else if (maxGroupByKey.has(`${r.userId}_${r.projectId}_${r.date}`)) {
+        // 历史无组号记录：仅当该 key 不存在带组号的活跃记录时计入（与报表去重口径一致）
+        continue;
+      }
+      consumed = round2(consumed + Number(r.days));
+    }
     const total = round2(allocation.allocation);
     const remaining = round2(total - consumed);
     return {

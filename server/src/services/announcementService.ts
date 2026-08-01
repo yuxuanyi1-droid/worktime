@@ -139,12 +139,23 @@ export class AnnouncementService {
   async update(id: number, data: Partial<Announcement>) {
     const existing = await this.announceRepo.findOne({ where: { id } });
     if (!existing) throw new BusinessError('公告不存在');
-    await this.audienceService.resolveUserIds(data as Announcement, { strict: true });
+    // 部分更新语义：targetScope 未提供（PUT 部分字段）时沿用原公告受众范围，
+    // 避免默认 'all' 把「仅某部门可见」的公告静默改为全员可见。
+    const merged = data.targetScope === undefined
+      ? {
+        ...data,
+        targetScope: existing.targetScope,
+        targetDeptId: existing.targetDeptId,
+        targetGroupId: existing.targetGroupId,
+        targetUserIds: existing.targetUserIds,
+      }
+      : data;
+    await this.audienceService.resolveUserIds(merged as Announcement, { strict: true });
     await this.announceRepo.update(id, {
-      ...data,
-      targetDeptId: data.targetScope === 'department' ? data.targetDeptId : null,
-      targetGroupId: data.targetScope === 'group' ? data.targetGroupId : null,
-      targetUserIds: data.targetScope === 'user' ? data.targetUserIds : null,
+      ...merged,
+      targetDeptId: merged.targetScope === 'department' ? merged.targetDeptId : null,
+      targetGroupId: merged.targetScope === 'group' ? merged.targetGroupId : null,
+      targetUserIds: merged.targetScope === 'user' ? merged.targetUserIds : null,
     });
     return this.announceRepo.findOne({ where: { id } });
   }

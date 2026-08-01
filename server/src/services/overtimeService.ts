@@ -11,6 +11,7 @@ import { AccessPolicyService } from './accessPolicyService';
 import { Project } from '../entities/Project';
 import { HolidayService } from './holidayService';
 import { round2 } from '../utils/validation';
+import { businessDayjs } from '../utils/time';
 
 export function getOvertimeStatsDateRange(year: number, month?: number) {
   if (month) {
@@ -48,7 +49,8 @@ export class OvertimeService {
 
   /** 校验加班字段：不晚于今天、范围 (0,1] 天、0.5 步长（与前端 InputNumber 一致）。 */
   private assertOvertimeFields(date: string, days: number) {
-    const today = dayjs().format('YYYY-MM-DD');
+    // 「今天」按业务时区（Asia/Shanghai）判定，避免容器 UTC 下北京时间 00:00-08:00 误拒当天填报
+    const today = businessDayjs().format('YYYY-MM-DD');
     if (date > today) throw new BusinessError('加班日期不能晚于今天');
     if (!Number.isFinite(days) || days <= 0 || days > 1) {
       throw new BusinessError('加班天数应在 (0, 1] 天之间');

@@ -24,11 +24,12 @@ export class DataIntegrityConstraints1700000000017 implements MigrationInterface
       `CREATE TABLE IF NOT EXISTS "submission_sequences" ("id" integer PRIMARY KEY, "currentValue" integer NOT NULL DEFAULT 0)`,
     );
 
-    // 2. timesheets 并发提交兜底：同一用户+项目+日期仅允许一条活跃记录
+    // 2. timesheets 并发提交兜底：同一用户+项目+日期仅允许一条「草稿/审批中」记录
+    //    （谓词不含 approved：审批窗口期旧 approved 版本保留到新版本通过，见 0020 说明）
     await queryRunner.query(
       `CREATE UNIQUE INDEX IF NOT EXISTS "uq_timesheet_active_user_project_date"
        ON "timesheets" ("userId", "projectId", "date")
-       WHERE "status" IN ('draft', 'submitted', 'approved')`,
+       WHERE "status" IN ('draft', 'submitted')`,
     );
 
     // 3. overtime_applications 同日同类型防重

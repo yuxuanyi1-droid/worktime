@@ -140,6 +140,45 @@ export class TimesheetService {
     }
   }
 
+  /**
+   * 跨提交日合计校验：单次载荷内校验（validateDailyDays）可被「同日分多次提交不同项目」绕过。
+   * 提交时把「本次载荷」与「同日已存在的 approved/submitted 记录（按 (projectId, date) 取最新组）」
+   * 合并计算，仍不得超过每日 1 天。
+   *
+   * @param payloadDays  本次载荷按日期汇总（已含步长校验）
+   * @param existingRecords 事务内已读取的既有记录（含本次将覆盖的版本链）
+   * @param removedIds   将被删除/废弃的记录 id（覆盖的旧版本不计入）
+   * @param payloadKeys  本次载荷覆盖的 (projectId:date) 集合（旧版本被覆盖，不再计入）
+   */
+  private assertDailyCapAcrossSubmissions(
+    payloadDays: Record<string, number>,
+    existingRecords: Timesheet[],
+    removedIds: Set<number>,
+    payloadKeys: Set<string>,
+  ) {
+    // 载荷外活跃记录：approved/submitted 且未被本次覆盖，按 (projectId, date) 取最新 submissionGroupId
+    const maxGroupByKey = new Map<string, number>();
+    for (const r of existingRecords) {
+      if (removedIds.has(r.id)) continue;
+      if (r.status !== 'approved' && r.status !== 'submitted') continue;
+      if (!r.submissionGroupId) continue;
+      if (payloadKeys.has(`${r.projectId}:${r.date}`)) continue;
+      const key = `${r.projectId}_${r.date}`;
+      const cur = maxGroupByKey.get(key);
+      if (cur === undefined || r.submissionGroupId > cur) maxGroupByKey.set(key, r.submissionGroupId);
+    }
+    const totals: Record<string, number> = { ...payloadDays };
+    for (const r of existingRecords) {
+      if (removedIds.has(r.id)) continue;
+      if (r.status !== 'approved' && r.status !== 'submitted') continue;
+      if (!r.submissionGroupId) continue;
+      if (payloadKeys.has(`${r.projectId}:${r.date}`)) continue;
+      if (r.submissionGroupId !== maxGroupByKey.get(`${r.projectId}_${r.date}`)) continue;
+      totals[r.date] = round2((totals[r.date] || 0) + Number(r.days));
+    }
+    this.validateDailyDays(totals);
+  }
+
   private validateDistinctProjectDates(items: { projectId: number; date: string }[]) {
     const seen = new Set<string>();
     for (const item of items) {
@@ -166,9 +205,22 @@ export class TimesheetService {
     await this.validateActiveProjects([data.projectId]);
     const step = await this.loadUnitStep();
     this.validateStepMultiple([{ date: data.date, days: data.days }], step, '工时');
+    // 同一 (用户, 项目, 日期) 已存在草稿/审批中记录时拒绝重复创建。
+    // 已通过（approved）记录允许并存：修改已通过工时走 submitByRows 版本化流程，
+    // 旧版本在新版本审批通过前保留（报表口径不归零）。
+    const conflict = await this.repo.findOne({
+      where: { userId: data.userId, projectId: data.projectId, date: data.date, status: In(['draft', 'submitted']) },
+    });
+    if (conflict) throw new BusinessError(`项目 ${data.projectId} 在 ${data.date} 已存在草稿或审批中记录，请刷新后修改`);
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(data.userId);
     const record = this.createRecord(data, orgSnapshot);
-    return this.repo.save(record);
+    try {
+      return await this.repo.save(record);
+    } catch (err) {
+      // 并发提交撞 (userId, projectId, date) 活跃唯一索引 → 友好提示
+      if (isUniqueViolation(err)) throw new BusinessError(`项目 ${data.projectId} 在 ${data.date} 已存在记录，请刷新后重试`);
+      throw err;
+    }
   }
 
   async batchCreate(userId: number, items: { projectId: number; date: string; days: number; description?: string }[]) {
@@ -179,9 +231,28 @@ export class TimesheetService {
     const dailyDays: Record<string, number> = {};
     for (const item of items) dailyDays[item.date] = round2((dailyDays[item.date] || 0) + item.days);
     this.validateDailyDays(dailyDays);
+    // 与 create 相同的冲突检查（批量版）：任一 (projectId, date) 已存在草稿/审批中记录即拒绝
+    const conflicts = await this.repo.find({
+      where: items.map((item) => ({
+        userId,
+        projectId: item.projectId,
+        date: item.date,
+        status: In(['draft', 'submitted'] as const),
+      })),
+      select: ['id', 'projectId', 'date'],
+    });
+    if (conflicts.length) {
+      const c = conflicts[0];
+      throw new BusinessError(`项目 ${c.projectId} 在 ${c.date} 已存在草稿或审批中记录，请刷新后修改`);
+    }
     const orgSnapshot = await this.accessPolicy.getOrgSnapshot(userId);
     const records = items.map(item => this.createRecord({ ...item, userId }, orgSnapshot));
-    return this.repo.save(records);
+    try {
+      return await this.repo.save(records);
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new BusinessError('部分记录已存在（同一项目同日期重复），请刷新后重试');
+      throw err;
+    }
   }
 
   /**
@@ -215,7 +286,13 @@ export class TimesheetService {
 
       await txService.repo.delete({ userId, date: Between(weekStart, weekEnd), status: 'draft' });
       const records = items.map((item) => txService.createRecord({ ...item, userId }, orgSnapshot));
-      return txService.repo.save(records);
+      try {
+        return await txService.repo.save(records);
+      } catch (err) {
+        // 并发下撞 (userId, projectId, date) 活跃唯一索引（如审批中记录并存）→ 友好提示
+        if (isUniqueViolation(err)) throw new BusinessError('草稿保存失败：同一项目同日期已存在审批中记录，请刷新后重试');
+        throw err;
+      }
     });
   }
 
@@ -226,6 +303,15 @@ export class TimesheetService {
     if (record.status !== 'draft') throw new BusinessError('仅草稿状态可修改');
     if (data.projectId !== undefined) {
       await this.validateActiveProjects([data.projectId]);
+      // 改项目后撞已有草稿/审批中记录 → 友好提示（approved 允许并存，走版本化流程）
+      if (data.projectId !== record.projectId) {
+        const conflict = await this.repo.findOne({
+          where: { userId, projectId: data.projectId, date: record.date, status: In(['draft', 'submitted']) },
+        });
+        if (conflict && conflict.id !== id) {
+          throw new BusinessError(`项目 ${data.projectId} 在 ${record.date} 已存在草稿或审批中记录，请刷新后修改`);
+        }
+      }
     }
     // 若更新了 days，校验步长倍数
     if (data.days !== undefined) {
@@ -233,7 +319,12 @@ export class TimesheetService {
       this.validateStepMultiple([{ date: record.date, days: data.days }], step, '工时');
     }
     Object.assign(record, data);
-    return this.repo.save(record);
+    try {
+      return await this.repo.save(record);
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new BusinessError('该项目该日期已存在记录，请刷新后重试');
+      throw err;
+    }
   }
 
   async delete(id: number, userId: number) {
@@ -298,12 +389,11 @@ export class TimesheetService {
       // 这样跨周/跨月的提交记录能整组完整返回（一组工时共享同一个 submissionGroupId），
       // 只要提交时间落在筛选范围内，整组都显示。
       if (startDate) {
-        qb.andWhere('t.updatedAt >= :historyStart', { historyStart: `${startDate}T00:00:00.000Z` });
+        // 按业务时区（Asia/Shanghai）的日界转 UTC 边界，避免容器 UTC 下凌晨提交被归入前一天
+        qb.andWhere('t.updatedAt >= :historyStart', { historyStart: businessDayjs(startDate).startOf('day').toISOString() });
       }
       if (endDate) {
-        const exclusiveEnd = new Date(`${endDate}T00:00:00.000Z`);
-        exclusiveEnd.setUTCDate(exclusiveEnd.getUTCDate() + 1);
-        qb.andWhere('t.updatedAt < :historyEnd', { historyEnd: exclusiveEnd.toISOString() });
+        qb.andWhere('t.updatedAt < :historyEnd', { historyEnd: businessDayjs(endDate).add(1, 'day').startOf('day').toISOString() });
       }
       if (status) qb.andWhere('t.status = :status', { status });
     }
@@ -364,6 +454,15 @@ export class TimesheetService {
         seq.currentValue += 1;
         await seqRepo.save(seq);
         out.push(seq.currentValue);
+      }
+      return out;
+    }).then(async (out) => {
+      // DB 回退路径发号后把新最大值回写 Redis：Redis 瞬时抖动/短暂不可用后恢复时，
+      // 计数器可能落后于 DB 实发值，若不同步会在下次 INCRBY 与已用序号碰撞（跨用户串组）。
+      // 异步 best-effort，失败不影响已分配序号（下次 DB 路径会重新校准）。
+      if (out.length) {
+        const { syncSubmissionGroupIdFromDb } = await import('../config/redis');
+        void syncSubmissionGroupIdFromDb(out[out.length - 1]).catch(() => undefined);
       }
       return out;
     });
@@ -541,12 +640,27 @@ export class TimesheetService {
         projectId: record.projectId,
       })));
 
-      // 批量 UPDATE，避免逐条 save
+      // 跨提交日合计校验：同日已存在其他项目/日期的 submitted/approved 记录时，
+      // 本次提交不得突破每日 1 天上限（事务内记录此时仍为 draft，不会被误计）。
+      if (Object.keys(dailyDays).length) {
+        const activeOthers = await txService.repo.find({
+          where: [
+            { userId, date: In(Object.keys(dailyDays)), status: 'approved' },
+            { userId, date: In(Object.keys(dailyDays)), status: 'submitted' },
+          ],
+        });
+        txService.assertDailyCapAcrossSubmissions(dailyDays, activeOthers, new Set<number>(), new Set<string>());
+      }
+
+      // 批量 UPDATE，避免逐条 save；单条提交也分配 submissionGroupId，
+      // 保证周填报表（按组视图）与版本链追溯对该路径同样成立。
       const recordIds = records.map((r) => r.id);
+      const groupIds = await txService.nextSubmissionGroupIds(1);
       await txService.repo.update(
         { id: In(recordIds) },
         {
           status: 'submitted',
+          submissionGroupId: groupIds[0],
           currentStep: 0,
           totalSteps: 0,
           approvalFlowId: null,
@@ -688,6 +802,34 @@ export class TimesheetService {
         } else if (rec.status === 'approved' || rec.status === 'submitted') {
           // 整周提交：载荷中删除的项目/日期废弃；局部修改：只处理载荷明确包含的项目。
           if (!dates || !isInEntries) {
+            if (rec.status === 'submitted' && rec.approvalInstanceId) {
+              // 载荷外已提交记录直接废弃：同步撤回其审批实例，避免产生不可操作的
+              // 孤儿 pending 实例（审批人看到已废弃记录的待办，且永远无法处理）。
+              const groupIdKey = rec.submissionGroupId ?? 0;
+              if (groupIdKey && !withdrawnGroupIds.has(groupIdKey)) {
+                withdrawnGroupIds.add(groupIdKey);
+                try {
+                  await txService.approvalInstanceService.withdraw('timesheet', rec.id, userId, submitter.realName);
+                  await txService.recordRepo.save(txService.recordRepo.create({
+                    targetType: 'timesheet',
+                    targetId: rec.id,
+                    instanceId: rec.approvalInstanceId ?? null,
+                    approverId: userId,
+                    approverName: submitter.realName,
+                    action: 'withdraw',
+                    comment: '申请人修改工时，重新提交审批',
+                    stepOrder: rec.currentStep || 1,
+                    stepType: 'withdraw',
+                    stepLabel: '撤回',
+                  }));
+                } catch (err) {
+                  // 队列竞态：实例刚结束或不存在时仍允许 deprecate 并重提
+                  if (!(err instanceof BusinessError) || !String(err.message).includes('无法撤回')) {
+                    throw err;
+                  }
+                }
+              }
+            }
             toDeprecateIds.push(rec.id);
             removedIds.add(rec.id);
           }
@@ -718,9 +860,12 @@ export class TimesheetService {
         for (const entry of row.entries) {
           if (entry.days <= 0) continue;
 
-          const existingRec = existingRecords.find(
-            d => !removedIds.has(d.id) && d.date === entry.date && d.projectId === row.projectId
-          );
+          // 按 id 降序取该 (projectId, date) 下最新的未移除记录：审批通过后旧版本会保留
+          // 到新版本通过（deprecate 延后），必须优先匹配最新版本，否则保留的旧 approved
+          // 会挡住新 submitted 版本，导致其无法被撤回/废弃、审批实例残留。
+          const existingRec = existingRecords
+            .filter(d => !removedIds.has(d.id) && d.date === entry.date && d.projectId === row.projectId)
+            .sort((a, b) => b.id - a.id)[0];
 
           if (existingRec && existingRec.status === 'draft') {
             if (existingRec.submissionGroupId) {
@@ -771,9 +916,16 @@ export class TimesheetService {
                   }
                 }
               }
+              deprecateInLoop.push(existingRec.id);
+              removedIds.add(existingRec.id);
+            } else if (existingRec.status === 'rejected') {
+              // 被驳回版本：废弃（保留历史），新建版本重新进入审批
+              deprecateInLoop.push(existingRec.id);
+              removedIds.add(existingRec.id);
             }
-            deprecateInLoop.push(existingRec.id);
-            removedIds.add(existingRec.id);
+            // approved：审批窗口期保留旧版本（不 deprecate、不 removed），
+            // 报表/周报在 v2 审批期间继续统计 v1；v2 通过时由 approvalService
+            // 按 rootGroupId 整链废弃 v1；v2 被驳回时 v1 继续生效。
             records.push(txService.createRecord({
               userId,
               projectId: row.projectId,
@@ -802,6 +954,16 @@ export class TimesheetService {
           totalDays: round2(row.entries.reduce((s, e) => s + e.days, 0)),
         });
       }
+
+      // 跨提交日合计校验：本次载荷 + 载荷外仍活跃（approved/submitted）记录不得超过每日 1 天。
+      // 载荷内 (projectId, date) 对应的旧版本已被覆盖/废弃，不计入。
+      const payloadKeys = new Set<string>();
+      for (const row of rows) {
+        for (const e of row.entries) {
+          if (e.days > 0) payloadKeys.add(`${row.projectId}:${e.date}`);
+        }
+      }
+      txService.assertDailyCapAcrossSubmissions(dailyDays, existingRecords, removedIds, payloadKeys);
 
       if (deprecateInLoop.length) {
         await txService.repo.update({ id: In(deprecateInLoop) }, { status: 'deprecated' });

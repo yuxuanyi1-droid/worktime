@@ -216,9 +216,12 @@ describe('ReportService 报表统计集成', () => {
       monthDays: 1,
       overtimeDays: 0,
       pendingCount: 3,
+      // trend 按日期升序返回；currentDate 恒为当月 02 日（当月 1 号时它是「明天」，排在 today 之后）
       trend: currentDate === today
         ? [{ date: currentDate, days: 1 }]
-        : [{ date: currentDate, days: 0.75 }, { date: today, days: 0.25 }],
+        : currentDate < today
+          ? [{ date: currentDate, days: 0.75 }, { date: today, days: 0.25 }]
+          : [{ date: today, days: 0.25 }, { date: currentDate, days: 0.75 }],
       hasTimesheetDrafts: true,
       weeklyReportStatus: 'submitted',
     });

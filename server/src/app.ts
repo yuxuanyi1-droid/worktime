@@ -32,6 +32,7 @@ import { agentRoutes } from './routes/agent';
 import { ensurePiModelsJson } from './config/ai';
 import { preloadPi, stopAgentWorker } from './ai/agentRunner';
 import { timesheetReminderScheduler } from './services/timesheetReminderService';
+import { ApprovalRecoveryService } from './services/approvalRecoveryService';
 
 export const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -232,6 +233,29 @@ if (isProduction) {
 // 错误处理
 app.use(errorHandler);
 
+// ==================== 审批恢复扫描器 ====================
+// 补偿「提交事务 commit 后、审批任务入队前崩溃 / 队列消息丢失」产生的孤儿 submitted 记录
+// （无 approvalInstanceId、审批人看不到待办）。多实例重复执行安全（processApprovalJobs 幂等）。
+const approvalRecovery = new ApprovalRecoveryService();
+const APPROVAL_RECOVERY_INTERVAL_MS = 5 * 60 * 1000;
+let approvalRecoveryTimer: NodeJS.Timeout | null = null;
+
+function startApprovalRecoveryTimer(): void {
+  if (approvalRecoveryTimer) return;
+  approvalRecoveryTimer = setInterval(() => {
+    approvalRecovery.reconcile().catch((err) => {
+      logger.error({ err }, '[approval-recovery] 扫描失败');
+    });
+  }, APPROVAL_RECOVERY_INTERVAL_MS);
+  approvalRecoveryTimer.unref();
+  logger.info('[approval-recovery] 孤儿 submitted 恢复扫描已启动');
+}
+
+function stopApprovalRecoveryTimer(): void {
+  if (approvalRecoveryTimer) clearInterval(approvalRecoveryTimer);
+  approvalRecoveryTimer = null;
+}
+
 /**
  * 启动 API 服务。拆成显式函数，避免单元测试或其他模块仅导入 app 时就连接数据库、
  * 监听端口和注册进程信号。
@@ -276,6 +300,7 @@ export async function startServer(): Promise<Server> {
     preloadPi();
     dbConnected = true;
     timesheetReminderScheduler.start();
+    startApprovalRecoveryTimer();
     logger.info('数据库连接成功');
     logger.info({ entities: AppDataSource.entityMetadatas.map(e => e.name) }, '已注册实体');
     httpServer = app.listen(PORT, API_HOST, () => {
@@ -304,6 +329,7 @@ export async function gracefulShutdown(signal: string, exitProcess = true): Prom
   shuttingDown = true;
   dbConnected = false;
   timesheetReminderScheduler.stop();
+  stopApprovalRecoveryTimer();
   logger.info({ signal }, '服务端开始优雅退出');
 
   httpServer?.closeIdleConnections?.();
