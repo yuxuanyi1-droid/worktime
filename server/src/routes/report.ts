@@ -211,6 +211,8 @@ router.get('/scope', requirePermission('report:access'), async (req: AuthRequest
     const canViewOvertime = canOvertimePermission
       && (accessPolicy.isAdmin(viewer) || canAllReports
         || departments.length > 0 || groups.length > 0 || overtimeProjects.length > 0);
+    // 超投统计：有项目报表或全局报表权限即可查看（数据范围仍受 getOverrunStats 的项目裁剪）
+    const canViewOverrun = canProjectPermission || canAllReports;
 
     res.json({
       code: 0,
@@ -220,6 +222,7 @@ router.get('/scope', requirePermission('report:access'), async (req: AuthRequest
         canViewGroup,
         canViewProject,
         canViewOvertime,
+        canViewOverrun,
         departments: serializeDepartments(departments),
         groups: serializeGroups(groups),
         projects: serializeProjects(projects),
@@ -311,6 +314,22 @@ router.get('/project', requirePermission('report:view:project'), async (req: Aut
     const { filters, reportFilters } = await getProjectScopedFilters(projectId, departmentId, groupId);
     const data = await reportService.getProjectReport(projectId, startDate, endDate, reportFilters);
     res.json({ code: 0, data: { ...data, filters } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * 超投统计：项目 × 配额组的配额 vs 实际消耗。
+ * 权限：report:view:project 或 report:view:all（任一）；数据范围由服务层按可访问项目裁剪。
+ */
+router.get('/overrun', requirePermission('report:view:project', 'report:view:all'), async (req: AuthRequest, res, next) => {
+  try {
+    const { startDate, endDate } = parseReportDateRange(req.query);
+    const projectId = parseOptionalPositiveInt(firstQueryValue(req.query.projectId), 'projectId');
+    const groupId = parseOptionalPositiveInt(firstQueryValue(req.query.groupId), 'groupId');
+    const data = await reportService.getOverrunStats(req.user!, { startDate, endDate, projectId, groupId });
+    res.json({ code: 0, data });
   } catch (error) {
     next(error);
   }

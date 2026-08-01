@@ -1,5 +1,5 @@
 import request from '../utils/request';
-import { DashboardData, PersonalReport, DepartmentReport, OvertimeReport, GroupReport, ProjectReport, ReportScope } from '../types';
+import { DashboardData, PersonalReport, DepartmentReport, OvertimeReport, GroupReport, ProjectReport, ReportScope, OverrunStatItem } from '../types';
 
 export const reportApi = {
   getDashboard: () => request.get<any, { code: number; data: DashboardData }>('/reports/dashboard'),
@@ -14,6 +14,8 @@ export const reportApi = {
     request.get<any, { code: number; data: ProjectReport }>('/reports/project', { params: { projectId, startDate, endDate, ...params } }),
   getOvertime: (params: { startDate: string; endDate: string; departmentId?: number; groupId?: number; projectId?: number; userId?: number }) =>
     request.get<any, { code: number; data: OvertimeReport }>('/reports/overtime', { params }),
+  getOverrun: (params: { startDate: string; endDate: string; projectId?: number; groupId?: number }) =>
+    request.get<any, { code: number; data: { list: OverrunStatItem[]; total: number } }>('/reports/overrun', { params }),
 };
 
 // ==================== 自定义报表 ====================

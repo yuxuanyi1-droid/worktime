@@ -15,6 +15,7 @@ import { PermissionGovernanceService } from './permissionGovernanceService';
 import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
 import { BusinessError, isUniqueViolation } from '../utils/errors';
 import { round2 } from '../utils/validation';
+import { sumConsumption } from '../utils/timesheetConsumption';
 import { invalidateAuthUsers } from '../config/cache';
 
 type TargetType = 'timesheet' | 'overtime' | 'weekly_report' | 'permission_request';
@@ -1068,24 +1069,8 @@ export class ApprovalService {
       .addSelect('t.days', 'days')
       .addSelect('t.submissionGroupId', 'submissionGroupId')
       .getRawMany<{ userId: number; projectId: number; date: string; days: string | number; submissionGroupId: number | null }>();
-    const maxGroupByKey = new Map<string, number>();
-    for (const r of activeRows) {
-      if (!r.submissionGroupId) continue;
-      const key = `${r.userId}_${r.projectId}_${r.date}`;
-      const cur = maxGroupByKey.get(key);
-      if (cur === undefined || r.submissionGroupId > cur) maxGroupByKey.set(key, r.submissionGroupId);
-    }
-    let consumed = 0;
-    for (const r of activeRows) {
-      if (r.submissionGroupId) {
-        // 有组号的版本：只计该 (userId, projectId, date) 下最新组的记录
-        if (r.submissionGroupId !== maxGroupByKey.get(`${r.userId}_${r.projectId}_${r.date}`)) continue;
-      } else if (maxGroupByKey.has(`${r.userId}_${r.projectId}_${r.date}`)) {
-        // 历史无组号记录：仅当该 key 不存在带组号的活跃记录时计入（与报表去重口径一致）
-        continue;
-      }
-      consumed = round2(consumed + Number(r.days));
-    }
+    // 版本去重与求和统一走公共口径（utils/timesheetConsumption），与报表超投统计保持一致
+    const consumed = sumConsumption(activeRows);
     const total = round2(allocation.allocation);
     const remaining = round2(total - consumed);
     return {

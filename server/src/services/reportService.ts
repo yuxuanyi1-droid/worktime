@@ -3,10 +3,14 @@ import { AppDataSource } from '../config/database';
 import { Timesheet } from '../entities/Timesheet';
 import { OvertimeApplication } from '../entities/OvertimeApplication';
 import { WeeklyReport } from '../entities/WeeklyReport';
+import { ProjectWorkloadAllocation } from '../entities/ProjectWorkloadAllocation';
+import { Group } from '../entities/Group';
 import { Between, Not } from 'typeorm';
 import { ApprovalService } from './approvalService';
+import { AccessPolicyService, AccessViewer } from './accessPolicyService';
 import { BusinessError } from '../utils/errors';
 import { round2 } from '../utils/validation';
+import { collectGroupCoverage, sumConsumption } from '../utils/timesheetConsumption';
 import { businessMonthRange, businessWeekRange } from '../utils/time';
 
 type SummaryWithCount = { days: number; count: number };
@@ -106,6 +110,113 @@ export class ReportService {
   private get overtimeRepo() { return (this.manager ?? AppDataSource).getRepository(OvertimeApplication); }
   private get weeklyReportRepo() { return (this.manager ?? AppDataSource).getRepository(WeeklyReport); }
   private get approvalService() { return new ApprovalService(this.manager); }
+  private get allocationRepo() { return (this.manager ?? AppDataSource).getRepository(ProjectWorkloadAllocation); }
+  private get groupRepo() { return (this.manager ?? AppDataSource).getRepository(Group); }
+
+  /**
+   * 超投统计：项目 × 配额组的「配额 vs 实际消耗」。
+   *
+   * 口径与审批单配额警告（approvalService.buildTimesheetQuota）完全一致：
+   * - 消耗 = submitted + approved 工时，按 (userId, projectId, date) 最新版本去重
+   * - 配额组覆盖范围 = 配额组及其全部子孙组（path 前缀，成员按当前所在组归属）
+   * - 配额 = 当前配置值（配额变更影响历史结论，界面注明）
+   * 查看范围受报表权限裁剪（report:view:project / report:view:all 的可访问项目）。
+   */
+  async getOverrunStats(
+    viewer: AccessViewer,
+    params: { startDate: string; endDate: string; projectId?: number; groupId?: number },
+  ) {
+    const { startDate, endDate, projectId, groupId } = params;
+    const accessPolicy = new AccessPolicyService(this.manager);
+    const accessibleProjectIds = await accessPolicy.getAccessibleProjectIds(viewer, ['report:view:project', 'report:view:all']);
+    if (accessibleProjectIds !== null && accessibleProjectIds.length === 0) {
+      return { list: [], total: 0 };
+    }
+
+    // 1. 配额配置（裁剪到可访问项目，可选按项目/组过滤）
+    const allocQb = this.allocationRepo.createQueryBuilder('a')
+      .leftJoinAndSelect('a.project', 'project')
+      .leftJoinAndSelect('a.group', 'group');
+    if (projectId) allocQb.andWhere('a.projectId = :projectId', { projectId });
+    if (groupId) allocQb.andWhere('a.groupId = :groupId', { groupId });
+    if (accessibleProjectIds !== null) {
+      allocQb.andWhere('a.projectId IN (:...projectIds)', { projectIds: accessibleProjectIds });
+    }
+    const allocations = await allocQb.getMany();
+    if (!allocations.length) return { list: [], total: 0 };
+
+    // 2. 配额组覆盖集合（配额组 + 全部子孙组）
+    const allGroups = await this.groupRepo.find({ select: { id: true, path: true } });
+    const coverageByQuotaGroup = new Map<number, Set<number>>();
+    for (const a of allocations) {
+      coverageByQuotaGroup.set(a.groupId, collectGroupCoverage(allGroups, a.groupId));
+    }
+
+    // 3. 时间范围内活跃工时（submitted + approved），带用户当前所在组
+    const allocProjectIds = [...new Set(allocations.map((a) => a.projectId))];
+    const rows = await this.timesheetRepo.createQueryBuilder('t')
+      .innerJoin('users', 'u', 'u.id = t.userId')
+      .where('t.projectId IN (:...projectIds)', { projectIds: allocProjectIds })
+      .andWhere('t.date >= :startDate', { startDate })
+      .andWhere('t.date <= :endDate', { endDate })
+      .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
+      // 显式别名：无别名时 Postgres raw 列名带表前缀（t_userId），取键会得到 undefined
+      .select('t.userId', 'userId')
+      .addSelect('t.projectId', 'projectId')
+      .addSelect('t.date', 'date')
+      .addSelect('t.days', 'days')
+      .addSelect('t.submissionGroupId', 'submissionGroupId')
+      .addSelect('u.groupId', 'userGroupId')
+      .getRawMany<{
+        userId: number;
+        projectId: number;
+        date: string;
+        days: string | number;
+        submissionGroupId: number | null;
+        userGroupId: number | null;
+      }>();
+
+    // 4. 按 (userId, projectId, date) 最新组去重，得到有效行（与审批配额同口径）
+    const maxGroupByKey = new Map<string, number>();
+    for (const r of rows) {
+      if (!r.submissionGroupId) continue;
+      const key = `${r.userId}_${r.projectId}_${r.date}`;
+      const cur = maxGroupByKey.get(key);
+      if (cur === undefined || r.submissionGroupId > cur) maxGroupByKey.set(key, r.submissionGroupId);
+    }
+    const effectiveRows = rows.filter((r) => {
+      if (r.submissionGroupId) {
+        return r.submissionGroupId === maxGroupByKey.get(`${r.userId}_${r.projectId}_${r.date}`);
+      }
+      return !maxGroupByKey.has(`${r.userId}_${r.projectId}_${r.date}`);
+    });
+
+    // 5. 逐配额组计算消耗/剩余/超投（成员当前组 ∈ 配额组覆盖范围）
+    const list = allocations.map((a) => {
+      const coverage = coverageByQuotaGroup.get(a.groupId) ?? new Set<number>();
+      const consumed = sumConsumption(
+        effectiveRows.filter((r) => r.projectId === a.projectId && r.userGroupId !== null && coverage.has(r.userGroupId)),
+      );
+      const total = round2(Number(a.allocation));
+      const remaining = round2(total - consumed);
+      const overrun = round2(Math.max(0, consumed - total));
+      const overrunRate = total > 0 ? round2((overrun / total) * 100) : 0;
+      return {
+        projectId: a.projectId,
+        projectName: a.project?.name || '',
+        projectCode: (a.project as { code?: string } | undefined)?.code || '',
+        groupId: a.groupId,
+        groupName: a.group?.name || a.groupName || '',
+        allocation: total,
+        consumed,
+        remaining,
+        overrun,
+        overrunRate,
+      };
+    }).sort((x, y) => y.overrun - x.overrun || y.consumed - x.consumed);
+
+    return { list, total: list.length };
+  }
 
   private dedupTimesheets(records: Timesheet[]): Timesheet[] {
     return dedupReportTimesheets(records);

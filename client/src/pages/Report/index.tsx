@@ -9,25 +9,27 @@ import {
   Empty,
   Row,
   Select,
+  Space,
   Spin,
   Statistic,
   Table,
   Tabs,
+  Tag,
   Typography,
   message,
 } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { reportApi } from '../../api/report';
-import { DepartmentReport, GroupReport, OvertimeReport, PersonalReport, ProjectReport, ReportScope } from '../../types';
+import { DepartmentReport, GroupReport, OvertimeReport, OverrunStatItem, PersonalReport, ProjectReport, ReportScope } from '../../types';
 import request from '../../utils/request';
 import { reportError } from '../../utils/errors';
 import LazyEChart from '../../components/Charts/LazyEChart';
 import { usePermission } from '../../hooks/usePermission';
 import CustomReportView from './CustomReportView';
 
-const { Title, Text } = Typography;
-type ReportTabKey = 'personal' | 'group' | 'department' | 'project' | 'overtime' | 'custom';
+const { Title, Text, Paragraph } = Typography;
+type ReportTabKey = 'personal' | 'group' | 'department' | 'project' | 'overtime' | 'overrun' | 'custom';
 type SummaryValue = { days: number; count?: number };
 
 const palette = ['#4F7B63', '#B7791F', '#B85C5C', '#4F6F8F', '#7A6C5D', '#6D7E3F', '#8C6A9E'];
@@ -266,6 +268,72 @@ function ProjectView({ data }: { data: ProjectReport | null }) {
   );
 }
 
+function OverrunView({ data }: { data: OverrunStatItem[] | null }) {
+  const columns = [
+    {
+      title: '项目',
+      dataIndex: 'projectName',
+      key: 'projectName',
+      render: (name: string, record: OverrunStatItem) => (
+        <Space>
+          <Text strong>{name}</Text>
+          {record.projectCode && <Text type="secondary" style={{ fontSize: 12 }}>{record.projectCode}</Text>}
+        </Space>
+      ),
+    },
+    { title: '配额组', dataIndex: 'groupName', key: 'groupName', width: 160 },
+    { title: '配额(天)', dataIndex: 'allocation', key: 'allocation', width: 100, align: 'right' as const },
+    { title: '已消耗', dataIndex: 'consumed', key: 'consumed', width: 100, align: 'right' as const },
+    {
+      title: '剩余',
+      dataIndex: 'remaining',
+      key: 'remaining',
+      width: 100,
+      align: 'right' as const,
+      render: (value: number, record: OverrunStatItem) => (
+        <Text type={record.remaining < 0 ? 'danger' : 'secondary'}>{record.remaining}</Text>
+      ),
+    },
+    {
+      title: '超投量',
+      dataIndex: 'overrun',
+      key: 'overrun',
+      width: 100,
+      align: 'right' as const,
+      render: (value: number, record: OverrunStatItem) => (
+        record.overrun > 0 ? <Tag color="red">{record.overrun}</Tag> : <Text type="secondary">-</Text>
+      ),
+    },
+    {
+      title: '超投率',
+      dataIndex: 'overrunRate',
+      key: 'overrunRate',
+      width: 100,
+      align: 'right' as const,
+      render: (value: number, record: OverrunStatItem) => (
+        record.overrun > 0 ? <Tag color="volcano">{record.overrunRate}%</Tag> : <Text type="secondary">-</Text>
+      ),
+    },
+  ];
+
+  return (
+    <Card title="超投统计" style={{ borderRadius: 8 }}>
+      <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
+        口径与审批单配额警告一致：消耗 = 审批中 + 已通过工时（按最新版本去重），配额组含其全部子组成员；配额取当前配置值（修改配额会影响历史结论）。
+      </Paragraph>
+      <Table
+        rowKey={(record) => `${record.projectId}-${record.groupId}`}
+        columns={columns}
+        dataSource={data || []}
+        loading={!data}
+        pagination={false}
+        size="middle"
+        locale={{ emptyText: '暂无配额配置或消耗数据' }}
+      />
+    </Card>
+  );
+}
+
 function OvertimeView({ data }: { data: OvertimeReport | null }) {
   const typeData = useMemo(() => {
     if (!data?.byType) return {};
@@ -311,6 +379,7 @@ export default function Report() {
   const [deptData, setDeptData] = useState<DepartmentReport | null>(null);
   const [projData, setProjData] = useState<ProjectReport | null>(null);
   const [overtimeData, setOvertimeData] = useState<OvertimeReport | null>(null);
+  const [overrunData, setOverrunData] = useState<OverrunStatItem[] | null>(null);
   const [scopeLoading, setScopeLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -354,6 +423,7 @@ export default function Report() {
   const exportScope = scope?.exportScope;
   const canExportCurrent = (() => {
     if (!canExport || !exportScope) return false;
+    if (tabKey === 'overrun') return false; // 超投统计暂未提供 Excel 导出
     if (exportScope.unrestricted) return true;
     if (tabKey === 'personal') return false;
     if (tabKey === 'group') return !!selectedGroup && exportScope.groupIds.includes(selectedGroup);
@@ -377,6 +447,7 @@ export default function Report() {
     ...(scope?.canViewDepartment ? [{ key: 'department', label: '部门报表' }] : []),
     ...(scope?.canViewProject ? [{ key: 'project', label: '项目报表' }] : []),
     ...(scope?.canViewOvertime ? [{ key: 'overtime', label: '加班统计' }] : []),
+    ...(scope?.canViewOverrun ? [{ key: 'overrun', label: '超投统计' }] : []),
     ...(canViewCustom ? [{ key: 'custom', label: '自定义报表' }] : []),
   ] as { key: ReportTabKey; label: string }[], [scope, canViewCustom]);
 
@@ -504,6 +575,21 @@ export default function Report() {
     }
   };
 
+  const loadOverrun = async () => {
+    const requestId = beginQuery();
+    try {
+      const res = await reportApi.getOverrun({ startDate, endDate });
+      if (isLatestQuery(requestId)) setOverrunData(res.data?.list || []);
+    } catch (err: any) {
+      if (isLatestQuery(requestId)) {
+        setOverrunData(null);
+        setError(getErrorMessage(err, '超投统计加载失败'));
+      }
+    } finally {
+      finishQuery(requestId);
+    }
+  };
+
   const loadProject = async () => {
     if (!selectedProj) {
       setError('请选择项目');
@@ -556,6 +642,7 @@ export default function Report() {
     else if (key === 'department') loadDepartment();
     else if (key === 'project') loadProject();
     else if (key === 'overtime') loadOvertime();
+    else if (key === 'overrun') loadOverrun();
     else loadPersonal();
   };
 
@@ -590,6 +677,7 @@ export default function Report() {
       setDeptData(null);
       setProjData(null);
       setOvertimeData(null);
+      setOverrunData(null);
     }
   };
 
@@ -871,6 +959,7 @@ export default function Report() {
           {tabKey === 'department' && <DepartmentView data={deptData} />}
           {tabKey === 'project' && <ProjectView data={projData} />}
           {tabKey === 'overtime' && <OvertimeView data={overtimeData} />}
+          {tabKey === 'overrun' && <OverrunView data={overrunData} />}
           {tabKey === 'custom' && <CustomReportView scope={scope} scopeLoading={scopeLoading} />}
         </Spin>
       </Spin>

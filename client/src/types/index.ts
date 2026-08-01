@@ -340,6 +340,7 @@ export interface ReportScope {
   canViewGroup: boolean;
   canViewProject: boolean;
   canViewOvertime: boolean;
+  canViewOverrun: boolean;
   departments: Department[];
   groups: Group[];
   projects: Project[];
@@ -350,6 +351,20 @@ export interface ReportScope {
     groupIds: number[];
     projectIds: number[];
   };
+}
+
+/** 超投统计条目：项目 × 配额组的配额 vs 实际消耗 */
+export interface OverrunStatItem {
+  projectId: number;
+  projectName: string;
+  projectCode: string;
+  groupId: number;
+  groupName: string;
+  allocation: number;
+  consumed: number;
+  remaining: number;
+  overrun: number;
+  overrunRate: number;
 }
 
 export interface OvertimeReport {
