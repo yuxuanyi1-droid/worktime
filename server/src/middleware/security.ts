@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import net from 'node:net';
 import rateLimit, { ipKeyGenerator, type Options, type RateLimitRequestHandler } from 'express-rate-limit';
 import { RedisStore, type RedisReply } from 'rate-limit-redis';
 import { Request, RequestHandler } from 'express';
@@ -32,7 +33,28 @@ export function authenticatedRateKey(req: Request): string {
   if (authorization.startsWith('Bearer ')) {
     return `token:${crypto.createHash('sha256').update(authorization.slice(7)).digest('hex').slice(0, 32)}`;
   }
-  return `ip:${ipKeyGenerator(req.ip || 'unknown')}`;
+  return `ip:${ipKeyGenerator(getClientIp(req))}`;
+}
+
+/**
+ * 客户端真实 IP：
+ * - 生产环境（Cloudflare Tunnel → Caddy 回环转发拓扑，README 文档化部署方式）下，
+ *   req.ip 被 trust proxy=1 折叠为 127.0.0.1（XFF 最右项是 Caddy 追加的回环地址），
+ *   所有用户会共享同一个 IP 限流桶（单个攻击者的失败请求可耗尽全公司额度、锁死登录）。
+ *   此时优先采用 cloudflared 注入的 CF-Connecting-IP 头（外部无法直连 API，头不可伪造）。
+ * - 开发环境/其他前置代理：直接使用 express 解析后的 req.ip（trust proxy=1 语义）。
+ * - TRUST_PROXY_HOPS 的配置陷阱见 .env.example 注释：误设 >1 会让攻击者可控的
+ *   X-Forwarded-For 项成为 req.ip，生产请保持 1（仅 Caddy 一层）并配合回环监听。
+ */
+export function getClientIp(req: Request): string {
+  const raw = req.ip || 'unknown';
+  if (process.env.NODE_ENV === 'production') {
+    const cf = req.headers['cf-connecting-ip'];
+    if (typeof cf === 'string' && cf.trim() && net.isIP(cf.trim())) {
+      return cf.trim();
+    }
+  }
+  return raw;
 }
 
 /** 可在 Redis 就绪后替换实现的占位中间件 */

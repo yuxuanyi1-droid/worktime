@@ -9,11 +9,19 @@ vi.mock('@client/api/pat', () => ({
     list: vi.fn(),
     create: vi.fn(),
     remove: vi.fn(),
+    getScopes: vi.fn(),
   },
 }));
 
 describe('PAT 管理页面', () => {
   beforeEach(() => {
+    vi.mocked(patApi.getScopes).mockResolvedValue({
+      code: 0,
+      data: [
+        { code: 'timesheet:view:self', name: '工时管理-查看自己的工时' },
+        { code: 'report:view:self', name: '报表中心-个人报表' },
+      ],
+    });
     vi.mocked(patApi.list).mockResolvedValue({
       code: 0,
       data: [{

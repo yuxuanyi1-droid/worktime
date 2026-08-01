@@ -1,4 +1,4 @@
-import './env'; // 加载根 .env（端口）+ server/.env（含 JWT_SECRET）
+import './env'; // 加载仓库根 .env（含 JWT_SECRET；不依赖 server/.env）
 import crypto from 'node:crypto';
 
 const jwtSecret = process.env.JWT_SECRET;
@@ -6,17 +6,13 @@ const jwtSecret = process.env.JWT_SECRET;
 if (!jwtSecret) {
   throw new Error('JWT_SECRET 未配置，请在环境变量或 .env 中设置强随机密钥');
 }
-// 强度校验：拒绝已知弱密钥/占位符/过短密钥，防止生产误用
-const WEAK_SECRETS = new Set([
-  'replace-with-a-long-random-secret',
-  'worktime-jwt-secret-key-2026',
-  'secret',
-  'jwt-secret',
-  'your-secret-key',
-  'changeme',
-]);
-if (WEAK_SECRETS.has(jwtSecret)) {
-  throw new Error('JWT_SECRET 是已知的弱密钥或占位符，请生成一个至少 32 字符的随机密钥');
+// 强度校验：拒绝已知弱密钥/占位符/过短密钥，防止生产误用。
+// 占位符用「前缀匹配」拦截（如 .env.example 历史上的 replace-with-... 示例值），
+// 避免运维照抄模板后占位符绕过精确匹配黑名单直接上线。
+const WEAK_SECRET_PREFIXES = ['replace-with-', 'worktime-jwt-secret-key', 'your-secret-key'];
+const WEAK_SECRETS = new Set(['secret', 'jwt-secret', 'changeme']);
+if (WEAK_SECRETS.has(jwtSecret) || WEAK_SECRET_PREFIXES.some((prefix) => jwtSecret.startsWith(prefix))) {
+  throw new Error('JWT_SECRET 是已知的弱密钥或占位符，请生成一个至少 32 字符的随机密钥（如 openssl rand -hex 32）');
 }
 if (jwtSecret.length < 32) {
   throw new Error(`JWT_SECRET 长度不足（${jwtSecret.length} 字符），请使用至少 32 字符的随机密钥`);

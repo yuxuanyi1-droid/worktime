@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Card, Button, message, Typography, Table, Modal, Input, Form, Space, Tag, Popconfirm } from 'antd';
+import { Alert, Card, Button, message, Typography, Table, Modal, Input, Form, Space, Tag, Popconfirm, Select } from 'antd';
 import { PlusOutlined, CopyOutlined, DeleteOutlined, KeyOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { patApi, type PersonalAccessToken } from '../../api/pat';
+import { patApi, type PersonalAccessToken, type PatScopeOption } from '../../api/pat';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -14,6 +14,7 @@ export default function PatPage() {
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [scopeOptions, setScopeOptions] = useState<PatScopeOption[]>([]);
   const [form] = Form.useForm();
   const loadRequestId = useRef(0);
 
@@ -35,6 +36,8 @@ export default function PatPage() {
 
   useEffect(() => {
     load();
+    // 加载可选权限范围（供创建令牌时勾选收窄）
+    patApi.getScopes().then((res) => setScopeOptions(res.data || [])).catch(() => { /* 目录加载失败不阻塞页面 */ });
     return () => { loadRequestId.current += 1; };
   }, []);
 
@@ -50,7 +53,7 @@ export default function PatPage() {
 
   const handleCreate = async () => {
     if (creating) return;
-    let values: { name: string; expiresAt?: string };
+    let values: { name: string; expiresAt?: string; scopes?: string[] };
     try {
       values = await form.validateFields();
     } catch {
@@ -59,7 +62,7 @@ export default function PatPage() {
     setCreating(true);
     try {
       const expiresAt = values.expiresAt ? dayjs(values.expiresAt).toISOString() : undefined;
-      const res = await patApi.create({ name: values.name, expiresAt });
+      const res = await patApi.create({ name: values.name, expiresAt, scopes: values.scopes });
       setCreateOpen(false);
       form.resetFields();
       if (res.data?.tokenPlain) {
@@ -116,6 +119,17 @@ export default function PatPage() {
       key: 'createdAt',
       width: 160,
       render: (t: string) => (t ? dayjs(t).format('YYYY-MM-DD HH:mm') : '-'),
+    },
+    {
+      title: '权限范围',
+      dataIndex: 'scopes',
+      key: 'scopes',
+      width: 200,
+      render: (scopes: string | null) => (
+        scopes
+          ? <Tag style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{scopes.split(',').length} 项权限</Tag>
+          : <Tag color="orange">全部权限</Tag>
+      ),
     },
     {
       title: '最近使用',
@@ -217,8 +231,22 @@ export default function PatPage() {
           >
             <Input placeholder="如：Cursor 集成 / 本地调试" maxLength={100} />
           </Form.Item>
-          <Form.Item name="expiresAt" label="过期时间（可选）" tooltip="留空则永不过期">
+          <Form.Item name="expiresAt" label="过期时间（可选）" tooltip="留空则默认 90 天后过期">
             <Input type="datetime-local" min={dayjs().format('YYYY-MM-DDTHH:mm')} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="scopes"
+            label="权限范围（可选）"
+            tooltip="留空 = 继承你的全部权限；勾选后令牌仅能使用所选权限（最小权限原则，建议只勾选必要范围）"
+          >
+            <Select
+              mode="multiple"
+              placeholder="未选择 = 全部权限（不推荐用于长期令牌）"
+              options={scopeOptions.map((s) => ({ label: `${s.code}（${s.name}）`, value: s.code }))}
+              optionFilterProp="label"
+              maxTagCount="responsive"
+              style={{ width: '100%' }}
+            />
           </Form.Item>
           <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
             令牌只会在创建后显示一次，关闭后无法再次查看，请立即复制并妥善保存。

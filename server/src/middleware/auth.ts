@@ -200,7 +200,15 @@ async function authenticatePat(token: string, req: AuthRequest, res: Response, n
     realName: user.realName,
     roles: user.roles.map(r => r.name),
   };
-  req.userPermissions = await accessPolicy.getPermissionCodesForLoadedUser(user);
+  const userPermissions = await accessPolicy.getPermissionCodesForLoadedUser(user);
+  // PAT scope 收窄：scopes 非空时取「用户全量权限 ∩ 令牌声明的权限码」，
+  // 防止泄漏的全权限 PAT 成为与登录会话等价的长期凭证。
+  if (pat.scopes) {
+    const granted = new Set(pat.scopes.split(',').map((s) => s.trim()).filter(Boolean));
+    req.userPermissions = new Set([...userPermissions].filter((p) => granted.has(p)));
+  } else {
+    req.userPermissions = userPermissions;
+  }
   req.authMethod = 'pat';
 
   return next();

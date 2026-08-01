@@ -16,9 +16,16 @@ export interface PersonalAccessToken {
   updatedAt: string;
 }
 
+/** PAT 可选权限范围（权限码目录） */
+export interface PatScopeOption {
+  code: string;
+  name: string;
+}
+
 export const patApi = {
   list: () => request.get<any, { code: number; data: PersonalAccessToken[] }>('/pats'),
-  create: (data: { name: string; expiresAt?: string }) =>
+  getScopes: () => request.get<any, { code: number; data: PatScopeOption[] }>('/pats/scopes'),
+  create: (data: { name: string; expiresAt?: string; scopes?: string[] }) =>
     request.post<any, { code: number; data: PersonalAccessToken }>('/pats', data),
   remove: (id: number) => request.delete<any, { code: number }>(`/pats/${id}`),
 };

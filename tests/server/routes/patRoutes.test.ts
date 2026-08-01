@@ -39,7 +39,7 @@ describe('PAT 路由契约', () => {
       name: ' Cursor ', expiresAt: '2026-12-31T18:00:00+08:00',
     });
     expect(response.status).toBe(200);
-    expect(create).toHaveBeenCalledWith(6, 'Cursor', new Date('2026-12-31T10:00:00.000Z'));
+    expect(create).toHaveBeenCalledWith(6, 'Cursor', new Date('2026-12-31T10:00:00.000Z'), []);
     expect(AuditService.prototype.log).toHaveBeenCalledWith(expect.objectContaining({
       action: 'pat:create',
       targetId: 4,

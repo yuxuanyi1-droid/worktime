@@ -10,13 +10,16 @@ import { User } from '../entities/User';
 const PAT_RANDOM_LEN = 32;
 /** 列表展示用的明文前缀字符数（含 wpat_ 前缀） */
 const PREFIX_DISPLAY_LEN = 12;
+/** 未显式指定过期时间时 PAT 的默认有效期（天）：避免「永不过期」的全权限长期凭证 */
+export const PAT_DEFAULT_TTL_DAYS = 90;
 /**
  * 个人访问令牌服务。
  *
  * 每个用户可拥有多个 PAT。明文 `wpat_<32hex>` 只在创建时返回一次，
  * 数据库只保存 sha256（tokenHash）和脱敏前缀。
  *
- * PAT 权限默认继承用户全部权限（scope 字段预留收窄），鉴权复用 authMiddleware + 现有权限链路。
+ * PAT 权限默认继承用户全部权限；可传 scopes（权限码数组）收窄：
+ * 鉴权时取「用户全量权限 ∩ scopes」作为令牌实际权限（见 middleware/auth.ts）。
  */
 export class PatService {
   constructor(private manager?: EntityManager) {}
@@ -53,12 +56,14 @@ export class PatService {
    * 创建 PAT。
    * @param userId 所属用户
    * @param name 令牌名
-   * @param expiresAt 可选过期时间，空=永不过期
+   * @param expiresAt 可选过期时间；未传时默认 90 天（不提供「永不过期」选项）
+   * @param scopes 可选权限码收窄（null = 继承用户全部权限）
    */
   async createMine(
     userId: number,
     name: string,
     expiresAt?: Date,
+    scopes?: string[],
   ): Promise<PersonalAccessToken & { tokenPlain: string }> {
     const trimmed = (name || '').trim();
     if (!trimmed) {
@@ -67,14 +72,15 @@ export class PatService {
     if (trimmed.length > 100) {
       throw new BusinessError('令牌名称过长（最多 100 字符）');
     }
-    if (expiresAt && expiresAt.getTime() <= Date.now()) {
+    const effectiveExpiresAt = expiresAt ?? new Date(Date.now() + PAT_DEFAULT_TTL_DAYS * 24 * 60 * 60 * 1000);
+    if (effectiveExpiresAt.getTime() <= Date.now()) {
       throw new BusinessError('过期时间必须晚于当前时间');
     }
 
     // 每用户令牌上限需要“计数+写入”原子化；通过用户行锁串行化同一用户的并发创建。
     if (!this.manager?.queryRunner?.isTransactionActive) {
       return (this.manager?.connection ?? AppDataSource).transaction((manager) => (
-        new PatService(manager).createMine(userId, trimmed, expiresAt)
+        new PatService(manager).createMine(userId, trimmed, effectiveExpiresAt, scopes)
       ));
     }
 
@@ -97,9 +103,10 @@ export class PatService {
       tokenPlain: null,
       tokenHash: hashPat(plain),
       prefix: plain.slice(0, PREFIX_DISPLAY_LEN),
-      scopes: null,
+      // 逗号分隔存储；null = 继承全部权限
+      scopes: scopes && scopes.length ? [...new Set(scopes)].join(',') : null,
       lastUsedAt: null,
-      expiresAt: expiresAt ?? null,
+      expiresAt: effectiveExpiresAt,
     });
     const saved = await this.patRepo.save(pat);
     return Object.assign(saved, { tokenPlain: plain });

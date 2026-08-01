@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { AuthService } from '../services/authService';
 import { AuditService } from '../services/auditService';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { getClientIp } from '../middleware/security';
 import { getRedis, isRedisReady } from '../config/redis';
 import { isBusinessError } from '../utils/errors';
 import { parseOptionalEmail, parseOptionalPhone, parseString } from '../utils/validation';
@@ -12,13 +13,20 @@ const authService = new AuthService();
 const auditService = new AuditService();
 
 const loginFailures = new Map<string, { count: number; lastFailedAt: number }>();
+/** IP+用户名 维度：5 次失败锁定（防同一出口的分散爆破） */
 const MAX_LOGIN_FAILURES = 5;
+/**
+ * username-only 维度：20 次失败才锁定（防 XFF 轮换绕过 IP 维度）。
+ * 阈值高于 IP 维度：任意登录用户输错密码（或攻击者 5 次任意尝试）不应能锁死
+ * 其他已知用户名（登录 DoS）；20 次需要明显更高强度的针对性攻击。
+ */
+const MAX_USERNAME_LOGIN_FAILURES = 20;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 
 function getLoginKey(req: Request, username: string) {
   return crypto
     .createHash('sha256')
-    .update(`${req.ip || 'unknown'}\0${username.toLowerCase()}`)
+    .update(`${getClientIp(req)}\0${username.toLowerCase()}`)
     .digest('hex');
 }
 
@@ -76,9 +84,10 @@ router.post('/login', async (req, res, next) => {
 
     const loginKey = getLoginKey(req, username);
     const userKey = getUsernameKey(username);
-    // 双 key 锁定：IP+username 防分散爆破，username-only 防针对单一账号的 XFF 轮换绕过
+    // 双 key 锁定：IP+username 防分散爆破，username-only 防针对单一账号的 XFF 轮换绕过。
+    // username-only 阈值更高（20 次），避免任意失败请求即可锁死已知用户名（登录 DoS）。
     if ((await getLoginFailureCount(loginKey)) >= MAX_LOGIN_FAILURES
-      || (await getLoginFailureCount(userKey)) >= MAX_LOGIN_FAILURES) {
+      || (await getLoginFailureCount(userKey)) >= MAX_USERNAME_LOGIN_FAILURES) {
       return res.status(429).json({ code: 429, message: '登录失败次数过多，请稍后再试' });
     }
 
