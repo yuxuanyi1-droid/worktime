@@ -1060,7 +1060,13 @@ export class ApprovalService {
       .andWhere(`u.groupId IN (${quotaGroupIds.map((_, i) => `:gid${i}`).join(',')})`,
         Object.fromEntries(quotaGroupIds.map((id, i) => [`gid${i}`, id])))
       .andWhere('t.status IN (:...statuses)', { statuses: ['submitted', 'approved'] })
-      .select(['t.userId', 't.projectId', 't.date', 't.days', 't.submissionGroupId'])
+      // 显式别名：Postgres 下无别名 select(['t.userId']) 的 raw 列名带表前缀（t_userId），
+      // 直接取 r.userId 会得到 undefined，导致版本去重与求和全部失效。
+      .select('t.userId', 'userId')
+      .addSelect('t.projectId', 'projectId')
+      .addSelect('t.date', 'date')
+      .addSelect('t.days', 'days')
+      .addSelect('t.submissionGroupId', 'submissionGroupId')
       .getRawMany<{ userId: number; projectId: number; date: string; days: string | number; submissionGroupId: number | null }>();
     const maxGroupByKey = new Map<string, number>();
     for (const r of activeRows) {

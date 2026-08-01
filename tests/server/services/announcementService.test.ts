@@ -63,7 +63,8 @@ describe('AnnouncementService', () => {
       createQueryBuilder: vi.fn(() => ({
         select: vi.fn().mockReturnThis(),
         where: vi.fn().mockReturnThis(),
-        getRawMany: vi.fn().mockResolvedValue([{ id: 11 }, { id: 12 }]),
+        // 与修复后的实现一致（getMany；raw 键名陷阱见「标记已读走幂等 upsert」用例注释）
+        getMany: vi.fn().mockResolvedValue([{ id: 11 }, { id: 12 }]),
       })),
     };
     const readRepo = {
@@ -369,7 +370,9 @@ describe('AnnouncementService', () => {
     };
     const allQb: any = {
       select: vi.fn(() => allQb), where: vi.fn(() => allQb),
-      getRawMany: vi.fn().mockResolvedValue([{ id: 21 }]),
+      // 修复回归：实现已改用 getMany（getRawMany 在 Postgres 下返回带表别名前缀的
+      // a_id 键，取 .id 为 undefined 会插入 announcementId=NULL 违反 NOT NULL 约束）
+      getMany: vi.fn().mockResolvedValue([{ id: 21 }]),
     };
     const insertChains: any[] = [];
     const readRepo = {

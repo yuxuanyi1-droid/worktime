@@ -269,10 +269,12 @@ export class AnnouncementService {
   async markAllAsRead(userId: number, userDeptId: number | null, userGroupId: number | null) {
     const userGroupIds = await this.getUserGroupAncestorIds(userGroupId);
     const { where, params } = this.buildVisibleWhere(userId, userDeptId, userGroupIds);
+    // 用 getMany 而非 getRawMany：Postgres 下 raw 列名带表别名前缀（a_id），
+    // 取 .id 会得到 undefined，批量插入 announcementId=NULL 违反 NOT NULL 约束。
     const visible = await this.announceRepo.createQueryBuilder('a')
       .select(['a.id'])
       .where(where, params)
-      .getRawMany<{ id: number }>();
+      .getMany();
     const visibleIds = visible.map(announcement => announcement.id);
     if (visibleIds.length === 0) return;
 
