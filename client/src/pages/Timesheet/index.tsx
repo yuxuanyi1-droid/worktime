@@ -4,7 +4,7 @@ import {
   Card, Table, Button, Space, Select, InputNumber, Tag, message, Typography, Row, Col,
   DatePicker, Popconfirm, Input, Tooltip, Modal,
 } from 'antd';
-import { PlusOutlined, SendOutlined, DeleteOutlined, SaveOutlined, LeftOutlined, RightOutlined, CopyOutlined, EditOutlined, FileSearchOutlined } from '@ant-design/icons';
+import { PlusOutlined, SendOutlined, DeleteOutlined, SaveOutlined, LeftOutlined, RightOutlined, CopyOutlined, EditOutlined, FileSearchOutlined, HistoryOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import { timesheetApi } from '../../api/timesheet';
@@ -88,6 +88,11 @@ export default function TimesheetPage() {
     dayjs().startOf('month'), dayjs().endOf('month'),
   ]);
 
+  // 修改历史链 Modal 状态
+  const [chainModalVisible, setChainModalVisible] = useState(false);
+  const [chainData, setChainData] = useState<{ rootGroupId: number | null; groups: any[] } | null>(null);
+  const [chainLoading, setChainLoading] = useState(false);
+
   // 周表格相关状态
   const [currentWeekStart, setCurrentWeekStart] = useState<dayjs.Dayjs>(dayjs().isoWeekday(1));
   const [rows, setRows] = useState<WeekRow[]>([newRow()]);
@@ -168,6 +173,20 @@ export default function TimesheetPage() {
       setHistoryData([]);
     }
     setHistoryLoading(false);
+  };
+
+  const handleShowChain = async (targetId: number) => {
+    setChainLoading(true);
+    setChainModalVisible(true);
+    setChainData(null);
+    try {
+      const res = await timesheetApi.getModificationChain(targetId);
+      if (res.data) setChainData(res.data);
+    } catch (error) {
+      message.error(getErrorMessage(error, '获取修改历史链失败'));
+    } finally {
+      setChainLoading(false);
+    }
   };
 
   /** 加载当前周已有的工时数据（含已提交/已通过），填充到周表格 */
@@ -710,74 +729,66 @@ export default function TimesheetPage() {
       ),
     },
     {
-      title: '操作', key: 'action', width: 100,
+      title: '操作', key: 'action', width: 140,
       render: (_: any, record: HistoryGroup) => {
-        if (record.status === 'approved' || record.status === 'submitted') {
-          return (
-            <Button
-              type="link" size="small"
-              onClick={() => navigate(`/approval/detail/timesheet/${record.targetId}`)}
-            >
-              详情
-            </Button>
-          );
-        }
-        if (record.status === 'deprecated' || record.status === 'withdrawn') {
-          return (
-            <Button
-              type="link" size="small"
-              onClick={() => navigate(`/approval/detail/timesheet/${record.targetId}`)}
-            >
-              详情
-            </Button>
-          );
-        }
-        if (record.status === 'rejected') {
-          return (
-            <Button
-              type="link" size="small"
-              onClick={() => navigate(`/approval/detail/timesheet/${record.targetId}`)}
-            >
-              详情
-            </Button>
-          );
-        }
-        // 草稿
+        const isDraft = record.status === 'draft';
         return (
           <Space>
-            <Button
-              type="link" size="small"
-              onClick={() => setCurrentWeekStart(dayjs(record.weekStart))}
-            >
-              编辑
-            </Button>
-            <Popconfirm
-              title="确定删除该草稿？"
-              onConfirm={async () => {
-                try {
-                  const res = await timesheetApi.getMy({
-                    startDate: record.weekStart,
-                    endDate: record.weekEnd,
-                    status: 'draft',
-                    pageSize: 200,
-                  });
-                  if (res.data?.list) {
-                    for (const item of res.data.list) {
-                      if (item.projectId === record.projectId) {
-                        await timesheetApi.delete(item.id);
+            {!isDraft && (
+              <Button
+                type="link" size="small"
+                onClick={() => navigate(`/approval/detail/timesheet/${record.targetId}`)}
+              >
+                详情
+              </Button>
+            )}
+            {record.submissionGroupId && (
+              <Tooltip title="查看修改演进历史链">
+                <Button
+                  type="link" size="small" icon={<HistoryOutlined />}
+                  onClick={() => handleShowChain(record.targetId)}
+                >
+                  历史
+                </Button>
+              </Tooltip>
+            )}
+            {isDraft && (
+              <>
+                <Button
+                  type="link" size="small"
+                  onClick={() => setCurrentWeekStart(dayjs(record.weekStart))}
+                >
+                  编辑
+                </Button>
+                <Popconfirm
+                  title="确定删除该草稿？"
+                  onConfirm={async () => {
+                    try {
+                      const res = await timesheetApi.getMy({
+                        startDate: record.weekStart,
+                        endDate: record.weekEnd,
+                        status: 'draft',
+                        pageSize: 200,
+                      });
+                      if (res.data?.list) {
+                        for (const item of res.data.list) {
+                          if (item.projectId === record.projectId) {
+                            await timesheetApi.delete(item.id);
+                          }
+                        }
                       }
+                      message.success('草稿已删除');
+                      loadHistory();
+                      loadWeekDrafts();
+                    } catch (error) {
+                      message.error(getErrorMessage(error, '删除失败'));
                     }
-                  }
-                  message.success('草稿已删除');
-                  loadHistory();
-                  loadWeekDrafts();
-                } catch (error) {
-                  message.error(getErrorMessage(error, '删除失败'));
-                }
-              }}
-            >
-              <Button type="link" size="small" danger>删除</Button>
-            </Popconfirm>
+                  }}
+                >
+                  <Button type="link" size="small" danger>删除</Button>
+                </Popconfirm>
+              </>
+            )}
           </Space>
         );
       },
@@ -1052,6 +1063,84 @@ export default function TimesheetPage() {
           size="middle"
         />
       </Card>
+
+      {/* 修改历史演进链弹窗 */}
+      <Modal
+        title={
+          <Space>
+            <HistoryOutlined style={{ color: '#6B8F71' }} />
+            <span>工时修改演进链历史（完整版本追溯）</span>
+          </Space>
+        }
+        open={chainModalVisible}
+        onCancel={() => setChainModalVisible(false)}
+        footer={[
+          <Button key="close" onClick={() => setChainModalVisible(false)}>
+            关闭
+          </Button>,
+        ]}
+        width={720}
+      >
+        <Card loading={chainLoading} bordered={false} bodyStyle={{ padding: 8 }}>
+          {chainData && chainData.groups && chainData.groups.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {chainData.groups.map((group: any, idx: number) => (
+                <Card
+                  key={group.submissionGroupId}
+                  size="small"
+                  title={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                      <Space>
+                        <Tag color="blue">版本 v{idx + 1}</Tag>
+                        <Text strong>{group.projectName || `项目 #${group.projectId}`}</Text>
+                        <Tag color={statusMap[group.status]?.color}>{statusMap[group.status]?.label || group.status}</Tag>
+                      </Space>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {dayjs(group.updatedAt || group.createdAt).format('YYYY-MM-DD HH:mm:ss')}
+                      </Text>
+                    </div>
+                  }
+                  style={{ borderRadius: 8, borderColor: group.status === 'deprecated' ? '#f0f0f0' : '#d9d9d9' }}
+                >
+                  <Row gutter={[16, 8]}>
+                    <Col span={12}>
+                      <Text type="secondary">提交分组 ID: </Text>
+                      <Text code>{group.submissionGroupId}</Text>
+                      {group.previousGroupId && (
+                        <Text type="secondary" style={{ marginLeft: 8 }}>
+                          (前置 ID: {group.previousGroupId})
+                        </Text>
+                      )}
+                    </Col>
+                    <Col span={12} style={{ textAlign: 'right' }}>
+                      <Text type="secondary">本版本合计: </Text>
+                      <Text strong style={{ color: '#6B8F71' }}>{group.totalDays}</Text> 天
+                    </Col>
+                    {group.description && (
+                      <Col span={24}>
+                        <Text type="secondary">工作说明: </Text>
+                        <Text>{group.description}</Text>
+                      </Col>
+                    )}
+                    <Col span={24}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>填报明细：</Text>
+                      <Space wrap style={{ marginTop: 4 }}>
+                        {group.entries?.map((e: any) => (
+                          <Tag key={e.id} style={{ margin: 2 }}>
+                            {e.date}: {e.days} 天
+                          </Tag>
+                        ))}
+                      </Space>
+                    </Col>
+                  </Row>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            !chainLoading && <Text type="secondary">未找到对应的修改演进链记录</Text>
+          )}
+        </Card>
+      </Modal>
     </div>
   );
 }
