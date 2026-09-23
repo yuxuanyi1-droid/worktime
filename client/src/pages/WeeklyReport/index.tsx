@@ -5,7 +5,8 @@ import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import { weeklyReportApi } from '../../api/weeklyReport';
 import { timesheetApi } from '../../api/timesheet';
-import type { Timesheet, WeeklyReport } from '../../types';
+import { overtimeApi } from '../../api/overtime';
+import type { Timesheet, WeeklyReport, OvertimeApplication } from '../../types';
 import { Input } from 'antd';
 import { usePermission } from '../../hooks/usePermission';
 
@@ -90,6 +91,7 @@ export default function WeeklyReportPage() {
   const [content, setContent] = useState('');
   const [summary, setSummary] = useState('');
   const [weekHours, setWeekHours] = useState<any>(null);
+  const [overtimeList, setOvertimeList] = useState<OvertimeApplication[]>([]);
   const [saving, setSaving] = useState(false);
   const { hasPermission } = usePermission();
 
@@ -117,6 +119,10 @@ export default function WeeklyReportPage() {
       // 加载本周工时
       const hoursRes = await timesheetApi.getWeeklySummary(ws, we);
       if (hoursRes.data) setWeekHours(hoursRes.data);
+
+      // 加载本周加班记录
+      const otRes = await overtimeApi.getMy({ startDate: ws, endDate: we, pageSize: 50 });
+      if (otRes.data?.list) setOvertimeList(otRes.data.list);
     } catch (e: any) {
       message.error(e?.response?.data?.message || '周报数据加载失败');
     }
@@ -267,7 +273,7 @@ export default function WeeklyReportPage() {
         <Col xs={24} lg={8}>
           <Card title="本周工时汇总" style={{ borderRadius: 12, marginBottom: 16 }}>
             <Statistic title="总工时" value={weekHours?.totalDays || 0} suffix="天" />
-            <Divider />
+            <Divider style={{ margin: '12px 0' }} />
             <Title level={5}>项目分布</Title>
             <List
               size="small"
@@ -278,6 +284,28 @@ export default function WeeklyReportPage() {
                   <span>{val?.days ?? val}天</span>
                 </List.Item>
               )}
+            />
+          </Card>
+
+          <Card title="本周加班明细" style={{ borderRadius: 12, marginBottom: 16 }}>
+            <Statistic
+              title="加班总时长"
+              value={overtimeList.reduce((acc, cur) => acc + (Number(cur.days) || 0), 0)}
+              suffix="天"
+            />
+            <Divider style={{ margin: '12px 0' }} />
+            <List
+              size="small"
+              dataSource={overtimeList}
+              renderItem={(ot) => (
+                <List.Item key={ot.id}>
+                  <div>
+                    <div><strong>{ot.date}</strong> ({ot.days}天)</div>
+                    <div style={{ fontSize: 12, color: '#8c8c8c' }}>{ot.reason || '无加班说明'}</div>
+                  </div>
+                </List.Item>
+              )}
+              locale={{ emptyText: '本周无加班记录' }}
             />
           </Card>
         </Col>

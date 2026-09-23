@@ -12,4 +12,5 @@ export const timesheetApi = {
   submit: (ids: number[]) => request.post<any, { code: number }>('/timesheets/submit', { ids }),
   submitByRows: (rows: any[]) => request.post<any, { code: number }>('/timesheets/submit-rows', { rows }),
   modifySubmitted: (rows: any[]) => request.post<any, { code: number }>('/timesheets/modify', { rows }),
+  getModificationChain: (id: number) => request.get<any, { code: number; data: { rootGroupId: number | null; groups: any[] } }>(`/timesheets/chain/${id}`),
 };
