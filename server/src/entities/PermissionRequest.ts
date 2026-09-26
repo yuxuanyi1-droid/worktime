@@ -42,7 +42,7 @@ export class PermissionRequest {
   @Column({ type: 'text' })
   reason!: string;
 
-  @Column({ type: 'timestamp', nullable: true })
+  @Column({ type: 'datetime', nullable: true })
   expiresAt!: Date | null;
 
   @Column({ type: 'varchar', length: 20, default: 'draft' })

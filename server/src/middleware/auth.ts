@@ -23,6 +23,8 @@ export interface AuthRequest extends Request {
   userPermissions?: Set<string>;
   /** 当前请求的认证方式：jwt（登录会话）或 pat（个人访问令牌，用于 pi skill / 外部工具） */
   authMethod?: 'jwt' | 'pat';
+  /** 当前 PAT 是否设置了特定 scopes 权限限制 */
+  isPatRestricted?: boolean;
 }
 
 /**
@@ -136,7 +138,15 @@ async function authenticatePat(token: string, req: AuthRequest, res: Response, n
     realName: fullUser.realName,
     roles: fullUser.roles.map(r => r.name),
   };
-  req.userPermissions = await accessPolicy.getPermissionCodesForLoadedUser(fullUser);
+  const userPerms = await accessPolicy.getPermissionCodesForLoadedUser(fullUser);
+  if (pat.scopes && pat.scopes.trim()) {
+    const allowedScopes = new Set(pat.scopes.split(',').map(s => s.trim()).filter(Boolean));
+    req.userPermissions = new Set([...userPerms].filter(p => allowedScopes.has(p)));
+    req.isPatRestricted = true;
+  } else {
+    req.userPermissions = userPerms;
+    req.isPatRestricted = false;
+  }
   req.authMethod = 'pat';
 
   return next();
