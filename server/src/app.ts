@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import path from 'path';
 import './config/env'; // 加载根 .env（端口）+ server/.env（业务配置）
 import pinoHttp from 'pino-http';
@@ -53,6 +54,8 @@ const v1Base = `${BASE_PATH}/api/v1`;
 let dbConnected = false;
 
 // 中间件（顺序重要）
+// 安全防护头（helmet）
+app.use(helmet({ contentSecurityPolicy: false }));
 // 反向代理后取真实 IP（限流依赖此设置）
 app.set('trust proxy', 1);
 // HTTP 请求日志（pino-http，结构化）

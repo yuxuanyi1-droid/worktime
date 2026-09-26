@@ -86,14 +86,18 @@ function buildDataSourceOptions(): DataSourceOptions {
     };
   }
 
-  // 默认 sqlite
-  const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db');
+  // 默认 sqlite（测试环境强制使用内存库并自动同步 schema）
+  const isTest = process.env.NODE_ENV === 'test';
+  const dbPath = isTest ? ':memory:' : (process.env.DB_PATH || path.join(__dirname, '../../data/worktime.db'));
   return {
     ...common,
+    synchronize: isTest || shouldSynchronize,
     type: 'better-sqlite3',
     database: dbPath,
     prepareDatabase: (db: any) => {
-      db.pragma('journal_mode = WAL');
+      if (!isTest) {
+        db.pragma('journal_mode = WAL');
+      }
       db.pragma('foreign_keys = ON');
     },
   };

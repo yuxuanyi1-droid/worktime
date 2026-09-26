@@ -31,7 +31,7 @@ export const requirePermission = (...requiredPermissions: string[]) => {
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       if (!req.user) return res.status(401).json({ code: 401, message: '未登录' });
-      if (isAdmin(req)) return next();
+      if (isAdmin(req) && !req.isPatRestricted) return next();
 
       const perms = await getUserPermissions(req);
       const hasPermission = requiredPermissions.some(p => perms.has(p));
@@ -52,7 +52,7 @@ export const requireAllPermissions = (...requiredPermissions: string[]) => {
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       if (!req.user) return res.status(401).json({ code: 401, message: '未登录' });
-      if (isAdmin(req)) return next();
+      if (isAdmin(req) && !req.isPatRestricted) return next();
 
       const perms = await getUserPermissions(req);
       const hasAll = requiredPermissions.every(p => perms.has(p));

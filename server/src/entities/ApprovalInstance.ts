@@ -84,10 +84,10 @@ export class ApprovalInstance {
     groupName?: string;
   } | null;
 
-  @Column({ type: 'timestamp' })
+  @Column({ type: 'datetime' })
   submittedAt!: Date;
 
-  @Column({ type: 'timestamp', nullable: true })
+  @Column({ type: 'datetime', nullable: true })
   finishedAt!: Date | null;
 
   @OneToMany(() => ApprovalTask, task => task.instance)
